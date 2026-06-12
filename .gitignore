@@ -1,0 +1,5 @@
+/target
+.env
+*.optimized.wasm
+.stellar/
+test_snapshots/

@@ -1,0 +1,17 @@
+[package]
+name = "hiresettle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "HireSettle — Milestone-based recruiter fee escrow on Stellar Soroban"
+authors = ["HireSettle Team"]
+
+[lib]
+crate-type = ["cdylib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
