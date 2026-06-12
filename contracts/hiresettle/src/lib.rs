@@ -10,7 +10,7 @@ use soroban_sdk::{
 
 /// The status of a single milestone in the engagement
 #[contracttype]
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq)]
 pub enum MilestoneStatus {
     /// Milestone is not yet available (retention window not elapsed)
     Locked,
@@ -57,7 +57,7 @@ pub struct Milestone {
 
 /// The overall status of a recruitment engagement
 #[contracttype]
-#[derive(Clone, PartialEq, Debug)]
+#[derive(Clone, PartialEq)]
 pub enum EngagementStatus {
     /// Active — milestones in progress
     Active,
@@ -756,7 +756,37 @@ impl HireSettleContract {
             && env.ledger().sequence() >= milestone.valid_after_ledger
     }
 
-    
+    /// Get ledgers remaining until a Locked milestone can be unlocked.
+    /// Returns 0 if already unlockable.
+    pub fn ledgers_until_unlock(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> u32 {
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let milestone = engagement
+            .milestones
+            .get(milestone_index)
+            .unwrap_or_else(|| panic!("invalid milestone index"));
+
+        let current = env.ledger().sequence();
+        if current >= milestone.valid_after_ledger {
+            0
+        } else {
+            milestone.valid_after_ledger - current
+        }
+    }
+
+    // ----------------------------------------------------------
+    // INTERNAL HELPERS
+    // ----------------------------------------------------------
+
+    fn get_engagement_internal(env: &Env, engagement_id: &String) -> Engagement {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Engagement(engagement_id.clone()))
+            .unwrap_or_else(|| panic!("engagement not found"))
+    }
 }
 
 mod test;
