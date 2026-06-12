@@ -724,6 +724,37 @@ impl HireSettleContract {
         Self::get_engagement_internal(&env, &engagement_id)
     }
 
+    /// Get a single milestone from an engagement
+    pub fn get_milestone(env: Env, engagement_id: String, milestone_index: u32) -> Milestone {
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        engagement
+            .milestones
+            .get(milestone_index)
+            .unwrap_or_else(|| panic!("invalid milestone index"))
+    }
+
+    /// Get the amount of USDC still locked in escrow
+    pub fn get_escrow_balance(env: Env, engagement_id: String) -> i128 {
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        engagement.total_amount - engagement.released_amount
+    }
+
+    /// Check whether a Locked retention milestone can be unlocked now.
+    /// Returns true if `current_ledger >= milestone.valid_after_ledger`.
+    pub fn is_milestone_unlockable(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> bool {
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let milestone = engagement
+            .milestones
+            .get(milestone_index)
+            .unwrap_or_else(|| panic!("invalid milestone index"));
+
+        milestone.status == MilestoneStatus::Locked
+            && env.ledger().sequence() >= milestone.valid_after_ledger
+    }
 
     
 }
