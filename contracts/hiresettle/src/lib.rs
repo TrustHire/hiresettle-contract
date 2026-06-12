@@ -661,6 +661,68 @@ impl HireSettleContract {
         );
     }
 
+    // ----------------------------------------------------------
+    // CANCEL ENGAGEMENT
+    // ----------------------------------------------------------
+
+    /// Cancel the engagement before any milestones are confirmed.
+    /// Returns the full locked amount to the company.
+    /// Not callable once the Placement milestone has been confirmed —
+    /// use `request_replacement` instead.
+    ///
+    /// # Arguments
+    /// - `company`         — must match the engagement's company
+    /// - `engagement_id`   — the engagement to cancel
+    pub fn cancel_engagement(env: Env, company: Address, engagement_id: String) {
+        company.require_auth();
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::Active {
+            panic!("engagement is not active");
+        }
+
+        if company != engagement.company {
+            panic!("unauthorized");
+        }
+
+        // Disallow cancellation if any milestone has been confirmed
+        for i in 0..engagement.milestones.len() {
+            let m = engagement.milestones.get(i).unwrap();
+            if m.status == MilestoneStatus::Confirmed || m.status == MilestoneStatus::Resolved {
+                panic!("cannot cancel: milestones already confirmed — use request_replacement");
+            }
+        }
+
+        // Refund entire locked amount to company
+        let refund = engagement.total_amount - engagement.released_amount;
+        let token_client = token::Client::new(&env, &engagement.token);
+        token_client.transfer(
+            &env.current_contract_address(),
+            &engagement.company,
+            &refund,
+        );
+
+        engagement.status = EngagementStatus::Cancelled;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+
+        env.events().publish(
+            (Symbol::new(&env, "engagement_cancelled"), engagement_id.clone()),
+            refund,
+        );
+    }
+
+    // ----------------------------------------------------------
+    // READ-ONLY QUERIES
+    // ----------------------------------------------------------
+
+    /// Get the full engagement record by ID
+    pub fn get_engagement(env: Env, engagement_id: String) -> Engagement {
+        Self::get_engagement_internal(&env, &engagement_id)
+    }
 
 
     
