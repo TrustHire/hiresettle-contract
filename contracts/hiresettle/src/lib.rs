@@ -10,7 +10,7 @@ use soroban_sdk::{
 
 /// The status of a single milestone in the engagement
 #[contracttype]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum MilestoneStatus {
     /// Milestone is not yet available (retention window not elapsed)
     Locked,
@@ -57,7 +57,7 @@ pub struct Milestone {
 
 /// The overall status of a recruitment engagement
 #[contracttype]
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum EngagementStatus {
     /// Active — milestones in progress
     Active,
