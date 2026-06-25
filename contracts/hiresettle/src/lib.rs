@@ -97,6 +97,22 @@ pub struct Engagement {
     pub status: EngagementStatus,
 }
 
+/// Lightweight summary of an engagement for paginated list views.
+/// Omits full milestone details to reduce data transfer.
+#[contracttype]
+#[derive(Clone)]
+pub struct EngagementSummary {
+    pub id: String,
+    pub job_title: String,
+    pub company: Address,
+    pub recruiter: Address,
+    pub total_amount: i128,
+    pub released_amount: i128,
+    pub status: EngagementStatus,
+    pub milestone_count: u32,
+    pub created_at_ledger: u32,
+}
+
 // ============================================================
 // STORAGE KEYS
 // ============================================================
@@ -105,6 +121,7 @@ pub struct Engagement {
 pub enum DataKey {
     Engagement(String),
     Admin,
+    PendingArbiter(String),
 }
 
 // ============================================================
@@ -665,20 +682,25 @@ impl HireSettleContract {
     // CANCEL ENGAGEMENT
     // ----------------------------------------------------------
 
-    /// Cancel the engagement before any milestones are confirmed.
-    /// Returns the full locked amount to the company.
-    /// Not callable once the Placement milestone has been confirmed —
-    /// use `request_replacement` instead.
+    /// Cancel the engagement at any point, refunding the unreleased escrow balance to
+    /// the company while leaving already-confirmed milestone payouts intact.
+    ///
+    /// Requires mutual consent: both company and recruiter must authorise this call.
+    /// Previously released funds are never clawed back; refund = total - released.
     ///
     /// # Arguments
     /// - `company`         — must match the engagement's company
+    /// - `recruiter`       — must match the engagement's recruiter (mutual consent)
     /// - `engagement_id`   — the engagement to cancel
-    pub fn cancel_engagement(env: Env, company: Address, engagement_id: String) {
+    pub fn cancel_engagement(env: Env, company: Address, recruiter: Address, engagement_id: String) {
         company.require_auth();
+        recruiter.require_auth();
 
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
 
-        if engagement.status != EngagementStatus::Active {
+        if engagement.status != EngagementStatus::Active
+            && engagement.status != EngagementStatus::ReplacementRequested
+        {
             panic!("engagement is not active");
         }
 
@@ -686,15 +708,11 @@ impl HireSettleContract {
             panic!("unauthorized");
         }
 
-        // Disallow cancellation if any milestone has been confirmed
-        for i in 0..engagement.milestones.len() {
-            let m = engagement.milestones.get(i).unwrap();
-            if m.status == MilestoneStatus::Confirmed || m.status == MilestoneStatus::Resolved {
-                panic!("cannot cancel: milestones already confirmed — use request_replacement");
-            }
+        if recruiter != engagement.recruiter {
+            panic!("unauthorized");
         }
 
-        // Refund entire locked amount to company
+        // Refund only the unreleased balance; confirmed payouts remain with the recruiter
         let refund = engagement.total_amount - engagement.released_amount;
         let token_client = token::Client::new(&env, &engagement.token);
         token_client.transfer(
@@ -775,6 +793,108 @@ impl HireSettleContract {
         } else {
             milestone.valid_after_ledger - current
         }
+    }
+
+    /// Get total amount released to the recruiter across all milestones.
+    /// Returns 0 for a new engagement with no confirmed milestones.
+    pub fn get_total_released(env: Env, engagement_id: String) -> i128 {
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        engagement.released_amount
+    }
+
+    /// Get a lightweight summary of an engagement for paginated list views.
+    /// Contains only the fields the list UI needs — omits full milestone details.
+    pub fn get_engagement_summary(env: Env, engagement_id: String) -> EngagementSummary {
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        EngagementSummary {
+            id: engagement.id,
+            job_title: engagement.job_title,
+            company: engagement.company,
+            recruiter: engagement.recruiter,
+            total_amount: engagement.total_amount,
+            released_amount: engagement.released_amount,
+            status: engagement.status,
+            milestone_count: engagement.milestones.len(),
+            created_at_ledger: engagement.created_at_ledger,
+        }
+    }
+
+    // ----------------------------------------------------------
+    // ARBITER SUCCESSION
+    // ----------------------------------------------------------
+
+    /// Current arbiter nominates a successor address.
+    /// The successor must call `claim_arbiter` to complete the transfer.
+    /// Old arbiter retains their role until the nominee claims.
+    ///
+    /// # Arguments
+    /// - `arbiter`         — current arbiter (must sign)
+    /// - `engagement_id`   — the engagement
+    /// - `successor`       — address of the nominated successor
+    pub fn nominate_arbiter_successor(
+        env: Env,
+        arbiter: Address,
+        engagement_id: String,
+        successor: Address,
+    ) {
+        arbiter.require_auth();
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if arbiter != engagement.arbiter {
+            panic!("unauthorized");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingArbiter(engagement_id.clone()), &successor);
+
+        env.storage().persistent().extend_ttl(
+            &DataKey::PendingArbiter(engagement_id.clone()),
+            100_000,
+            6_300_000,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "arbiter_nominated"), engagement_id.clone()),
+            successor,
+        );
+    }
+
+    /// Nominated successor claims the arbiter role, completing the succession.
+    /// Rejects any address that does not match the pending nomination.
+    ///
+    /// # Arguments
+    /// - `nominee`         — must match the address stored by `nominate_arbiter_successor`
+    /// - `engagement_id`   — the engagement
+    pub fn claim_arbiter(env: Env, nominee: Address, engagement_id: String) {
+        nominee.require_auth();
+
+        let pending: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingArbiter(engagement_id.clone()))
+            .unwrap_or_else(|| panic!("no pending arbiter nomination"));
+
+        if nominee != pending {
+            panic!("unauthorized");
+        }
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+        engagement.arbiter = nominee.clone();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PendingArbiter(engagement_id.clone()));
+
+        env.events().publish(
+            (Symbol::new(&env, "arbiter_claimed"), engagement_id.clone()),
+            nominee,
+        );
     }
 
     // ----------------------------------------------------------
