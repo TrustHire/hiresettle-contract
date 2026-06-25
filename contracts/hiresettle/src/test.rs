@@ -950,3 +950,287 @@ fn test_claim_without_nomination_panics() {
     // No nomination made — claim should panic
     client.claim_arbiter(&new_arbiter, &eng_id);
 }
+
+// ============================================================
+// #1-4 — AMENDMENT FEATURES
+// ============================================================
+
+// Tests for #1: Amendment log
+// Tests for #2: Amendment mutual-consent mechanism
+// Tests for #3: Amendment TTL
+// Tests for #4: Emit amendment events
+
+#[test]
+fn test_amendment_proposal_basic() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-AMEND-BASIC");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AMEND-BASIC",
+    );
+
+    // Company proposes to change milestone 0 from 30% to 25%
+    client.propose_amendment(&company, &eng_id, &0, &25);
+
+    // Proposal should be stored
+    // We verify by checking get_amendment_log is empty (proposal not yet accepted)
+    let log = client.get_amendment_log(&eng_id, &0);
+    assert_eq!(log.len(), 0);
+}
+
+#[test]
+fn test_amendment_accept_changes_payment_percent() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-AMEND-ACCEPT");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AMEND-ACCEPT",
+    );
+
+    let original_milestone = client.get_milestone(&eng_id, &0);
+    assert_eq!(original_milestone.payment_percent, 30);
+
+    // Company proposes 25%
+    client.propose_amendment(&company, &eng_id, &0, &25);
+
+    // Recruiter accepts
+    client.accept_amendment(&recruiter, &eng_id, &0);
+
+    // Milestone should now be 25%
+    let updated_milestone = client.get_milestone(&eng_id, &0);
+    assert_eq!(updated_milestone.payment_percent, 25);
+
+    // Amendment should be logged
+    let log = client.get_amendment_log(&eng_id, &0);
+    assert_eq!(log.len(), 1);
+
+    let entry = log.get(0).unwrap();
+    assert_eq!(entry.proposer, company);
+    assert_eq!(entry.old_payment_percent, 30);
+    assert_eq!(entry.new_payment_percent, 25);
+    assert!(entry.ledger > 0);
+}
+
+#[test]
+fn test_amendment_accept_multiple_times() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-AMEND-MULTI");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AMEND-MULTI",
+    );
+
+    // First amendment: 30% → 25%
+    client.propose_amendment(&company, &eng_id, &0, &25);
+    client.accept_amendment(&recruiter, &eng_id, &0);
+
+    // Second amendment: 25% → 20%
+    client.propose_amendment(&recruiter, &eng_id, &0, &20);
+    client.accept_amendment(&company, &eng_id, &0);
+
+    let log = client.get_amendment_log(&eng_id, &0);
+    assert_eq!(log.len(), 2);
+
+    let entry1 = log.get(0).unwrap();
+    assert_eq!(entry1.old_payment_percent, 30);
+    assert_eq!(entry1.new_payment_percent, 25);
+
+    let entry2 = log.get(1).unwrap();
+    assert_eq!(entry2.old_payment_percent, 25);
+    assert_eq!(entry2.new_payment_percent, 20);
+
+    let milestone = client.get_milestone(&eng_id, &0);
+    assert_eq!(milestone.payment_percent, 20);
+}
+
+#[test]
+fn test_amendment_log_cap_at_20() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-AMEND-CAP");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AMEND-CAP",
+    );
+
+    // Make 25 amendments (should cap at 20, oldest evicted)
+    for i in 0..25 {
+        let percent = 30u32 - ((i % 20) as u32);
+        if i % 2 == 0 {
+            client.propose_amendment(&company, &eng_id, &0, &percent);
+            client.accept_amendment(&recruiter, &eng_id, &0);
+        } else {
+            client.propose_amendment(&recruiter, &eng_id, &0, &percent);
+            client.accept_amendment(&company, &eng_id, &0);
+        }
+    }
+
+    let log = client.get_amendment_log(&eng_id, &0);
+    assert_eq!(log.len(), 20);
+}
+
+#[test]
+#[should_panic(expected = "proposer cannot accept their own proposal")]
+fn test_amendment_proposer_cannot_accept() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-AMEND-SELF");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AMEND-SELF",
+    );
+
+    client.propose_amendment(&company, &eng_id, &0, &25);
+    // Company tries to accept their own proposal
+    client.accept_amendment(&company, &eng_id, &0);
+}
+
+#[test]
+fn test_amendment_reject_clears_proposal() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-AMEND-REJECT");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AMEND-REJECT",
+    );
+
+    client.propose_amendment(&company, &eng_id, &0, &25);
+
+    // Recruiter rejects
+    client.reject_amendment(&recruiter, &eng_id, &0);
+
+    // Amendment log should still be empty
+    let log = client.get_amendment_log(&eng_id, &0);
+    assert_eq!(log.len(), 0);
+
+    // Milestone should be unchanged
+    let milestone = client.get_milestone(&eng_id, &0);
+    assert_eq!(milestone.payment_percent, 30);
+}
+
+#[test]
+#[should_panic(expected = "proposer cannot reject their own proposal")]
+fn test_amendment_proposer_cannot_reject() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-AMEND-REJECT-SELF");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AMEND-REJECT-SELF",
+    );
+
+    client.propose_amendment(&company, &eng_id, &0, &25);
+    // Company tries to reject their own proposal
+    client.reject_amendment(&company, &eng_id, &0);
+}
+
+#[test]
+fn test_amendment_ttl_default() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let ttl = client.get_amendment_ttl();
+    assert_eq!(ttl, 17_280); // ~1 day
+}
+
+#[test]
+fn test_amendment_ttl_admin_set() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Company was set as admin in setup
+    client.set_amendment_ttl(&company, &8640); // ~12 hours
+
+    let ttl = client.get_amendment_ttl();
+    assert_eq!(ttl, 8640);
+}
+
+#[test]
+#[should_panic(expected = "amendment_expired")]
+fn test_amendment_expire_on_accept() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-AMEND-EXPIRE");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AMEND-EXPIRE",
+    );
+
+    // Set a short TTL for testing (2 days worth of ledgers)
+    client.set_amendment_ttl(&company, &(2 * 17_280));
+
+    client.propose_amendment(&company, &eng_id, &0, &25);
+
+    // Advance ledgers beyond TTL (3 days)
+    env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+        timestamp: 0,
+        protocol_version: 22,
+        sequence_number: env.ledger().sequence() + (3 * 17_280),
+        network_id: Default::default(),
+        base_reserve: 5_000_000,
+        min_temp_entry_ttl: 16,
+        min_persistent_entry_ttl: 100_000,
+        max_entry_ttl: 6_300_000,
+    });
+
+    // Try to accept expired proposal — should panic
+    client.accept_amendment(&recruiter, &eng_id, &0);
+}
+
+#[test]
+fn test_amendment_overwrite_pending_proposal() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-AMEND-OVERWRITE");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AMEND-OVERWRITE",
+    );
+
+    // First proposal: 30% → 25%
+    client.propose_amendment(&company, &eng_id, &0, &25);
+
+    // Second proposal overwrites: 30% → 20%
+    client.propose_amendment(&company, &eng_id, &0, &20);
+
+    // Accept the second proposal (20%)
+    client.accept_amendment(&recruiter, &eng_id, &0);
+
+    let milestone = client.get_milestone(&eng_id, &0);
+    assert_eq!(milestone.payment_percent, 20);
+
+    let log = client.get_amendment_log(&eng_id, &0);
+    assert_eq!(log.len(), 1);
+    let entry = log.get(0).unwrap();
+    assert_eq!(entry.new_payment_percent, 20);
+}
+
+#[test]
+fn test_amendment_both_parties_can_propose() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-AMEND-BOTH");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AMEND-BOTH",
+    );
+
+    // Recruiter proposes first
+    client.propose_amendment(&recruiter, &eng_id, &0, &35);
+    client.accept_amendment(&company, &eng_id, &0);
+
+    assert_eq!(client.get_milestone(&eng_id, &0).payment_percent, 35);
+
+    // Company proposes next
+    client.propose_amendment(&company, &eng_id, &0, &40);
+    client.accept_amendment(&recruiter, &eng_id, &0);
+
+    assert_eq!(client.get_milestone(&eng_id, &0).payment_percent, 40);
+
+    let log = client.get_amendment_log(&eng_id, &0);
+    assert_eq!(log.len(), 2);
+}
