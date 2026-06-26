@@ -113,6 +113,20 @@ pub struct EngagementSummary {
     pub created_at_ledger: u32,
 }
 
+/// A pending amendment proposal to change a milestone's payment percentage.
+/// Stored per (engagement_id, milestone_index) and expires after a TTL.
+#[contracttype]
+#[derive(Clone)]
+pub struct PendingAmendment {
+    pub proposer: Address,
+    pub new_payment_percent: u32,
+    pub proposed_at_ledger: u32,
+    pub expires_at_ledger: u32,
+}
+
+/// Ledger-based TTL for amendment proposals (7 days × 17_280 ledgers/day)
+const AMENDMENT_TTL_LEDGERS: u32 = 7 * 17_280;
+
 // ============================================================
 // STORAGE KEYS
 // ============================================================
@@ -122,6 +136,7 @@ pub enum DataKey {
     Engagement(String),
     Admin,
     PendingArbiter(String),
+    PendingAmendment(String, u32),
 }
 
 // ============================================================
@@ -734,6 +749,172 @@ impl HireSettleContract {
     }
 
     // ----------------------------------------------------------
+    // AMENDMENT PROPOSALS
+    // ----------------------------------------------------------
+
+    /// Propose a change to a milestone's payment percentage.
+    /// Either the company or the recruiter may propose. The proposal
+    /// automatically expires after `AMENDMENT_TTL_LEDGERS` ledgers (~7 days).
+    ///
+    /// Only milestones that are not yet Confirmed or Resolved can be amended.
+    ///
+    /// # Arguments
+    /// - `proposer`            — must be the engagement's company or recruiter
+    /// - `engagement_id`       — the engagement
+    /// - `milestone_index`     — which milestone to amend
+    /// - `new_payment_percent` — proposed new percentage (0-100)
+    pub fn propose_amendment(
+        env: Env,
+        proposer: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        new_payment_percent: u32,
+    ) {
+        proposer.require_auth();
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::Active {
+            panic!("engagement is not active");
+        }
+
+        if proposer != engagement.company && proposer != engagement.recruiter {
+            panic!("unauthorized");
+        }
+
+        if new_payment_percent > 100 {
+            panic!("payment percent must be between 0 and 100");
+        }
+
+        let milestone = engagement
+            .milestones
+            .get(milestone_index)
+            .unwrap_or_else(|| panic!("invalid milestone index"));
+
+        if milestone.status == MilestoneStatus::Confirmed
+            || milestone.status == MilestoneStatus::Resolved
+        {
+            panic!("cannot amend a confirmed milestone");
+        }
+
+        let current_ledger = env.ledger().sequence();
+
+        let pending = PendingAmendment {
+            proposer: proposer.clone(),
+            new_payment_percent,
+            proposed_at_ledger: current_ledger,
+            expires_at_ledger: current_ledger + AMENDMENT_TTL_LEDGERS,
+        };
+
+        let key = DataKey::PendingAmendment(engagement_id.clone(), milestone_index);
+        env.storage().persistent().set(&key, &pending);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (Symbol::new(&env, "amendment_proposed"), engagement_id),
+            (milestone_index, proposer, new_payment_percent),
+        );
+    }
+
+    /// Accept a pending amendment and apply the new payment percentage.
+    /// Must be called by the engagement participant who did NOT propose it
+    /// (if company proposed, recruiter must accept, and vice versa).
+    ///
+    /// # Arguments
+    /// - `acceptor`         — must be the non-proposing party
+    /// - `engagement_id`    — the engagement
+    /// - `milestone_index`  — the milestone being amended
+    pub fn accept_amendment(
+        env: Env,
+        acceptor: Address,
+        engagement_id: String,
+        milestone_index: u32,
+    ) {
+        acceptor.require_auth();
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::Active {
+            panic!("engagement is not active");
+        }
+
+        if acceptor != engagement.company && acceptor != engagement.recruiter {
+            panic!("unauthorized");
+        }
+
+        let key = DataKey::PendingAmendment(engagement_id.clone(), milestone_index);
+        let pending: PendingAmendment = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("no pending amendment"));
+
+        if acceptor == pending.proposer {
+            panic!("proposer cannot accept their own amendment");
+        }
+
+        let current_ledger = env.ledger().sequence();
+        if current_ledger > pending.expires_at_ledger {
+            env.storage().persistent().remove(&key);
+            panic!("amendment has expired");
+        }
+
+        // Apply the amendment
+        let mut milestone = engagement.milestones.get(milestone_index).unwrap();
+        milestone.payment_percent = pending.new_payment_percent;
+        engagement.milestones.set(milestone_index, milestone);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+
+        env.storage().persistent().remove(&key);
+
+        env.events().publish(
+            (Symbol::new(&env, "amendment_accepted"), engagement_id),
+            (milestone_index, pending.new_payment_percent),
+        );
+    }
+
+    /// Reject or cancel a pending amendment without applying it.
+    /// Either engagement participant may reject, including the proposer.
+    ///
+    /// # Arguments
+    /// - `rejector`         — must be the engagement's company or recruiter
+    /// - `engagement_id`    — the engagement
+    /// - `milestone_index`  — the milestone whose amendment is being rejected
+    pub fn reject_amendment(
+        env: Env,
+        rejector: Address,
+        engagement_id: String,
+        milestone_index: u32,
+    ) {
+        rejector.require_auth();
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if rejector != engagement.company && rejector != engagement.recruiter {
+            panic!("unauthorized");
+        }
+
+        let key = DataKey::PendingAmendment(engagement_id.clone(), milestone_index);
+
+        env.storage()
+            .persistent()
+            .get::<_, PendingAmendment>(&key)
+            .unwrap_or_else(|| panic!("no pending amendment"));
+
+        env.storage().persistent().remove(&key);
+
+        env.events().publish(
+            (Symbol::new(&env, "amendment_rejected"), engagement_id),
+            milestone_index,
+        );
+    }
+
+    // ----------------------------------------------------------
     // READ-ONLY QUERIES
     // ----------------------------------------------------------
 
@@ -816,6 +997,23 @@ impl HireSettleContract {
             status: engagement.status,
             milestone_count: engagement.milestones.len(),
             created_at_ledger: engagement.created_at_ledger,
+        }
+    }
+
+    /// Get the current pending amendment for a milestone, if one exists
+    /// and has not expired. Returns `None` when there is no active proposal
+    /// or the proposal's TTL has elapsed.
+    pub fn get_pending_amendment(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Option<PendingAmendment> {
+        let key = DataKey::PendingAmendment(engagement_id, milestone_index);
+        match env.storage().persistent().get::<_, PendingAmendment>(&key) {
+            Some(amendment) if env.ledger().sequence() <= amendment.expires_at_ledger => {
+                Some(amendment)
+            }
+            _ => None,
         }
     }
 

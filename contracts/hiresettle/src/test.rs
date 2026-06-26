@@ -950,3 +950,112 @@ fn test_claim_without_nomination_panics() {
     // No nomination made — claim should panic
     client.claim_arbiter(&new_arbiter, &eng_id);
 }
+
+// ============================================================
+// #52 — get_pending_amendment
+// ============================================================
+
+#[test]
+fn test_get_pending_amendment_active() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-AMD-ACTIVE");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AMD-ACTIVE",
+    );
+
+    // Company proposes to change milestone 0 from 30% to 50%
+    client.propose_amendment(&company, &eng_id, &0, &50);
+
+    let pending = client.get_pending_amendment(&eng_id, &0).unwrap();
+
+    assert_eq!(pending.proposer, company);
+    assert_eq!(pending.new_payment_percent, 50);
+    assert!(pending.proposed_at_ledger > 0);
+    assert!(pending.expires_at_ledger > pending.proposed_at_ledger);
+
+    // Milestone 1 should have no pending amendment
+    let pending_m1 = client.get_pending_amendment(&eng_id, &1);
+    assert!(pending_m1.is_none());
+}
+
+#[test]
+fn test_get_pending_amendment_after_accept() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-AMD-ACCEPT");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AMD-ACCEPT",
+    );
+
+    // Company proposes amendment, recruiter accepts
+    client.propose_amendment(&company, &eng_id, &0, &50);
+    client.accept_amendment(&recruiter, &eng_id, &0);
+
+    // No pending amendment after acceptance
+    let pending = client.get_pending_amendment(&eng_id, &0);
+    assert!(pending.is_none());
+
+    // Milestone percentage should have been updated
+    let m0 = client.get_milestone(&eng_id, &0);
+    assert_eq!(m0.payment_percent, 50);
+}
+
+#[test]
+fn test_get_pending_amendment_after_reject() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-AMD-REJECT");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AMD-REJECT",
+    );
+
+    // Company proposes amendment, recruiter rejects
+    client.propose_amendment(&company, &eng_id, &0, &50);
+    client.reject_amendment(&recruiter, &eng_id, &0);
+
+    // No pending amendment after rejection
+    let pending = client.get_pending_amendment(&eng_id, &0);
+    assert!(pending.is_none());
+
+    // Milestone percentage should be unchanged
+    let m0 = client.get_milestone(&eng_id, &0);
+    assert_eq!(m0.payment_percent, 30);
+}
+
+#[test]
+fn test_get_pending_amendment_expired() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-AMD-EXPIRED");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AMD-EXPIRED",
+    );
+
+    // Company proposes amendment
+    client.propose_amendment(&company, &eng_id, &0, &50);
+
+    // Verify it's active at the current ledger
+    let pending = client.get_pending_amendment(&eng_id, &0);
+    assert!(pending.is_some());
+
+    // Advance ledger past the amendment TTL (7 days × 17_280 = 120_960)
+    env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+        timestamp: 0,
+        protocol_version: 22,
+        sequence_number: env.ledger().sequence() + 120_960 + 1,
+        network_id: Default::default(),
+        base_reserve: 5_000_000,
+        min_temp_entry_ttl: 16,
+        min_persistent_entry_ttl: 100_000,
+        max_entry_ttl: 6_300_000,
+    });
+
+    // Should be None after expiry
+    let pending = client.get_pending_amendment(&eng_id, &0);
+    assert!(pending.is_none());
+}
