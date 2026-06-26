@@ -74,6 +74,9 @@ pub struct AmendmentProposal {
     pub expires_at_ledger: u32,
 }
 
+/// Alias for the frontend-facing name used by `get_pending_amendment`.
+pub type PendingAmendment = AmendmentProposal;
+
 /// The full engagement record stored on-chain
 #[contracttype]
 #[derive(Clone)]
@@ -142,6 +145,16 @@ pub struct ArbiterSetup {
 pub struct ArbiterNomination {
     pub current: Address,
     pub nominee: Address,
+}
+
+/// Platform fee configuration deducted from each milestone payment.
+#[contracttype]
+#[derive(Clone)]
+pub struct PlatformFee {
+    /// Fee in basis points (1 bp = 0.01%), capped at 500 (5%).
+    pub bps: u32,
+    /// Address that receives accumulated platform fees.
+    pub treasury: Address,
 }
 
 // ============================================================
@@ -1450,6 +1463,23 @@ impl HireSettleContract {
             .persistent()
             .get(&DataKey::AmendmentLog(engagement_id, milestone_index))
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Get the current pending amendment proposal for a milestone, if one
+    /// exists and has not expired. Returns `None` when there is no active
+    /// proposal or the proposal's TTL has elapsed (treated as non-existent).
+    pub fn get_pending_amendment(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Option<PendingAmendment> {
+        let key = DataKey::AmendmentProposal(engagement_id, milestone_index);
+        match env.storage().persistent().get::<_, AmendmentProposal>(&key) {
+            Some(proposal) if env.ledger().sequence() <= proposal.expires_at_ledger => {
+                Some(proposal)
+            }
+            _ => None,
+        }
     }
 
     // ----------------------------------------------------------

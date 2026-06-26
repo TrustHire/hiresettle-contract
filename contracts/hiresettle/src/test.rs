@@ -112,6 +112,7 @@ fn has_event(env: &Env, event_name: &str) -> bool {
         }
     }
     false
+}
 fn advance_ledger(env: &Env, extra: u32) {
     env.ledger().set(soroban_sdk::testutils::LedgerInfo {
         timestamp: 0,
@@ -1745,4 +1746,105 @@ fn test_only_current_admin_can_nominate_admin() {
     let client = HireSettleContractClient::new(&env, &contract_id);
 
     client.nominate_admin(&recruiter, &arbiter);
+}
+
+// ============================================================
+// #52 — get_pending_amendment
+// ============================================================
+
+#[test]
+fn test_get_pending_amendment_active() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-PEND-ACTIVE");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-PEND-ACTIVE",
+    );
+
+    client.propose_amendment(&company, &eng_id, &0, &50);
+
+    let pending = client.get_pending_amendment(&eng_id, &0).unwrap();
+
+    assert_eq!(pending.proposer, company);
+    assert_eq!(pending.new_payment_percent, 50);
+    assert!(pending.proposed_at_ledger > 0);
+    assert!(pending.expires_at_ledger > pending.proposed_at_ledger);
+
+    // Milestone 1 should have no pending amendment
+    assert!(client.get_pending_amendment(&eng_id, &1).is_none());
+}
+
+#[test]
+fn test_get_pending_amendment_after_accept() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-PEND-ACCEPT");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-PEND-ACCEPT",
+    );
+
+    client.propose_amendment(&company, &eng_id, &0, &50);
+    client.accept_amendment(&recruiter, &eng_id, &0);
+
+    // No pending amendment after acceptance
+    assert!(client.get_pending_amendment(&eng_id, &0).is_none());
+
+    // Milestone percentage should have been updated
+    assert_eq!(client.get_milestone(&eng_id, &0).payment_percent, 50);
+}
+
+#[test]
+fn test_get_pending_amendment_after_reject() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-PEND-REJECT");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-PEND-REJECT",
+    );
+
+    client.propose_amendment(&company, &eng_id, &0, &50);
+    client.reject_amendment(&recruiter, &eng_id, &0);
+
+    // No pending amendment after rejection
+    assert!(client.get_pending_amendment(&eng_id, &0).is_none());
+
+    // Milestone percentage should be unchanged
+    assert_eq!(client.get_milestone(&eng_id, &0).payment_percent, 30);
+}
+
+#[test]
+fn test_get_pending_amendment_expired() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-PEND-EXPIRED");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-PEND-EXPIRED",
+    );
+
+    // Set a short TTL for testing (~1 hour = 720 ledgers)
+    client.set_amendment_ttl(&company, &720);
+
+    client.propose_amendment(&company, &eng_id, &0, &50);
+
+    // Verify active before expiry
+    assert!(client.get_pending_amendment(&eng_id, &0).is_some());
+
+    // Advance ledger past the TTL
+    env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+        timestamp: 0,
+        protocol_version: 22,
+        sequence_number: env.ledger().sequence() + 721,
+        network_id: Default::default(),
+        base_reserve: 5_000_000,
+        min_temp_entry_ttl: 16,
+        min_persistent_entry_ttl: 100_000,
+        max_entry_ttl: 6_300_000,
+    });
+
+    // Should be None after expiry
+    assert!(client.get_pending_amendment(&eng_id, &0).is_none());
 }
