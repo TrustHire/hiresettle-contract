@@ -1,8 +1,8 @@
 #![no_std]
 
-use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, Env, String, Vec, Symbol,
-};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Env, String, Symbol, Vec};
+
+const MAX_PLATFORM_FEE_BPS: u32 = 500;
 
 // ============================================================
 // DATA TYPES
@@ -154,6 +154,9 @@ pub enum DataKey {
     Admin,
     /// Pending arbiter succession nomination for an engagement.
     PendingArbiter(String),
+    PlatformFee,
+    Paused,
+    PendingAdmin,
     /// Admin-configurable proof resubmission cooldown in ledgers (default 2 880).
     ProofCooldown,
     /// Ledger at which the last proof was submitted for (engagement_id, milestone_index).
@@ -177,7 +180,6 @@ const DEFAULT_PROOF_COOLDOWN: u32 = 2_880;   // ~4 hours
 
 #[contractimpl]
 impl HireSettleContract {
-
     // ----------------------------------------------------------
     // INIT
     // ----------------------------------------------------------
@@ -185,6 +187,104 @@ impl HireSettleContract {
     pub fn init(env: Env, admin: Address) {
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().persistent().set(&DataKey::Paused, &false);
+        env.storage().persistent().set(
+            &DataKey::PlatformFee,
+            &PlatformFee {
+                bps: 0,
+                treasury: admin,
+            },
+        );
+    }
+
+    // ----------------------------------------------------------
+    // ADMIN CONFIGURATION
+    // ----------------------------------------------------------
+
+    /// Set the platform fee in basis points and the treasury that receives it.
+    /// `bps` is capped at 500 (5%).
+    pub fn set_platform_fee(env: Env, admin: Address, bps: u32, treasury: Address) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+
+        if bps > MAX_PLATFORM_FEE_BPS {
+            panic!("FeeTooHigh");
+        }
+
+        env.storage().persistent().set(
+            &DataKey::PlatformFee,
+            &PlatformFee {
+                bps,
+                treasury: treasury.clone(),
+            },
+        );
+
+        env.events()
+            .publish((Symbol::new(&env, "platform_fee_set"),), (bps, treasury));
+    }
+
+    /// Return the current platform fee configuration.
+    pub fn get_platform_fee(env: Env) -> (u32, Address) {
+        let fee = Self::get_platform_fee_internal(&env);
+        (fee.bps, fee.treasury)
+    }
+
+    /// Pause state-changing contract operations.
+    pub fn pause(env: Env, admin: Address) {
+        Self::assert_admin(&env, &admin);
+        env.storage().persistent().set(&DataKey::Paused, &true);
+        env.events().publish((Symbol::new(&env, "paused"),), admin);
+    }
+
+    /// Resume state-changing contract operations.
+    pub fn unpause(env: Env, admin: Address) {
+        Self::assert_admin(&env, &admin);
+        env.storage().persistent().set(&DataKey::Paused, &false);
+        env.events()
+            .publish((Symbol::new(&env, "unpaused"),), admin);
+    }
+
+    /// Return true if the contract is currently paused.
+    pub fn is_paused(env: Env) -> bool {
+        Self::is_paused_internal(&env)
+    }
+
+    /// Nominate a new admin. The nominee must call `claim_admin` to complete rotation.
+    pub fn nominate_admin(env: Env, current_admin: Address, new_admin: Address) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &current_admin);
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        env.events()
+            .publish((Symbol::new(&env, "admin_nominated"),), new_admin);
+    }
+
+    /// Claim admin rights after being nominated by the current admin.
+    pub fn claim_admin(env: Env, nominee: Address) {
+        Self::assert_not_paused(&env);
+        nominee.require_auth();
+
+        let pending: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic!("no pending admin nomination"));
+
+        if nominee != pending {
+            panic!("unauthorized");
+        }
+
+        env.storage().instance().set(&DataKey::Admin, &nominee);
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+        env.events()
+            .publish((Symbol::new(&env, "admin_claimed"),), nominee);
+    }
+
+    /// Return the pending admin nominee, if one exists.
+    pub fn get_pending_admin(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::PendingAdmin)
     }
 
     // ----------------------------------------------------------
@@ -244,6 +344,7 @@ impl HireSettleContract {
         retention_days: Vec<u32>,
         metadata_hash: Option<String>,
     ) -> String {
+        Self::assert_not_paused(&env);
         company.require_auth();
 
         if total_amount <= 0 {
@@ -328,12 +429,17 @@ impl HireSettleContract {
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
 
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Engagement(engagement_id.clone()), 100_000, 6_300_000);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Engagement(engagement_id.clone()),
+            100_000,
+            6_300_000,
+        );
 
         env.events().publish(
-            (Symbol::new(&env, "engagement_created"), engagement_id.clone()),
+            (
+                Symbol::new(&env, "engagement_created"),
+                engagement_id.clone(),
+            ),
             engagement_id.clone(),
         );
 
@@ -345,6 +451,7 @@ impl HireSettleContract {
     // ----------------------------------------------------------
 
     pub fn unlock_milestone(env: Env, engagement_id: String, milestone_index: u32) {
+        Self::assert_not_paused(&env);
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
 
         if engagement.status != EngagementStatus::Active {
@@ -374,7 +481,10 @@ impl HireSettleContract {
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
 
         env.events().publish(
-            (Symbol::new(&env, "milestone_unlocked"), engagement_id.clone()),
+            (
+                Symbol::new(&env, "milestone_unlocked"),
+                engagement_id.clone(),
+            ),
             milestone_index,
         );
     }
@@ -393,6 +503,7 @@ impl HireSettleContract {
         milestone_index: u32,
         proof_hash: String,
     ) {
+        Self::assert_not_paused(&env);
         recruiter.require_auth();
 
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
@@ -457,6 +568,7 @@ impl HireSettleContract {
         engagement_id: String,
         milestone_index: u32,
     ) {
+        Self::assert_not_paused(&env);
         company.require_auth();
 
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
@@ -482,18 +594,38 @@ impl HireSettleContract {
             }
         }
 
+        // Calculate and release payment, deducting the configured platform fee.
         let payment = (engagement.total_amount * milestone.payment_percent as i128) / 100;
+        let platform_fee = Self::get_platform_fee_internal(&env);
+        let fee_amount = (payment * platform_fee.bps as i128) / 10_000;
+        let recruiter_payment = payment - fee_amount;
         engagement.released_amount += payment;
 
         let token_client = token::Client::new(&env, &engagement.token);
+        if fee_amount > 0 {
+            token_client.transfer(
+                &env.current_contract_address(),
+                &platform_fee.treasury,
+                &fee_amount,
+            );
+            env.events().publish(
+                (
+                    Symbol::new(&env, "platform_fee_collected"),
+                    engagement_id.clone(),
+                ),
+                (milestone_index, fee_amount, platform_fee.treasury),
+            );
+        }
         token_client.transfer(
             &env.current_contract_address(),
             &engagement.recruiter,
-            &payment,
+            &recruiter_payment,
         );
 
         milestone.status = MilestoneStatus::Confirmed;
-        engagement.milestones.set(milestone_index, milestone.clone());
+        engagement
+            .milestones
+            .set(milestone_index, milestone.clone());
 
         let all_done = (0..engagement.milestones.len()).all(|i| {
             let s = engagement.milestones.get(i).unwrap().status;
@@ -509,7 +641,10 @@ impl HireSettleContract {
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
 
         env.events().publish(
-            (Symbol::new(&env, "milestone_confirmed"), engagement_id.clone()),
+            (
+                Symbol::new(&env, "milestone_confirmed"),
+                engagement_id.clone(),
+            ),
             (milestone_index, payment),
         );
     }
@@ -572,6 +707,7 @@ impl HireSettleContract {
         milestone_index: u32,
         approve: bool,
     ) {
+        Self::assert_not_paused(&env);
         arbiter.require_auth();
 
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
@@ -681,6 +817,7 @@ impl HireSettleContract {
     // ----------------------------------------------------------
 
     pub fn request_replacement(env: Env, company: Address, engagement_id: String) {
+        Self::assert_not_paused(&env);
         company.require_auth();
 
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
@@ -744,7 +881,10 @@ impl HireSettleContract {
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
 
         env.events().publish(
-            (Symbol::new(&env, "replacement_requested"), engagement_id.clone()),
+            (
+                Symbol::new(&env, "replacement_requested"),
+                engagement_id.clone(),
+            ),
             engagement_id.clone(),
         );
     }
@@ -759,6 +899,7 @@ impl HireSettleContract {
         recruiter: Address,
         engagement_id: String,
     ) {
+        Self::assert_not_paused(&env);
         company.require_auth();
         recruiter.require_auth();
 
@@ -793,7 +934,10 @@ impl HireSettleContract {
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
 
         env.events().publish(
-            (Symbol::new(&env, "engagement_cancelled"), engagement_id.clone()),
+            (
+                Symbol::new(&env, "engagement_cancelled"),
+                engagement_id.clone(),
+            ),
             refund,
         );
     }
@@ -939,6 +1083,7 @@ impl HireSettleContract {
         engagement_id: String,
         successor: Address,
     ) {
+        Self::assert_not_paused(&env);
         arbiter.require_auth();
 
         let engagement = Self::get_engagement_internal(&env, &engagement_id);
@@ -965,13 +1110,17 @@ impl HireSettleContract {
         );
 
         env.events().publish(
-            (Symbol::new(&env, "arbiter_nominated"), engagement_id.clone()),
+            (
+                Symbol::new(&env, "arbiter_nominated"),
+                engagement_id.clone(),
+            ),
             successor,
         );
     }
 
     /// Nominated successor claims the arbiter slot, replacing the nominating arbiter.
     pub fn claim_arbiter(env: Env, nominee: Address, engagement_id: String) {
+        Self::assert_not_paused(&env);
         nominee.require_auth();
 
         let nomination: ArbiterNomination = env
@@ -1312,6 +1461,43 @@ impl HireSettleContract {
             .persistent()
             .get(&DataKey::Engagement(engagement_id.clone()))
             .unwrap_or_else(|| panic!("engagement not found"))
+    }
+
+    fn get_admin(env: &Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic!("admin not initialized"))
+    }
+
+    fn assert_admin(env: &Env, admin: &Address) {
+        admin.require_auth();
+        if *admin != Self::get_admin(env) {
+            panic!("unauthorized");
+        }
+    }
+
+    fn is_paused_internal(env: &Env) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    fn assert_not_paused(env: &Env) {
+        if Self::is_paused_internal(env) {
+            panic!("ContractPaused");
+        }
+    }
+
+    fn get_platform_fee_internal(env: &Env) -> PlatformFee {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PlatformFee)
+            .unwrap_or_else(|| PlatformFee {
+                bps: 0,
+                treasury: Self::get_admin(env),
+            })
     }
 }
 

@@ -2,8 +2,8 @@
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Ledger},
-    token, vec, Address, Env, String,
+    testutils::{Address as _, Events, Ledger},
+    token, vec, Address, Env, String, Symbol, TryIntoVal,
 };
 
 // ============================================================
@@ -33,9 +33,9 @@ fn setup() -> (Env, Address, Address, Address, Address, Address) {
         .address();
     let token_client = token::StellarAssetClient::new(&env, &token_id);
 
-    let company  = Address::generate(&env);
+    let company = Address::generate(&env);
     let recruiter = Address::generate(&env);
-    let arbiter  = Address::generate(&env);
+    let arbiter = Address::generate(&env);
 
     token_client.mint(&company, &500_000_000_000);
 
@@ -101,6 +101,17 @@ fn create_standard_engagement(
     );
 }
 
+fn has_event(env: &Env, event_name: &str) -> bool {
+    let expected = Symbol::new(env, event_name);
+    let events = env.events().all();
+    for i in 0..events.len() {
+        let (_, topics, _) = events.get(i).unwrap();
+        let topic: Symbol = topics.get(0).unwrap().try_into_val(env).unwrap();
+        if topic == expected {
+            return true;
+        }
+    }
+    false
 fn advance_ledger(env: &Env, extra: u32) {
     env.ledger().set(soroban_sdk::testutils::LedgerInfo {
         timestamp: 0,
@@ -306,7 +317,13 @@ fn test_raise_and_resolve_dispute_approve() {
 
     let eng_id = String::from_str(&env, "ENG-DISPUTE");
     create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DISPUTE",
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-DISPUTE",
     );
 
     client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://questionable-proof"));
@@ -327,7 +344,13 @@ fn test_raise_and_resolve_dispute_reject() {
 
     let eng_id = String::from_str(&env, "ENG-REJECT");
     create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-REJECT",
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-REJECT",
     );
 
     client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://bad-proof"));
@@ -348,7 +371,13 @@ fn test_request_replacement() {
 
     let eng_id = String::from_str(&env, "ENG-REPLACE");
     create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-REPLACE",
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-REPLACE",
     );
 
     client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
@@ -382,7 +411,13 @@ fn test_request_replacement_before_placement() {
 
     let eng_id = String::from_str(&env, "ENG-EARLY");
     create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EARLY",
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-EARLY",
     );
 
     client.request_replacement(&company, &eng_id);
@@ -398,7 +433,13 @@ fn test_cancel_engagement() {
     let company_balance_before = token_client.balance(&company);
 
     create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-CANCEL",
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-CANCEL",
     );
 
     client.cancel_engagement(&company, &recruiter, &eng_id);
@@ -418,7 +459,13 @@ fn test_partial_cancel_after_placement_confirmed() {
     let company_balance_before = token_client.balance(&company);
 
     create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-PARTIAL-CANCEL",
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-PARTIAL-CANCEL",
     );
 
     client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
@@ -460,7 +507,13 @@ fn test_ledgers_until_unlock() {
 
     let eng_id = String::from_str(&env, "ENG-TIMER");
     create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-TIMER",
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-TIMER",
     );
 
     let remaining = client.ledgers_until_unlock(&eng_id, &1);
@@ -513,7 +566,12 @@ fn test_two_milestone_engagement_50_50() {
 
     advance_ledger(&env, 31 * 17_280);
     client.unlock_milestone(&eng_id, &1);
-    client.submit_proof(&recruiter, &eng_id, &1, &String::from_str(&env, "ipfs://30day"));
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &1,
+        &String::from_str(&env, "ipfs://30day"),
+    );
     client.confirm_milestone(&company, &eng_id, &1);
 
     assert_eq!(token_client.balance(&recruiter), 2_000_000_000);
@@ -539,8 +597,22 @@ fn test_get_total_released_partial() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
     let eng_id = String::from_str(&env, "ENG-REL-PART");
-    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-REL-PART");
-    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-REL-PART",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer"),
+    );
     client.confirm_milestone(&company, &eng_id, &0);
     assert_eq!(client.get_total_released(&eng_id), 300_000_000);
 }
@@ -557,12 +629,22 @@ fn test_get_total_released_full() {
 
     advance_ledger(&env, 31 * 17_280);
     client.unlock_milestone(&eng_id, &1);
-    client.submit_proof(&recruiter, &eng_id, &1, &String::from_str(&env, "ipfs://30day"));
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &1,
+        &String::from_str(&env, "ipfs://30day"),
+    );
     client.confirm_milestone(&company, &eng_id, &1);
 
     advance_ledger(&env, 60 * 17_280);
     client.unlock_milestone(&eng_id, &2);
-    client.submit_proof(&recruiter, &eng_id, &2, &String::from_str(&env, "ipfs://90day"));
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &2,
+        &String::from_str(&env, "ipfs://90day"),
+    );
     client.confirm_milestone(&company, &eng_id, &2);
 
     assert_eq!(client.get_total_released(&eng_id), 1_000_000_000);
@@ -598,7 +680,12 @@ fn test_get_engagement_summary_after_partial_confirmations() {
     let eng_id = String::from_str(&env, "ENG-SUMM-PART");
     create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-SUMM-PART");
 
-    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer"),
+    );
     client.confirm_milestone(&company, &eng_id, &0);
 
     let summary = client.get_engagement_summary(&eng_id);
@@ -614,17 +701,32 @@ fn test_get_engagement_summary_after_completion() {
     let eng_id = String::from_str(&env, "ENG-SUMM-DONE");
     create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-SUMM-DONE");
 
-    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer"),
+    );
     client.confirm_milestone(&company, &eng_id, &0);
 
     advance_ledger(&env, 31 * 17_280);
     client.unlock_milestone(&eng_id, &1);
-    client.submit_proof(&recruiter, &eng_id, &1, &String::from_str(&env, "ipfs://30day"));
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &1,
+        &String::from_str(&env, "ipfs://30day"),
+    );
     client.confirm_milestone(&company, &eng_id, &1);
 
     advance_ledger(&env, 60 * 17_280);
     client.unlock_milestone(&eng_id, &2);
-    client.submit_proof(&recruiter, &eng_id, &2, &String::from_str(&env, "ipfs://90day"));
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &2,
+        &String::from_str(&env, "ipfs://90day"),
+    );
     client.confirm_milestone(&company, &eng_id, &2);
 
     let summary = client.get_engagement_summary(&eng_id);
@@ -1341,4 +1443,306 @@ fn test_amendment_both_parties_can_propose() {
 
     let log = client.get_amendment_log(&eng_id, &0);
     assert_eq!(log.len(), 2);
+}
+
+// ============================================================
+// #12 / #13 — platform fee and fee event
+// ============================================================
+
+#[test]
+fn test_platform_fee_deducted_and_sent_to_treasury() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+
+    client.set_platform_fee(&company, &250, &treasury); // 2.5%
+    assert_eq!(client.get_platform_fee(), (250, treasury.clone()));
+
+    let eng_id = String::from_str(&env, "ENG-FEE");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-FEE",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    let gross = 300_000_000i128;
+    let expected_fee = gross * 250 / 10_000;
+    assert_eq!(expected_fee, 7_500_000);
+    assert_eq!(token_client.balance(&treasury), expected_fee);
+    assert_eq!(token_client.balance(&recruiter), gross - expected_fee);
+    assert_eq!(client.get_total_released(&eng_id), gross);
+}
+
+#[test]
+#[should_panic(expected = "FeeTooHigh")]
+fn test_platform_fee_cap_validation() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let treasury = Address::generate(&env);
+
+    client.set_platform_fee(&company, &501, &treasury);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_non_admin_cannot_set_platform_fee() {
+    let (env, contract_id, _token_id, _company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let treasury = Address::generate(&env);
+
+    client.set_platform_fee(&recruiter, &100, &treasury);
+}
+
+#[test]
+fn test_platform_fee_event_emitted_with_correct_amount() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let treasury = Address::generate(&env);
+
+    client.set_platform_fee(&company, &100, &treasury); // 1%
+    let eng_id = String::from_str(&env, "ENG-FEE-EVENT");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-FEE-EVENT",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    assert!(has_event(&env, "platform_fee_collected"));
+}
+
+#[test]
+fn test_platform_fee_event_not_emitted_when_fee_zero() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-NO-FEE-EVENT");
+
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-NO-FEE-EVENT",
+    );
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    assert!(!has_event(&env, "platform_fee_collected"));
+}
+
+// ============================================================
+// #14 — emergency pause
+// ============================================================
+
+#[test]
+fn test_pause_state_and_unpause_restores_create() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    assert!(!client.is_paused());
+    client.pause(&company);
+    assert!(client.is_paused());
+    client.unpause(&company);
+    assert!(!client.is_paused());
+
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-UNPAUSED",
+    );
+    assert_eq!(
+        client
+            .get_engagement(&String::from_str(&env, "ENG-UNPAUSED"))
+            .status,
+        EngagementStatus::Active
+    );
+}
+
+#[test]
+#[should_panic(expected = "ContractPaused")]
+fn test_pause_blocks_create() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.pause(&company);
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-PAUSED-CREATE",
+    );
+}
+
+#[test]
+#[should_panic(expected = "ContractPaused")]
+fn test_pause_blocks_submit() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-PAUSED-SUBMIT");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-PAUSED-SUBMIT",
+    );
+
+    client.pause(&company);
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "ContractPaused")]
+fn test_pause_blocks_confirm() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-PAUSED-CONFIRM");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-PAUSED-CONFIRM",
+    );
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer"),
+    );
+
+    client.pause(&company);
+    client.confirm_milestone(&company, &eng_id, &0);
+}
+
+#[test]
+#[should_panic(expected = "ContractPaused")]
+fn test_pause_blocks_unlock() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-PAUSED-UNLOCK");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-PAUSED-UNLOCK",
+    );
+
+    env.ledger().set(soroban_sdk::testutils::LedgerInfo {
+        timestamp: 0,
+        protocol_version: 22,
+        sequence_number: env.ledger().sequence() + (31 * 17_280),
+        network_id: Default::default(),
+        base_reserve: 5_000_000,
+        min_temp_entry_ttl: 16,
+        min_persistent_entry_ttl: 100_000,
+        max_entry_ttl: 6_300_000,
+    });
+
+    client.pause(&company);
+    client.unlock_milestone(&eng_id, &1);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_non_admin_cannot_pause_or_unpause() {
+    let (env, contract_id, _token_id, _company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.pause(&recruiter);
+}
+
+// ============================================================
+// #15 — two-step admin transfer
+// ============================================================
+
+#[test]
+fn test_admin_rotation_happy_path() {
+    let (env, contract_id, _token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let treasury = Address::generate(&env);
+
+    client.nominate_admin(&company, &recruiter);
+    assert_eq!(client.get_pending_admin(), Some(recruiter.clone()));
+
+    client.claim_admin(&recruiter);
+    assert_eq!(client.get_pending_admin(), None);
+
+    client.set_platform_fee(&recruiter, &100, &treasury);
+    assert_eq!(client.get_platform_fee(), (100, treasury));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_wrong_admin_claimer_rejected() {
+    let (env, contract_id, _token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.nominate_admin(&company, &recruiter);
+    client.claim_admin(&arbiter);
+}
+
+#[test]
+fn test_old_admin_retains_power_until_claim() {
+    let (env, contract_id, _token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let treasury = Address::generate(&env);
+
+    client.nominate_admin(&company, &recruiter);
+    client.set_platform_fee(&company, &125, &treasury.clone());
+
+    assert_eq!(client.get_platform_fee(), (125, treasury));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_only_current_admin_can_nominate_admin() {
+    let (env, contract_id, _token_id, _company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.nominate_admin(&recruiter, &arbiter);
 }
