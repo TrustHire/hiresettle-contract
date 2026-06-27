@@ -45,6 +45,7 @@ pub enum EngagementStatus {
     Cancelled,
     ReplacementRequested,
     ExitRequested,
+    Expired,
 }
 
 /// A history entry for a milestone amendment
@@ -96,6 +97,7 @@ pub struct Engagement {
     /// Optional IPFS CID linking to full job description / contract terms off-chain.
     pub metadata_hash: Option<String>,
     pub created_at_ledger: u32,
+    pub last_activity_ledger: u32,
     pub milestones: Vec<Milestone>,
     pub status: EngagementStatus,
 }
@@ -192,6 +194,12 @@ pub enum DataKey {
     LedgersPerDay,
     /// Dispute reason string stored per (engagement_id, milestone_index) (issue #50).
     DisputeReason(String, u32),
+    /// Admin-configurable max retention days cap (issue #18).
+    MaxRetentionDays,
+    /// Admin-configurable inactivity timeout in ledgers (issue #38).
+    InactivityTimeoutLedgers,
+    /// Admin-configurable storage TTL extension in ledgers (issue #40).
+    StorageTtlExtendTo,
 }
 
 // ============================================================
@@ -203,6 +211,9 @@ pub struct HireSettleContract;
 
 const LEDGERS_PER_DAY: u32 = 17_280;        // 86 400s ÷ 5s per ledger
 const DEFAULT_PROOF_COOLDOWN: u32 = 2_880;   // ~4 hours
+const DEFAULT_MAX_RETENTION_DAYS: u32 = 365;
+const DEFAULT_INACTIVITY_TIMEOUT_LEDGERS: u32 = 1_036_800;  // ~60 days
+const DEFAULT_STORAGE_TTL_EXTEND_TO: u32 = 1_036_800;  // ~60 days
 
 #[contractimpl]
 impl HireSettleContract {
@@ -431,6 +442,7 @@ impl HireSettleContract {
 
         let current_ledger = env.ledger().sequence();
         let lpd = Self::get_ledgers_per_day_internal(&env);
+        let max_retention_days = Self::get_max_retention_days(&env);
         let mut retention_index: u32 = 0;
         let mut resolved_milestones: Vec<Milestone> = Vec::new(&env);
 
@@ -444,6 +456,9 @@ impl HireSettleContract {
                 MilestoneKind::Retention => {
                     let days = retention_days.get(retention_index).unwrap_or(30);
                     retention_index += 1;
+                    if days > max_retention_days {
+                        panic!("RetentionDaysTooLarge");
+                    }
                     m.valid_after_ledger = current_ledger + (days * lpd);
                     m.status = MilestoneStatus::Locked;
                 }
@@ -466,6 +481,7 @@ impl HireSettleContract {
             job_title,
             metadata_hash,
             created_at_ledger: current_ledger,
+            last_activity_ledger: current_ledger,
             milestones: resolved_milestones,
             status: EngagementStatus::Active,
         };
@@ -474,11 +490,7 @@ impl HireSettleContract {
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
 
-        env.storage().persistent().extend_ttl(
-            &DataKey::Engagement(engagement_id.clone()),
-            100_000,
-            6_300_000,
-        );
+        Self::extend_engagement_ttl(&env, &engagement_id);
 
         // Issue #34: increment global engagement counter.
         let count: u64 = env
@@ -546,10 +558,12 @@ impl HireSettleContract {
 
         milestone.status = MilestoneStatus::Pending;
         engagement.milestones.set(milestone_index, milestone);
+        engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (
@@ -618,10 +632,12 @@ impl HireSettleContract {
         if engagement.status == EngagementStatus::ReplacementRequested {
             engagement.status = EngagementStatus::Active;
         }
+        engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (Symbol::new(&env, "proof_submitted"), engagement_id.clone()),
@@ -706,10 +722,12 @@ impl HireSettleContract {
         if all_done {
             engagement.status = EngagementStatus::Completed;
         }
+        engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (
@@ -762,6 +780,7 @@ impl HireSettleContract {
 
         milestone.status = MilestoneStatus::Disputed;
         engagement.milestones.set(milestone_index, milestone);
+        engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage().persistent().set(
             &DataKey::DisputeReason(engagement_id.clone(), milestone_index),
@@ -771,6 +790,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (Symbol::new(&env, "dispute_raised"), engagement_id.clone()),
@@ -897,9 +917,11 @@ impl HireSettleContract {
                 .extend_ttl(&vote_key, 100_000, 6_300_000);
         }
 
+        engagement.last_activity_ledger = env.ledger().sequence();
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
     }
 
     // ----------------------------------------------------------
@@ -965,10 +987,12 @@ impl HireSettleContract {
         }
 
         engagement.status = EngagementStatus::ReplacementRequested;
+        engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (
@@ -1018,10 +1042,12 @@ impl HireSettleContract {
         );
 
         engagement.status = EngagementStatus::Cancelled;
+        engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (
@@ -1029,6 +1055,48 @@ impl HireSettleContract {
                 engagement_id.clone(),
             ),
             refund,
+        );
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #33 — ESCROW TOP-UP
+    // ----------------------------------------------------------
+
+    /// Company tops up the escrow balance for an active engagement.
+    pub fn top_up_escrow(env: Env, company: Address, engagement_id: String, amount: i128) {
+        Self::assert_not_paused(&env);
+        company.require_auth();
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::Active
+            && engagement.status != EngagementStatus::ReplacementRequested
+        {
+            panic!("engagement is not active");
+        }
+
+        if company != engagement.company {
+            panic!("unauthorized");
+        }
+
+        if amount <= 0 {
+            panic!("amount must be greater than zero");
+        }
+
+        let token_client = token::Client::new(&env, &engagement.token);
+        token_client.transfer(&company, &env.current_contract_address(), &amount);
+
+        engagement.total_amount += amount;
+        engagement.last_activity_ledger = env.ledger().sequence();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
+
+        env.events().publish(
+            (Symbol::new(&env, "escrow_topped_up"), engagement_id.clone()),
+            (amount, engagement.total_amount),
         );
     }
 
@@ -1642,9 +1710,11 @@ impl HireSettleContract {
         }
 
         engagement.status = EngagementStatus::ExitRequested;
+        engagement.last_activity_ledger = env.ledger().sequence();
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (Symbol::new(&env, "early_exit_requested"), engagement_id.clone()),
@@ -1678,9 +1748,11 @@ impl HireSettleContract {
         }
 
         engagement.status = EngagementStatus::Cancelled;
+        engagement.last_activity_ledger = env.ledger().sequence();
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (Symbol::new(&env, "early_exit_accepted"), engagement_id.clone()),
@@ -1704,9 +1776,11 @@ impl HireSettleContract {
         }
 
         engagement.status = EngagementStatus::Active;
+        engagement.last_activity_ledger = env.ledger().sequence();
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (Symbol::new(&env, "early_exit_rejected"), engagement_id.clone()),
@@ -1785,6 +1859,113 @@ impl HireSettleContract {
     /// Return the current ledgers-per-day constant.
     pub fn get_ledgers_per_day(env: Env) -> u32 {
         Self::get_ledgers_per_day_internal(&env)
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #18 — MAX RETENTION DAYS CAP
+    // ----------------------------------------------------------
+
+    /// Admin sets the maximum retention days cap.
+    pub fn set_max_retention_days(env: Env, admin: Address, days: u32) {
+        Self::assert_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::MaxRetentionDays, &days);
+        env.events()
+            .publish((Symbol::new(&env, "max_retention_days_set"),), days);
+    }
+
+    /// Return the current max retention days cap.
+    pub fn get_max_retention_days(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxRetentionDays)
+            .unwrap_or(DEFAULT_MAX_RETENTION_DAYS)
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #38 — INACTIVITY TIMEOUT
+    // ----------------------------------------------------------
+
+    /// Admin sets the inactivity timeout in ledgers.
+    pub fn set_inactivity_timeout_ledgers(env: Env, admin: Address, ledgers: u32) {
+        Self::assert_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::InactivityTimeoutLedgers, &ledgers);
+        env.events()
+            .publish((Symbol::new(&env, "inactivity_timeout_set"),), ledgers);
+    }
+
+    /// Return the current inactivity timeout in ledgers.
+    pub fn get_inactivity_timeout_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::InactivityTimeoutLedgers)
+            .unwrap_or(DEFAULT_INACTIVITY_TIMEOUT_LEDGERS)
+    }
+
+    /// Expire an engagement after inactivity timeout.
+    /// Permissionless after timeout.
+    pub fn expire_engagement(env: Env, engagement_id: String) {
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status == EngagementStatus::Completed {
+            panic!("Cannot expire completed engagement");
+        }
+
+        let timeout = Self::get_inactivity_timeout_ledgers(&env);
+        let current_ledger = env.ledger().sequence();
+
+        if current_ledger <= engagement.last_activity_ledger + timeout {
+            panic!("Inactivity timeout not reached");
+        }
+
+        let refund = engagement.total_amount - engagement.released_amount;
+        if refund > 0 {
+            let token_client = token::Client::new(&env, &engagement.token);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &engagement.company,
+                &refund,
+            );
+        }
+
+        engagement.status = EngagementStatus::Expired;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+
+        env.events().publish(
+            (Symbol::new(&env, "engagement_expired"), engagement_id.clone()),
+            refund,
+        );
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #40 — STORAGE TTL EXTENSION
+    // ----------------------------------------------------------
+
+    /// Admin sets the storage TTL extension value in ledgers.
+    pub fn set_storage_ttl_extend_to(env: Env, admin: Address, ledgers: u32) {
+        Self::assert_admin(&env, &admin);
+        env.storage().instance().set(&DataKey::StorageTtlExtendTo, &ledgers);
+        env.events()
+            .publish((Symbol::new(&env, "storage_ttl_extend_to_set"),), ledgers);
+    }
+
+    /// Return the current storage TTL extension value in ledgers.
+    pub fn get_storage_ttl_extend_to(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::StorageTtlExtendTo)
+            .unwrap_or(DEFAULT_STORAGE_TTL_EXTEND_TO)
+    }
+
+    /// Helper to extend TTL for engagement storage.
+    fn extend_engagement_ttl(env: &Env, engagement_id: &String) {
+        let extend_to = Self::get_storage_ttl_extend_to(env);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Engagement(engagement_id.clone()),
+            100_000,
+            extend_to,
+        );
     }
 
     // ----------------------------------------------------------
@@ -1874,10 +2055,12 @@ impl HireSettleContract {
         if all_done {
             engagement.status = EngagementStatus::Completed;
         }
+        engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
 
         if all_done {
             env.events().publish(
