@@ -1848,3 +1848,312 @@ fn test_get_pending_amendment_expired() {
     // Should be None after expiry
     assert!(client.get_pending_amendment(&eng_id, &0).is_none());
 }
+
+// ============================================================
+// Issue #34 — get_engagement_count
+// ============================================================
+
+#[test]
+fn test_engagement_count_starts_at_zero() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    assert_eq!(client.get_engagement_count(), 0);
+}
+
+#[test]
+fn test_engagement_count_increments_on_create() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-CNT-1");
+    assert_eq!(client.get_engagement_count(), 1);
+
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-CNT-2");
+    assert_eq!(client.get_engagement_count(), 2);
+}
+
+#[test]
+fn test_engagement_count_does_not_decrement_on_cancel() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-CNT-CANCEL");
+    assert_eq!(client.get_engagement_count(), 1);
+
+    client.cancel_engagement(&company, &recruiter, &String::from_str(&env, "ENG-CNT-CANCEL"));
+    assert_eq!(client.get_engagement_count(), 1);
+}
+
+#[test]
+#[should_panic]
+fn test_engagement_count_no_increment_on_failed_create() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Should panic due to duplicate ID (count must NOT increment)
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DUP-CNT");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DUP-CNT");
+}
+
+// ============================================================
+// Issue #35 — get_engagements_by_company / get_company_engagement_count
+// ============================================================
+
+#[test]
+fn test_company_engagement_count_empty() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let other = Address::generate(&env);
+    assert_eq!(client.get_company_engagement_count(&other), 0);
+}
+
+#[test]
+fn test_get_engagements_by_company_insertion_order() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let ids = ["ENG-ORD-0", "ENG-ORD-1", "ENG-ORD-2", "ENG-ORD-3", "ENG-ORD-4"];
+    for id in ids.iter() {
+        client.create_engagement(
+            &String::from_str(&env, id), &company, &recruiter,
+            &ArbiterSetup { arbiters: vec![&env, arbiter.clone()], quorum: 1 },
+            &token_id, &1_000_000_000,
+            &String::from_str(&env, "Engineer"),
+            &build_milestones(&env),
+            &vec![&env, 30u32, 90u32],
+            &None,
+        );
+    }
+
+    assert_eq!(client.get_company_engagement_count(&company), 5);
+
+    let page0 = client.get_engagements_by_company(&company, &0, &3);
+    assert_eq!(page0.len(), 3);
+    assert_eq!(page0.get(0).unwrap(), String::from_str(&env, "ENG-ORD-0"));
+    assert_eq!(page0.get(2).unwrap(), String::from_str(&env, "ENG-ORD-2"));
+
+    let page1 = client.get_engagements_by_company(&company, &1, &3);
+    assert_eq!(page1.len(), 2);
+    assert_eq!(page1.get(0).unwrap(), String::from_str(&env, "ENG-ORD-3"));
+}
+
+#[test]
+fn test_get_engagements_by_company_out_of_range_returns_empty() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-OOR");
+
+    let result = client.get_engagements_by_company(&company, &10, &10);
+    assert_eq!(result.len(), 0);
+}
+
+#[test]
+fn test_get_engagements_by_company_empty_company() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let other = Address::generate(&env);
+    let result = client.get_engagements_by_company(&other, &0, &10);
+    assert_eq!(result.len(), 0);
+}
+
+#[test]
+fn test_get_engagements_first_page_ten() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let ids = [
+        "ENG-PG-00", "ENG-PG-01", "ENG-PG-02", "ENG-PG-03", "ENG-PG-04",
+        "ENG-PG-05", "ENG-PG-06", "ENG-PG-07", "ENG-PG-08", "ENG-PG-09",
+        "ENG-PG-10", "ENG-PG-11", "ENG-PG-12", "ENG-PG-13", "ENG-PG-14",
+    ];
+    for id in ids.iter() {
+        client.create_engagement(
+            &String::from_str(&env, id), &company, &recruiter,
+            &ArbiterSetup { arbiters: vec![&env, arbiter.clone()], quorum: 1 },
+            &token_id, &1_000_000_000,
+            &String::from_str(&env, "Engineer"),
+            &build_milestones(&env),
+            &vec![&env, 30u32, 90u32],
+            &None,
+        );
+    }
+
+    let page0 = client.get_engagements_by_company(&company, &0, &10);
+    assert_eq!(page0.len(), 10);
+    assert_eq!(page0.get(0).unwrap(), String::from_str(&env, "ENG-PG-00"));
+}
+
+// ============================================================
+// Issue #26 — Token allowlist
+// ============================================================
+
+#[test]
+fn test_allowlist_disabled_by_default_allows_any_token() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    // Allowlist disabled by default — standard engagement must succeed
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AL-DEF");
+    assert_eq!(client.get_engagement(&String::from_str(&env, "ENG-AL-DEF")).status, EngagementStatus::Active);
+}
+
+#[test]
+fn test_allowlisted_token_accepted() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.add_allowed_token(&company, &token_id);
+    client.set_token_allowlist_enabled(&company, &true);
+
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AL-OK");
+    assert_eq!(client.get_engagement(&String::from_str(&env, "ENG-AL-OK")).status, EngagementStatus::Active);
+}
+
+#[test]
+#[should_panic(expected = "TokenNotAllowed")]
+fn test_non_allowlisted_token_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Enable allowlist but do NOT add token_id
+    client.set_token_allowlist_enabled(&company, &true);
+
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AL-BLOCK");
+}
+
+#[test]
+fn test_allowlist_disabled_accepts_any_token() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Enable then disable
+    client.set_token_allowlist_enabled(&company, &true);
+    client.set_token_allowlist_enabled(&company, &false);
+
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AL-DISABLED");
+}
+
+#[test]
+fn test_get_allowed_tokens_returns_correct_list() {
+    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_allowed_tokens().len(), 0);
+
+    client.add_allowed_token(&company, &token_id);
+    let tokens = client.get_allowed_tokens();
+    assert_eq!(tokens.len(), 1);
+    assert_eq!(tokens.get(0).unwrap(), token_id);
+}
+
+#[test]
+fn test_remove_allowed_token() {
+    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.add_allowed_token(&company, &token_id);
+    assert_eq!(client.get_allowed_tokens().len(), 1);
+
+    client.remove_allowed_token(&company, &token_id);
+    assert_eq!(client.get_allowed_tokens().len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_only_admin_can_add_allowed_token() {
+    let (env, contract_id, token_id, _company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.add_allowed_token(&recruiter, &token_id);
+}
+
+// ============================================================
+// Issue #32 — Recruiter early-exit
+// ============================================================
+
+#[test]
+fn test_request_early_exit_sets_status() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-EXIT-REQ");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXIT-REQ");
+
+    client.request_early_exit(&recruiter, &eng_id);
+    let eng = client.get_engagement(&eng_id);
+    assert_eq!(eng.status, EngagementStatus::ExitRequested);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_only_recruiter_can_request_early_exit() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-EXIT-AUTH");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXIT-AUTH");
+    client.request_early_exit(&company, &eng_id);
+}
+
+#[test]
+fn test_accept_early_exit_refunds_unreleased_and_cancels() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let eng_id = String::from_str(&env, "ENG-EXIT-ACCEPT");
+    let company_balance_before = token_client.balance(&company);
+
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXIT-ACCEPT");
+
+    // Confirm placement milestone (30% released)
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    client.request_early_exit(&recruiter, &eng_id);
+    client.accept_early_exit(&company, &eng_id);
+
+    let eng = client.get_engagement(&eng_id);
+    assert_eq!(eng.status, EngagementStatus::Cancelled);
+
+    // 70% of 1_000_000_000 should be refunded to company
+    let expected_refund = 700_000_000i128;
+    assert_eq!(
+        token_client.balance(&company),
+        company_balance_before - 1_000_000_000 + expected_refund
+    );
+}
+
+#[test]
+fn test_reject_early_exit_returns_to_active() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-EXIT-REJECT");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXIT-REJECT");
+
+    client.request_early_exit(&recruiter, &eng_id);
+    client.reject_early_exit(&company, &eng_id);
+
+    let eng = client.get_engagement(&eng_id);
+    assert_eq!(eng.status, EngagementStatus::Active);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_only_company_can_accept_early_exit() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-EXIT-ACCEPT-AUTH");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXIT-ACCEPT-AUTH");
+
+    client.request_early_exit(&recruiter, &eng_id);
+    client.accept_early_exit(&recruiter, &eng_id);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_only_company_can_reject_early_exit() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-EXIT-REJECT-AUTH");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXIT-REJECT-AUTH");
+
+    client.request_early_exit(&recruiter, &eng_id);
+    client.reject_early_exit(&recruiter, &eng_id);
+}

@@ -44,6 +44,7 @@ pub enum EngagementStatus {
     Completed,
     Cancelled,
     ReplacementRequested,
+    ExitRequested,
 }
 
 /// A history entry for a milestone amendment
@@ -179,6 +180,14 @@ pub enum DataKey {
     AmendmentProposal(String, u32),
     AmendmentLog(String, u32),
     AmendmentTTL,
+    /// Total number of engagements ever created (issue #34).
+    EngagementCount,
+    /// Per-company ordered list of engagement IDs (issue #35).
+    CompanyEngagements(Address),
+    /// Allowlist of accepted token SAC addresses (issue #26).
+    AllowedTokens,
+    /// Whether the token allowlist is enabled (issue #26).
+    AllowlistEnabled,
 }
 
 // ============================================================
@@ -364,6 +373,24 @@ impl HireSettleContract {
             panic!("amount must be greater than zero");
         }
 
+        // Issue #26: reject token if allowlist is active and token not in it.
+        let allowlist_enabled: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AllowlistEnabled)
+            .unwrap_or(false);
+        if allowlist_enabled {
+            let allowed: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::AllowedTokens)
+                .unwrap_or_else(|| Vec::new(&env));
+            let is_allowed = (0..allowed.len()).any(|i| allowed.get(i).unwrap() == token);
+            if !is_allowed {
+                panic!("TokenNotAllowed");
+            }
+        }
+
         let arbiters = arbiter_setup.arbiters;
         let quorum = arbiter_setup.quorum;
 
@@ -444,6 +471,32 @@ impl HireSettleContract {
 
         env.storage().persistent().extend_ttl(
             &DataKey::Engagement(engagement_id.clone()),
+            100_000,
+            6_300_000,
+        );
+
+        // Issue #34: increment global engagement counter.
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::EngagementCount)
+            .unwrap_or(0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::EngagementCount, &(count + 1));
+
+        // Issue #35: append engagement_id to the per-company index.
+        let mut company_ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CompanyEngagements(company.clone()))
+            .unwrap_or_else(|| Vec::new(&env));
+        company_ids.push_back(engagement_id.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::CompanyEngagements(company.clone()), &company_ids);
+        env.storage().persistent().extend_ttl(
+            &DataKey::CompanyEngagements(company.clone()),
             100_000,
             6_300_000,
         );
@@ -1480,6 +1533,213 @@ impl HireSettleContract {
             }
             _ => None,
         }
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #26 — TOKEN ALLOWLIST
+    // ----------------------------------------------------------
+
+    /// Add a token SAC address to the allowlist. Admin only.
+    pub fn add_allowed_token(env: Env, admin: Address, token: Address) {
+        Self::assert_admin(&env, &admin);
+        let mut allowed: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AllowedTokens)
+            .unwrap_or_else(|| Vec::new(&env));
+        let already = (0..allowed.len()).any(|i| allowed.get(i).unwrap() == token);
+        if !already {
+            allowed.push_back(token.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::AllowedTokens, &allowed);
+        }
+        env.events()
+            .publish((Symbol::new(&env, "token_allowlisted"),), token);
+    }
+
+    /// Remove a token SAC address from the allowlist. Admin only.
+    pub fn remove_allowed_token(env: Env, admin: Address, token: Address) {
+        Self::assert_admin(&env, &admin);
+        let mut allowed: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AllowedTokens)
+            .unwrap_or_else(|| Vec::new(&env));
+        for i in 0..allowed.len() {
+            if allowed.get(i).unwrap() == token {
+                allowed.remove(i);
+                break;
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::AllowedTokens, &allowed);
+        env.events()
+            .publish((Symbol::new(&env, "token_removed"),), token);
+    }
+
+    /// Enable or disable the token allowlist. Admin only.
+    pub fn set_token_allowlist_enabled(env: Env, admin: Address, enabled: bool) {
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::AllowlistEnabled, &enabled);
+        env.events()
+            .publish((Symbol::new(&env, "allowlist_enabled_set"),), enabled);
+    }
+
+    /// Return all currently allowlisted token addresses.
+    pub fn get_allowed_tokens(env: Env) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AllowedTokens)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #32 — RECRUITER EARLY-EXIT
+    // ----------------------------------------------------------
+
+    /// Recruiter requests an early exit. Sets engagement to ExitRequested.
+    pub fn request_early_exit(env: Env, recruiter: Address, engagement_id: String) {
+        Self::assert_not_paused(&env);
+        recruiter.require_auth();
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::Active {
+            panic!("engagement is not active");
+        }
+
+        if recruiter != engagement.recruiter {
+            panic!("unauthorized");
+        }
+
+        engagement.status = EngagementStatus::ExitRequested;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+
+        env.events().publish(
+            (Symbol::new(&env, "early_exit_requested"), engagement_id.clone()),
+            recruiter,
+        );
+    }
+
+    /// Company accepts the early exit: refunds unreleased balance, moves to Cancelled.
+    pub fn accept_early_exit(env: Env, company: Address, engagement_id: String) {
+        Self::assert_not_paused(&env);
+        company.require_auth();
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::ExitRequested {
+            panic!("no exit request pending");
+        }
+
+        if company != engagement.company {
+            panic!("unauthorized");
+        }
+
+        let refund = engagement.total_amount - engagement.released_amount;
+        if refund > 0 {
+            let token_client = token::Client::new(&env, &engagement.token);
+            token_client.transfer(
+                &env.current_contract_address(),
+                &engagement.company,
+                &refund,
+            );
+        }
+
+        engagement.status = EngagementStatus::Cancelled;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+
+        env.events().publish(
+            (Symbol::new(&env, "early_exit_accepted"), engagement_id.clone()),
+            refund,
+        );
+    }
+
+    /// Company rejects the early exit: returns engagement to Active.
+    pub fn reject_early_exit(env: Env, company: Address, engagement_id: String) {
+        Self::assert_not_paused(&env);
+        company.require_auth();
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::ExitRequested {
+            panic!("no exit request pending");
+        }
+
+        if company != engagement.company {
+            panic!("unauthorized");
+        }
+
+        engagement.status = EngagementStatus::Active;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+
+        env.events().publish(
+            (Symbol::new(&env, "early_exit_rejected"), engagement_id.clone()),
+            company,
+        );
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #34 — ENGAGEMENT COUNT
+    // ----------------------------------------------------------
+
+    /// Return the total number of engagements ever created.
+    pub fn get_engagement_count(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::EngagementCount)
+            .unwrap_or(0u64)
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #35 — ENGAGEMENT LIST BY COMPANY
+    // ----------------------------------------------------------
+
+    /// Return a paginated slice of engagement IDs for a given company.
+    /// `page` is 0-indexed; out-of-range pages return an empty vec.
+    pub fn get_engagements_by_company(
+        env: Env,
+        company: Address,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<String> {
+        let ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CompanyEngagements(company))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total = ids.len();
+        let start = page * page_size;
+        if start >= total || page_size == 0 {
+            return Vec::new(&env);
+        }
+        let end = (start + page_size).min(total);
+        let mut result = Vec::new(&env);
+        for i in start..end {
+            result.push_back(ids.get(i).unwrap());
+        }
+        result
+    }
+
+    /// Return the total number of engagements associated with a company.
+    pub fn get_company_engagement_count(env: Env, company: Address) -> u32 {
+        let ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CompanyEngagements(company))
+            .unwrap_or_else(|| Vec::new(&env));
+        ids.len()
     }
 
     // ----------------------------------------------------------
