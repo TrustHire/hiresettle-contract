@@ -188,6 +188,10 @@ pub enum DataKey {
     AllowedTokens,
     /// Whether the token allowlist is enabled (issue #26).
     AllowlistEnabled,
+    /// Admin-configurable ledgers-per-day constant (issue #41).
+    LedgersPerDay,
+    /// Dispute reason string stored per (engagement_id, milestone_index) (issue #50).
+    DisputeReason(String, u32),
 }
 
 // ============================================================
@@ -426,6 +430,7 @@ impl HireSettleContract {
         }
 
         let current_ledger = env.ledger().sequence();
+        let lpd = Self::get_ledgers_per_day_internal(&env);
         let mut retention_index: u32 = 0;
         let mut resolved_milestones: Vec<Milestone> = Vec::new(&env);
 
@@ -439,7 +444,7 @@ impl HireSettleContract {
                 MilestoneKind::Retention => {
                     let days = retention_days.get(retention_index).unwrap_or(30);
                     retention_index += 1;
-                    m.valid_after_ledger = current_ledger + (days * LEDGERS_PER_DAY);
+                    m.valid_after_ledger = current_ledger + (days * lpd);
                     m.status = MilestoneStatus::Locked;
                 }
             }
@@ -713,6 +718,13 @@ impl HireSettleContract {
             ),
             (milestone_index, payment),
         );
+
+        if all_done {
+            env.events().publish(
+                (Symbol::new(&env, "engagement_completed"), engagement_id.clone()),
+                (engagement_id.clone(), engagement.released_amount, env.ledger().sequence()),
+            );
+        }
     }
 
     // ----------------------------------------------------------
@@ -724,8 +736,13 @@ impl HireSettleContract {
         company: Address,
         engagement_id: String,
         milestone_index: u32,
+        reason: String,
     ) {
         company.require_auth();
+
+        if reason.len() > 128 {
+            panic!("ReasonTooLong");
+        }
 
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
 
@@ -746,13 +763,18 @@ impl HireSettleContract {
         milestone.status = MilestoneStatus::Disputed;
         engagement.milestones.set(milestone_index, milestone);
 
+        env.storage().persistent().set(
+            &DataKey::DisputeReason(engagement_id.clone(), milestone_index),
+            &reason.clone(),
+        );
+
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
 
         env.events().publish(
             (Symbol::new(&env, "dispute_raised"), engagement_id.clone()),
-            milestone_index,
+            (milestone_index, reason),
         );
     }
 
@@ -850,6 +872,7 @@ impl HireSettleContract {
             }
 
             env.storage().persistent().remove(&vote_key);
+            env.storage().persistent().remove(&DataKey::DisputeReason(engagement_id.clone(), milestone_index));
 
             env.events().publish(
                 (Symbol::new(&env, "dispute_resolved"), engagement_id.clone()),
@@ -861,6 +884,7 @@ impl HireSettleContract {
             engagement.milestones.set(milestone_index, milestone);
 
             env.storage().persistent().remove(&vote_key);
+            env.storage().persistent().remove(&DataKey::DisputeReason(engagement_id.clone(), milestone_index));
 
             env.events().publish(
                 (Symbol::new(&env, "dispute_resolved"), engagement_id.clone()),
@@ -927,8 +951,8 @@ impl HireSettleContract {
                         && m.status != MilestoneStatus::Resolved
                     {
                         let original_days =
-                            (m.valid_after_ledger - engagement.created_at_ledger) / LEDGERS_PER_DAY;
-                        m.valid_after_ledger = current_ledger + (original_days * LEDGERS_PER_DAY);
+                            (m.valid_after_ledger - engagement.created_at_ledger) / Self::get_ledgers_per_day_internal(&env);
+                        m.valid_after_ledger = current_ledger + (original_days * Self::get_ledgers_per_day_internal(&env));
                         m.status = MilestoneStatus::Locked;
                         m.proof_hash = String::from_str(&env, "");
                         env.storage()
@@ -1086,8 +1110,9 @@ impl HireSettleContract {
         }
 
         let ledgers_remaining = (milestone.valid_after_ledger - current) as u64;
-        // LEDGERS_PER_DAY = 86_400 / 5, so seconds_per_ledger = 86_400 / LEDGERS_PER_DAY = 5
-        ledgers_remaining * (86_400u64 / LEDGERS_PER_DAY as u64)
+        // seconds_per_ledger = 86_400 / ledgers_per_day
+        let lpd = Self::get_ledgers_per_day_internal(&env) as u64;
+        ledgers_remaining * (86_400u64 / lpd)
     }
 
     /// Return the IPFS CID stored at engagement creation, or None if not provided.
@@ -1743,6 +1768,137 @@ impl HireSettleContract {
     }
 
     // ----------------------------------------------------------
+    // ISSUE #41 — CONFIGURABLE LEDGERS PER DAY
+    // ----------------------------------------------------------
+
+    /// Admin sets how many ledgers constitute one day (min 1, max 25_920).
+    pub fn set_ledgers_per_day(env: Env, admin: Address, value: u32) {
+        Self::assert_admin(&env, &admin);
+        if value < 1 || value > 25_920 {
+            panic!("InvalidLedgersPerDay");
+        }
+        env.storage().instance().set(&DataKey::LedgersPerDay, &value);
+        env.events()
+            .publish((Symbol::new(&env, "ledgers_per_day_set"),), value);
+    }
+
+    /// Return the current ledgers-per-day constant.
+    pub fn get_ledgers_per_day(env: Env) -> u32 {
+        Self::get_ledgers_per_day_internal(&env)
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #39 — BATCH CONFIRM MILESTONES
+    // ----------------------------------------------------------
+
+    /// Company confirms multiple consecutive milestones in one transaction.
+    /// Atomically rejected if any milestone is invalid.
+    pub fn batch_confirm_milestones(
+        env: Env,
+        company: Address,
+        engagement_id: String,
+        milestone_indices: Vec<u32>,
+    ) {
+        Self::assert_not_paused(&env);
+        company.require_auth();
+
+        if milestone_indices.is_empty() {
+            panic!("EmptyIndices");
+        }
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::Active {
+            panic!("engagement is not active");
+        }
+
+        if company != engagement.company {
+            panic!("unauthorized");
+        }
+
+        // Validate all milestones first (atomic rejection)
+        for i in 0..milestone_indices.len() {
+            let idx = milestone_indices.get(i).unwrap();
+            let m = engagement.milestones.get(idx).unwrap_or_else(|| panic!("invalid milestone index"));
+            if m.status != MilestoneStatus::ProofSubmitted {
+                panic!("milestone proof not yet submitted");
+            }
+            if m.kind == MilestoneKind::Retention && env.ledger().sequence() < m.valid_after_ledger {
+                panic!("retention window has not elapsed — cannot confirm yet");
+            }
+        }
+
+        let platform_fee = Self::get_platform_fee_internal(&env);
+        let token_client = token::Client::new(&env, &engagement.token);
+
+        for i in 0..milestone_indices.len() {
+            let idx = milestone_indices.get(i).unwrap();
+            let mut m = engagement.milestones.get(idx).unwrap();
+
+            let payment = (engagement.total_amount * m.payment_percent as i128) / 100;
+            let fee_amount = (payment * platform_fee.bps as i128) / 10_000;
+            let recruiter_payment = payment - fee_amount;
+            engagement.released_amount += payment;
+
+            if fee_amount > 0 {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &platform_fee.treasury,
+                    &fee_amount,
+                );
+                env.events().publish(
+                    (Symbol::new(&env, "platform_fee_collected"), engagement_id.clone()),
+                    (idx, fee_amount, platform_fee.treasury.clone()),
+                );
+            }
+            token_client.transfer(
+                &env.current_contract_address(),
+                &engagement.recruiter,
+                &recruiter_payment,
+            );
+
+            m.status = MilestoneStatus::Confirmed;
+            engagement.milestones.set(idx, m);
+
+            env.events().publish(
+                (Symbol::new(&env, "milestone_confirmed"), engagement_id.clone()),
+                (idx, payment),
+            );
+        }
+
+        let all_done = (0..engagement.milestones.len()).all(|i| {
+            let s = engagement.milestones.get(i).unwrap().status;
+            s == MilestoneStatus::Confirmed || s == MilestoneStatus::Resolved
+        });
+
+        if all_done {
+            engagement.status = EngagementStatus::Completed;
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+
+        if all_done {
+            env.events().publish(
+                (Symbol::new(&env, "engagement_completed"), engagement_id.clone()),
+                (engagement_id.clone(), engagement.released_amount, env.ledger().sequence()),
+            );
+        }
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #50 — DISPUTE REASON QUERY
+    // ----------------------------------------------------------
+
+    /// Return the stored dispute reason for a milestone, if any.
+    pub fn get_dispute_reason(env: Env, engagement_id: String, milestone_index: u32) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeReason(engagement_id, milestone_index))
+    }
+
+    // ----------------------------------------------------------
     // INTERNAL HELPERS
     // ----------------------------------------------------------
 
@@ -1788,6 +1944,13 @@ impl HireSettleContract {
                 bps: 0,
                 treasury: Self::get_admin(env),
             })
+    }
+
+    fn get_ledgers_per_day_internal(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::LedgersPerDay)
+            .unwrap_or(LEDGERS_PER_DAY)
     }
 }
 
