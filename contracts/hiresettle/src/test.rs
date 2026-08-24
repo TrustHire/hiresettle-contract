@@ -8541,3 +8541,27 @@ fn test_escrow_callback_checkpoint_emits_when_enabled_and_target_set() {
 
     assert!(has_event(&env, "escrow_callback_point"));
 }
+
+#[test]
+fn test_get_contract_health_emits_snapshot_event() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let health = client.get_contract_health();
+
+    assert!(!health.paused);
+    assert_eq!(health.total_engagement_count, 0);
+    assert!(has_event(&env, "contract_health_snapshot"));
+}
+
+#[test]
+fn test_get_contract_health_emits_snapshot_event_reflects_paused_state() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.pause(&company);
+    let health = client.get_contract_health();
+
+    assert!(health.paused);
+    assert!(has_event(&env, "contract_health_snapshot"));
+}
