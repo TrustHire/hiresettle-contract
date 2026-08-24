@@ -522,6 +522,35 @@ The call deliberately does **not** touch `last_activity_ledger`: a notification
 is not engagement activity, and bumping it would let a keeper postpone
 `expire_engagement` indefinitely.
 
+### Engagement Tags
+
+Engagements can be labelled with free-form string tags so off-chain tooling can
+group and filter them (e.g. by client, role, or campaign). Tags are managed by
+the engagement's **company** (or its registered co-signer) and are only ever read
+by the tag-based queries — they do not affect escrow, payments, or lifecycle.
+
+**Limits** (enforced when the engagement is created via `config.tags`):
+
+- **Max tags per engagement: 10** — creating with more panics `TooManyTags`.
+- **Max tag length: 32 characters** — a longer tag panics `TagTooLong`; a
+  zero-length tag panics `TagEmpty`.
+- Tags are de-duplicated at creation, so a repeated tag lists the engagement once
+  in its index.
+
+These bounds exist so storage stays predictable regardless of caller input. The
+cap is checked at creation time; `add_engagement_tag` appends to a tag's
+engagement index without re-checking the per-engagement cap.
+
+| Function | Caller | Purpose | Panics |
+|---|---|---|---|
+| `add_engagement_tag(company, engagement_id, tag)` | Company (or co-signer) | Add `engagement_id` to a tag's index. Duplicate tags are silently ignored. | `unauthorized`, `engagement not found` |
+| `remove_engagement_tag(company, engagement_id, tag)` | Company (or co-signer) | Remove `engagement_id` from a tag's index. No-op if the tag was not present. | `unauthorized`, `engagement not found` |
+| `get_engagements_by_tag(tag, page, page_size)` → `Vec<String>` | Anyone | Paginated engagement IDs tagged with `tag`. Out-of-range pages return an empty vec. | — |
+| `get_engagement_tag_count(tag)` → `u32` | Anyone | Total number of engagements tagged with `tag`. Returns `0` for a tag no engagement has. | — |
+
+`get_engagement_tag_count` is the companion to `get_engagements_by_tag` for
+sizing pagination: pass the same `tag` to both to know how many pages to fetch.
+
 ### Amendments
 `propose_amendment`, `accept_amendment`, `reject_amendment`, `withdraw_amendment_proposal`
 

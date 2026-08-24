@@ -3216,6 +3216,149 @@ fn test_non_admin_cannot_pause_or_unpause() {
 }
 
 // ============================================================
+// #249 — engagement tags (limits, indexing, queries)
+// ============================================================
+
+fn create_tagged_engagement(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    arbiter: &Address,
+    id: &str,
+    tags: Vec<String>,
+) {
+    let mut config = default_config();
+    config.tags = Some(tags);
+    client.create_engagement(
+        &String::from_str(env, id),
+        company,
+        recruiter,
+        &ArbiterSetup {
+            arbiters: vec![env, arbiter.clone()],
+            quorum: 1,
+        },
+        token_id,
+        &1_000_000_000,
+        &String::from_str(env, "Senior Engineer"),
+        &build_milestones(env),
+        &vec![env, 30u32, 90u32],
+        &config,
+    );
+}
+
+#[test]
+fn test_engagement_tags_indexed_at_creation() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-TAGS");
+
+    let tags = vec![
+        &env,
+        String::from_str(&env, "alpha"),
+        String::from_str(&env, "beta"),
+    ];
+    create_tagged_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-TAGS", tags,
+    );
+
+    // Both creation-time tags resolve through the query API. This is the
+    // regression guard for the index-key mismatch: the key written at creation
+    // must be the same one the queries read.
+    assert_eq!(client.get_engagement_tag_count(&String::from_str(&env, "alpha")), 1);
+    assert_eq!(client.get_engagement_tag_count(&String::from_str(&env, "beta")), 1);
+
+    let ids = client.get_engagements_by_tag(&String::from_str(&env, "alpha"), &0, &10);
+    assert_eq!(ids.len(), 1);
+    assert_eq!(ids.get(0).unwrap(), eng_id);
+
+    // An unknown tag reports zero rather than panicking.
+    assert_eq!(client.get_engagement_tag_count(&String::from_str(&env, "missing")), 0);
+}
+
+#[test]
+#[should_panic(expected = "TooManyTags")]
+fn test_engagement_tags_exceed_max_panics() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let tags = vec![
+        &env,
+        String::from_str(&env, "t0"),
+        String::from_str(&env, "t1"),
+        String::from_str(&env, "t2"),
+        String::from_str(&env, "t3"),
+        String::from_str(&env, "t4"),
+        String::from_str(&env, "t5"),
+        String::from_str(&env, "t6"),
+        String::from_str(&env, "t7"),
+        String::from_str(&env, "t8"),
+        String::from_str(&env, "t9"),
+        String::from_str(&env, "t10"),
+    ];
+    create_tagged_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-TOOMANY", tags,
+    );
+}
+
+#[test]
+#[should_panic(expected = "TagTooLong")]
+fn test_engagement_tag_too_long_panics() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let tags = vec![
+        &env,
+        String::from_str(&env, "this-tag-is-definitely-longer-than-thirty-two-characters"),
+    ];
+    create_tagged_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-LONGTAG", tags,
+    );
+}
+
+#[test]
+#[should_panic(expected = "TagEmpty")]
+fn test_engagement_tag_empty_panics() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let tags = vec![&env, String::from_str(&env, "")];
+    create_tagged_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EMPTYTAG", tags,
+    );
+}
+
+#[test]
+fn test_add_and_remove_engagement_tag() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-ADDTAG");
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-ADDTAG",
+    );
+    let tag = String::from_str(&env, "wf");
+
+    // Initially no engagements carry the tag.
+    assert_eq!(client.get_engagement_tag_count(&tag), 0);
+
+    // Adding associates the engagement with the tag.
+    client.add_engagement_tag(&company, &eng_id, &tag);
+    assert_eq!(client.get_engagement_tag_count(&tag), 1);
+
+    // Re-adding is a no-op (idempotent), not a duplicate.
+    client.add_engagement_tag(&company, &eng_id, &tag);
+    assert_eq!(client.get_engagement_tag_count(&tag), 1);
+
+    // Removing clears it; removing again is a harmless no-op.
+    client.remove_engagement_tag(&company, &eng_id, &tag);
+    assert_eq!(client.get_engagement_tag_count(&tag), 0);
+    client.remove_engagement_tag(&company, &eng_id, &tag);
+    assert_eq!(client.get_engagement_tag_count(&tag), 0);
+}
+
+// ============================================================
 // #15 — two-step admin transfer
 // ============================================================
 
