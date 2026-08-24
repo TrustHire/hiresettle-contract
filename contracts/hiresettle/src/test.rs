@@ -3216,6 +3216,99 @@ fn test_non_admin_cannot_pause_or_unpause() {
 }
 
 // ============================================================
+// #239 — per-engagement pause (quarantine) and its interaction with the global pause
+// ============================================================
+
+#[test]
+#[should_panic(expected = "EngagementPaused")]
+fn test_engagement_pause_blocks_lifecycle_while_contract_runs() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-QUARANTINE");
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-QUARANTINE",
+    );
+
+    // Contract is running; only the single engagement is quarantined.
+    assert!(!client.is_paused());
+    client.pause_engagement(&company, &eng_id);
+    assert!(client.is_engagement_paused(&eng_id));
+
+    // The engagement's own lifecycle call is rejected, other engagements are unaffected.
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+}
+
+#[test]
+fn test_global_unpause_does_not_clear_engagement_pause() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-QUARANTINE-INTERACTION");
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-QUARANTINE-INTERACTION",
+    );
+
+    // Quarantine the engagement, then pause the whole contract.
+    client.pause_engagement(&company, &eng_id);
+    client.pause(&company);
+
+    // Call is blocked while both guards are active.
+    let res = client.try_submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    assert!(res.is_err());
+
+    // Resuming the contract does NOT lift the per-engagement quarantine: the call
+    // stays blocked purely because the engagement is still quarantined.
+    client.unpause(&company);
+    assert!(!client.is_paused());
+    assert!(client.is_engagement_paused(&eng_id));
+
+    let res = client.try_submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    assert!(res.is_err());
+
+    // Only lifting the quarantine lets the call through.
+    client.unpause_engagement(&company, &eng_id);
+    assert!(!client.is_engagement_paused(&eng_id));
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+}
+
+#[test]
+fn test_engagement_unpause_does_not_clear_global_pause() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-QUARANTINE-GLOBAL");
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-QUARANTINE-GLOBAL",
+    );
+
+    // Pause the contract, then quarantine the engagement (allowed while paused).
+    client.pause(&company);
+    client.pause_engagement(&company, &eng_id);
+
+    // Lifting the engagement quarantine does NOT resume the globally paused contract.
+    client.unpause_engagement(&company, &eng_id);
+    assert!(!client.is_engagement_paused(&eng_id));
+    assert!(client.is_paused());
+
+    let res = client.try_submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    assert!(res.is_err());
+
+    // Only resuming the contract lets the call through.
+    client.unpause(&company);
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+}
+
+#[test]
+fn test_engagement_pause_query_unknown_id_false() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Unknown engagement IDs report false rather than panicking.
+    assert!(!client.is_engagement_paused(&String::from_str(&env, "ENG-DOES-NOT-EXIST")));
+}
+
+// ============================================================
 // #15 — two-step admin transfer
 // ============================================================
 
