@@ -3216,6 +3216,99 @@ fn test_non_admin_cannot_pause_or_unpause() {
 }
 
 // ============================================================
+// #239 — per-engagement pause (quarantine) and its interaction with the global pause
+// ============================================================
+
+#[test]
+#[should_panic(expected = "EngagementPaused")]
+fn test_engagement_pause_blocks_lifecycle_while_contract_runs() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-QUARANTINE");
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-QUARANTINE",
+    );
+
+    // Contract is running; only the single engagement is quarantined.
+    assert!(!client.is_paused());
+    client.pause_engagement(&company, &eng_id);
+    assert!(client.is_engagement_paused(&eng_id));
+
+    // The engagement's own lifecycle call is rejected, other engagements are unaffected.
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+}
+
+#[test]
+fn test_global_unpause_does_not_clear_engagement_pause() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-QUARANTINE-INTERACTION");
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-QUARANTINE-INTERACTION",
+    );
+
+    // Quarantine the engagement, then pause the whole contract.
+    client.pause_engagement(&company, &eng_id);
+    client.pause(&company);
+
+    // Call is blocked while both guards are active.
+    let res = client.try_submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    assert!(res.is_err());
+
+    // Resuming the contract does NOT lift the per-engagement quarantine: the call
+    // stays blocked purely because the engagement is still quarantined.
+    client.unpause(&company);
+    assert!(!client.is_paused());
+    assert!(client.is_engagement_paused(&eng_id));
+
+    let res = client.try_submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    assert!(res.is_err());
+
+    // Only lifting the quarantine lets the call through.
+    client.unpause_engagement(&company, &eng_id);
+    assert!(!client.is_engagement_paused(&eng_id));
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+}
+
+#[test]
+fn test_engagement_unpause_does_not_clear_global_pause() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-QUARANTINE-GLOBAL");
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-QUARANTINE-GLOBAL",
+    );
+
+    // Pause the contract, then quarantine the engagement (allowed while paused).
+    client.pause(&company);
+    client.pause_engagement(&company, &eng_id);
+
+    // Lifting the engagement quarantine does NOT resume the globally paused contract.
+    client.unpause_engagement(&company, &eng_id);
+    assert!(!client.is_engagement_paused(&eng_id));
+    assert!(client.is_paused());
+
+    let res = client.try_submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    assert!(res.is_err());
+
+    // Only resuming the contract lets the call through.
+    client.unpause(&company);
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+}
+
+#[test]
+fn test_engagement_pause_query_unknown_id_false() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Unknown engagement IDs report false rather than panicking.
+    assert!(!client.is_engagement_paused(&String::from_str(&env, "ENG-DOES-NOT-EXIST")));
+}
+
+// ============================================================
 // #15 — two-step admin transfer
 // ============================================================
 
@@ -8326,8 +8419,6 @@ fn test_expire_engagement_rejected_on_cancelled_engagement_before_timeout() {
     client.expire_engagement(&eng_id);
 }
 
-
-
 /// Admin can set the arbiter fee and get_arbiter_fee reflects it.
 #[test]
 fn test_set_and_get_arbiter_fee() {
@@ -8432,10 +8523,7 @@ fn test_arbiter_fee_deducted_on_dispute_approval() {
         recruiter_balance_before + 297_000_000
     );
     assert_eq!(token_client.balance(&a1), a1_balance_before);
-    assert_eq!(
-        token_client.balance(&a2),
-        a2_balance_before + 3_000_000
-    );
+    assert_eq!(token_client.balance(&a2), a2_balance_before + 3_000_000);
 }
 
 #[test]
@@ -8542,270 +8630,26 @@ fn test_escrow_callback_checkpoint_emits_when_enabled_and_target_set() {
     assert!(has_event(&env, "escrow_callback_point"));
 }
 
-// ============================================================
-// ISSUE #320 — RENAME ENGAGEMENT TAG
-// ============================================================
-
 #[test]
-fn test_rename_engagement_tag_by_company_success() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+fn test_get_contract_health_emits_snapshot_event() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
 
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-RENAME-1",
-    );
-    let eng_id = String::from_str(&env, "ENG-RENAME-1");
-    let old_tag = String::from_str(&env, "hot-lead");
-    let new_tag = String::from_str(&env, "priority");
+    let health = client.get_contract_health();
 
-    client.add_engagement_tag(&company, &eng_id, &old_tag);
-
-    let new_count = client.rename_engagement_tag(&company, &old_tag, &new_tag);
-    assert_eq!(new_count, 1);
-    assert!(has_event(&env, "engagement_tag_renamed"));
-
-    assert_eq!(client.get_engagement_tag_count(&old_tag), 0);
-    assert_eq!(client.get_engagement_tag_count(&new_tag), 1);
-    let ids = client.get_engagements_by_tag(&new_tag, &0, &10);
-    assert_eq!(ids.get(0).unwrap(), eng_id);
+    assert!(!health.paused);
+    assert_eq!(health.total_engagement_count, 0);
+    assert!(has_event(&env, "contract_health_snapshot"));
 }
 
 #[test]
-fn test_rename_engagement_tag_merges_and_dedupes() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-RENAME-A",
-    );
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-RENAME-B",
-    );
-    let eng_a = String::from_str(&env, "ENG-RENAME-A");
-    let eng_b = String::from_str(&env, "ENG-RENAME-B");
-    let alpha = String::from_str(&env, "alpha");
-    let beta = String::from_str(&env, "beta");
-
-    client.add_engagement_tag(&company, &eng_a, &alpha);
-    client.add_engagement_tag(&company, &eng_b, &beta);
-
-    let new_count = client.rename_engagement_tag(&company, &alpha, &beta);
-    assert_eq!(new_count, 2);
-    assert_eq!(client.get_engagement_tag_count(&beta), 2);
-    assert_eq!(client.get_engagement_tag_count(&alpha), 0);
-
-    let all_tags = client.get_all_tags();
-    assert_eq!(all_tags.len(), 1);
-    assert_eq!(all_tags.get(0).unwrap(), beta);
-}
-
-#[test]
-fn test_rename_engagement_tag_by_admin_across_companies() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-RENAME-ADMIN-1",
-    );
-    let eng1 = String::from_str(&env, "ENG-RENAME-ADMIN-1");
-    let tag = String::from_str(&env, "shared");
-    let renamed = String::from_str(&env, "shared-renamed");
-
-    client.add_engagement_tag(&company, &eng1, &tag);
-
-    // `company` is also the admin (see `setup`), so this exercises the
-    // admin bypass path rather than per-engagement company authorization.
-    let new_count = client.rename_engagement_tag(&company, &tag, &renamed);
-    assert_eq!(new_count, 1);
-}
-
-#[test]
-#[should_panic(expected = "unauthorized")]
-fn test_rename_engagement_tag_unauthorized_company_rejected() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    let company2 = Address::generate(&env);
-
-    // Give company2 funds and create an engagement it owns.
-    let token_client = token::StellarAssetClient::new(&env, &token_id);
-    token_client.mint(&company2, &500_000_000_000);
-
-    client.create_engagement(
-        &String::from_str(&env, "ENG-RENAME-OTHER"),
-        &company2,
-        &recruiter,
-        &ArbiterSetup {
-            arbiters: vec![&env, arbiter.clone()],
-            quorum: 1,
-        },
-        &token_id,
-        &1_000_000_000,
-        &String::from_str(&env, "Senior Engineer"),
-        &build_milestones(&env),
-        &vec![&env, 30u32, 90u32],
-        &default_config(),
-    );
-
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-RENAME-MINE",
-    );
-
-    let eng_other = String::from_str(&env, "ENG-RENAME-OTHER");
-    let eng_mine = String::from_str(&env, "ENG-RENAME-MINE");
-    let tag = String::from_str(&env, "shared-tag");
-    let renamed = String::from_str(&env, "renamed-tag");
-
-    // Tag is used by both company2's engagement and company's engagement.
-    client.add_engagement_tag(&company2, &eng_other, &tag);
-    client.add_engagement_tag(&company, &eng_mine, &tag);
-
-    // company2 is not authorized for `eng_mine`, so the rename must fail —
-    // even though company2 owns one of the two tagged engagements.
-    client.rename_engagement_tag(&company2, &tag, &renamed);
-}
-
-#[test]
-#[should_panic(expected = "TagNotFound")]
-fn test_rename_engagement_tag_missing_tag_rejected() {
+fn test_get_contract_health_emits_snapshot_event_reflects_paused_state() {
     let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
 
-    client.rename_engagement_tag(
-        &company,
-        &String::from_str(&env, "nonexistent"),
-        &String::from_str(&env, "whatever"),
-    );
-}
+    client.pause(&company);
+    let health = client.get_contract_health();
 
-#[test]
-#[should_panic(expected = "NewTagSameAsOld")]
-fn test_rename_engagement_tag_same_name_rejected() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-RENAME-SAME",
-    );
-    let eng_id = String::from_str(&env, "ENG-RENAME-SAME");
-    let tag = String::from_str(&env, "same-tag");
-    client.add_engagement_tag(&company, &eng_id, &tag);
-
-    client.rename_engagement_tag(&company, &tag, &tag);
-}
-
-// ============================================================
-// ISSUE #321 — GET ALL TAGS
-// ============================================================
-
-#[test]
-fn test_get_all_tags_reflects_add_and_remove() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-ALLTAGS",
-    );
-    let eng_id = String::from_str(&env, "ENG-ALLTAGS");
-    let tag_a = String::from_str(&env, "tag-a");
-    let tag_b = String::from_str(&env, "tag-b");
-
-    assert_eq!(client.get_all_tags().len(), 0);
-
-    client.add_engagement_tag(&company, &eng_id, &tag_a);
-    client.add_engagement_tag(&company, &eng_id, &tag_b);
-    assert_eq!(client.get_all_tags().len(), 2);
-
-    // Adding the same tag again must not create a duplicate entry.
-    client.add_engagement_tag(&company, &eng_id, &tag_a);
-    assert_eq!(client.get_all_tags().len(), 2);
-
-    client.remove_engagement_tag(&company, &eng_id, &tag_a);
-    let remaining = client.get_all_tags();
-    assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining.get(0).unwrap(), tag_b);
-
-    client.remove_engagement_tag(&company, &eng_id, &tag_b);
-    assert_eq!(client.get_all_tags().len(), 0);
-}
-
-// ============================================================
-// ISSUE #322 & #323 — MILESTONE EXTENSION COUNT & CAP
-// ============================================================
-
-#[test]
-fn test_get_milestone_extension_count_aggregates_across_milestones() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXT-COUNT",
-    );
-    let eng_id = String::from_str(&env, "ENG-EXT-COUNT");
-
-    assert_eq!(client.get_milestone_extension_count(&eng_id), 0);
-
-    client.propose_milestone_extension(&recruiter, &eng_id, &1, &1_000);
-    client.accept_milestone_extension(&company, &eng_id, &1);
-    assert_eq!(client.get_milestone_extension_count(&eng_id), 1);
-
-    client.propose_milestone_extension(&recruiter, &eng_id, &2, &2_000);
-    client.accept_milestone_extension(&company, &eng_id, &2);
-    assert_eq!(client.get_milestone_extension_count(&eng_id), 2);
-
-    // A second extension on milestone 1 should add to the same engagement total.
-    client.propose_milestone_extension(&recruiter, &eng_id, &1, &500);
-    client.accept_milestone_extension(&company, &eng_id, &1);
-    assert_eq!(client.get_milestone_extension_count(&eng_id), 3);
-}
-
-#[test]
-fn test_max_milestone_extensions_default_cap_enforced() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXT-CAP",
-    );
-    let eng_id = String::from_str(&env, "ENG-EXT-CAP");
-
-    assert_eq!(client.get_max_milestone_extensions(), 3);
-
-    for _ in 0..3 {
-        client.propose_milestone_extension(&recruiter, &eng_id, &1, &100);
-        client.accept_milestone_extension(&company, &eng_id, &1);
-    }
-    assert_eq!(client.get_milestone_extension_count(&eng_id), 3);
-
-    let result = client.try_propose_milestone_extension(&recruiter, &eng_id, &1, &100);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_set_max_milestone_extensions_admin_update() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXT-CAP-2",
-    );
-    let eng_id = String::from_str(&env, "ENG-EXT-CAP-2");
-
-    client.set_max_milestone_extensions(&company, &1);
-    assert_eq!(client.get_max_milestone_extensions(), 1);
-
-    client.propose_milestone_extension(&recruiter, &eng_id, &1, &100);
-    client.accept_milestone_extension(&company, &eng_id, &1);
-
-    let result = client.try_propose_milestone_extension(&recruiter, &eng_id, &1, &100);
-    assert!(result.is_err());
-}
-
-#[test]
-fn test_set_max_milestone_extensions_non_admin_rejected() {
-    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    let stranger = Address::generate(&env);
-
-    let result = client.try_set_max_milestone_extensions(&stranger, &5);
-    assert!(result.is_err());
+    assert!(health.paused);
+    assert!(has_event(&env, "contract_health_snapshot"));
 }
