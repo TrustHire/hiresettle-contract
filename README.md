@@ -443,6 +443,50 @@ The contract supports an optional allowlist to restrict which tokens can be used
 ### Engagement Creation
 When the token allowlist is enabled, `create_engagement` will panic with `TokenNotAllowed` if the `token` passed is not in the allowed tokens list. If the allowlist is disabled, any valid SAC token is accepted.
 
+## Cosigners
+
+A company or recruiter may register a **cosigner** — a secondary address that is
+equally authorized to perform that party's actions (e.g. confirming milestones,
+submitting proof, approving amendments). This lets a primary signer delegate
+operations to a bot, vault, or backup key without sharing the primary key.
+
+Registration is one-way per party and only the primary address may set its own
+cosigner:
+
+- `set_company_cosigner(company, cosigner)` — delegates company-side actions.
+- `set_recruiter_cosigner(recruiter, cosigner)` — delegates recruiter-side actions.
+
+Once registered, the contract's `is_authorized_company` / `is_authorized_recruiter`
+checks accept **either** the primary signer **or** the cosigner. A cosigned action
+is therefore still a single on-chain call — it just uses the cosigner as the
+authenticated caller instead of the primary.
+
+### Single-signer vs. cosigned flow
+
+```mermaid
+sequenceDiagram
+    participant P as Primary (company/recruiter)
+    participant C as Cosigner
+    participant S as Contract
+
+    Note over P,S: Normal single-signer call
+    P->>S: action (e.g. confirm_milestone)
+    S->>S: require_auth(P) + is_authorized?(caller == P)
+    S-->>P: success
+
+    Note over P,C,S: Cosigned call (after set_*_cosigner)
+    P->>S: set_company_cosigner(P, C)
+    S-->>S: store cosigner = C
+
+    C->>S: action (same function, authenticated as C)
+    S->>S: require_auth(C) + is_authorized?(caller == P OR caller == C)
+    S-->>C: success
+```
+
+In both cases the function signature is identical; only the authenticated caller
+changes. Integrators adding a cosigner do not need new entry points — they simply
+route the existing call through the cosigner's key.
+
 ## Public Function Reference
 
 ### Admin & Configuration
