@@ -330,7 +330,12 @@ Then:
 
 ```text
 fee_amount  = payment × effective_bps ÷ 10_000
-net_payment = payment − fee_amount
+net_payment = payment − fee_amount 
+```
+If there is no referrer, the referrer is not on the list, or the discount is `0`, the effective rate is unchanged from the base / tier rate.
+
+Referral discount applies only to the **platform** fee path above. Arbiter fees from dispute resolution 
+(`cast_arbiter_vote` / `set_arbiter_fee`) are separate and are not reduced by the referral discount.
 
 ```rust
 pub struct PlatformFee {
