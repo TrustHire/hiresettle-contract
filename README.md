@@ -301,6 +301,36 @@ net_payment = gross_share − fee_amount // this is what the recruiter actually 
 
 `fee_amount` is transferred to `treasury`; a `platform_fee_collected` event `(milestone_index, fee_amount, treasury)` is emitted whenever `fee_amount > 0` (no event when the fee is 0). Disputes resolved via `cast_arbiter_vote` do **not** deduct the platform fee — they deduct a separate, arbiter-only fee instead (see `set_arbiter_fee`).
 
+### Referral discount
+
+Engagements may carry an optional `referrer` address (set at creation via
+`Engagement` / `EngagementConfig`). That field alone does not change fees.
+
+Admin setup:
+
+- `add_referrer` / `remove_referrer` / `get_referrers` — maintain the recognised
+  referrer list stored under `DataKey::Referrers`.
+- `set_referral_discount_bps(admin, bps)` / `get_referral_discount_bps()` —
+  configure how many basis points to subtract from the platform fee when the
+  engagement’s `referrer` is on that list (max 500 bps, same cap as the platform
+  fee). Default discount is `0`.
+
+At milestone confirmation (`confirm_milestone`, `batch_confirm_milestones`,
+`force_confirm_milestone`), the contract computes an **effective** platform-fee
+rate as follows:
+
+1. Start from the configured platform fee `bps` (or the matching **fee tier**
+   rate when `set_fee_tiers` is in use — larger `total_amount` can qualify for a
+   lower tier `bps`).
+2. If `engagement.referrer` is `Some(addr)` **and** `addr` is in the recognised
+   referrer list, subtract `referral_discount_bps` from that rate.
+3. Floor at `0` (the platform fee never goes negative).
+
+Then:
+
+```text
+fee_amount  = payment × effective_bps ÷ 10_000
+net_payment = payment − fee_amount
 
 ```rust
 pub struct PlatformFee {
