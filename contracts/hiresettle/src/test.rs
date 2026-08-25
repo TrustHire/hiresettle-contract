@@ -8541,3 +8541,271 @@ fn test_escrow_callback_checkpoint_emits_when_enabled_and_target_set() {
 
     assert!(has_event(&env, "escrow_callback_point"));
 }
+
+// ============================================================
+// ISSUE #320 — RENAME ENGAGEMENT TAG
+// ============================================================
+
+#[test]
+fn test_rename_engagement_tag_by_company_success() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-RENAME-1",
+    );
+    let eng_id = String::from_str(&env, "ENG-RENAME-1");
+    let old_tag = String::from_str(&env, "hot-lead");
+    let new_tag = String::from_str(&env, "priority");
+
+    client.add_engagement_tag(&company, &eng_id, &old_tag);
+
+    let new_count = client.rename_engagement_tag(&company, &old_tag, &new_tag);
+    assert_eq!(new_count, 1);
+    assert!(has_event(&env, "engagement_tag_renamed"));
+
+    assert_eq!(client.get_engagement_tag_count(&old_tag), 0);
+    assert_eq!(client.get_engagement_tag_count(&new_tag), 1);
+    let ids = client.get_engagements_by_tag(&new_tag, &0, &10);
+    assert_eq!(ids.get(0).unwrap(), eng_id);
+}
+
+#[test]
+fn test_rename_engagement_tag_merges_and_dedupes() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-RENAME-A",
+    );
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-RENAME-B",
+    );
+    let eng_a = String::from_str(&env, "ENG-RENAME-A");
+    let eng_b = String::from_str(&env, "ENG-RENAME-B");
+    let alpha = String::from_str(&env, "alpha");
+    let beta = String::from_str(&env, "beta");
+
+    client.add_engagement_tag(&company, &eng_a, &alpha);
+    client.add_engagement_tag(&company, &eng_b, &beta);
+
+    let new_count = client.rename_engagement_tag(&company, &alpha, &beta);
+    assert_eq!(new_count, 2);
+    assert_eq!(client.get_engagement_tag_count(&beta), 2);
+    assert_eq!(client.get_engagement_tag_count(&alpha), 0);
+
+    let all_tags = client.get_all_tags();
+    assert_eq!(all_tags.len(), 1);
+    assert_eq!(all_tags.get(0).unwrap(), beta);
+}
+
+#[test]
+fn test_rename_engagement_tag_by_admin_across_companies() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-RENAME-ADMIN-1",
+    );
+    let eng1 = String::from_str(&env, "ENG-RENAME-ADMIN-1");
+    let tag = String::from_str(&env, "shared");
+    let renamed = String::from_str(&env, "shared-renamed");
+
+    client.add_engagement_tag(&company, &eng1, &tag);
+
+    // `company` is also the admin (see `setup`), so this exercises the
+    // admin bypass path rather than per-engagement company authorization.
+    let new_count = client.rename_engagement_tag(&company, &tag, &renamed);
+    assert_eq!(new_count, 1);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_rename_engagement_tag_unauthorized_company_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let company2 = Address::generate(&env);
+
+    // Give company2 funds and create an engagement it owns.
+    let token_client = token::StellarAssetClient::new(&env, &token_id);
+    token_client.mint(&company2, &500_000_000_000);
+
+    client.create_engagement(
+        &String::from_str(&env, "ENG-RENAME-OTHER"),
+        &company2,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Senior Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-RENAME-MINE",
+    );
+
+    let eng_other = String::from_str(&env, "ENG-RENAME-OTHER");
+    let eng_mine = String::from_str(&env, "ENG-RENAME-MINE");
+    let tag = String::from_str(&env, "shared-tag");
+    let renamed = String::from_str(&env, "renamed-tag");
+
+    // Tag is used by both company2's engagement and company's engagement.
+    client.add_engagement_tag(&company2, &eng_other, &tag);
+    client.add_engagement_tag(&company, &eng_mine, &tag);
+
+    // company2 is not authorized for `eng_mine`, so the rename must fail —
+    // even though company2 owns one of the two tagged engagements.
+    client.rename_engagement_tag(&company2, &tag, &renamed);
+}
+
+#[test]
+#[should_panic(expected = "TagNotFound")]
+fn test_rename_engagement_tag_missing_tag_rejected() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.rename_engagement_tag(
+        &company,
+        &String::from_str(&env, "nonexistent"),
+        &String::from_str(&env, "whatever"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "NewTagSameAsOld")]
+fn test_rename_engagement_tag_same_name_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-RENAME-SAME",
+    );
+    let eng_id = String::from_str(&env, "ENG-RENAME-SAME");
+    let tag = String::from_str(&env, "same-tag");
+    client.add_engagement_tag(&company, &eng_id, &tag);
+
+    client.rename_engagement_tag(&company, &tag, &tag);
+}
+
+// ============================================================
+// ISSUE #321 — GET ALL TAGS
+// ============================================================
+
+#[test]
+fn test_get_all_tags_reflects_add_and_remove() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-ALLTAGS",
+    );
+    let eng_id = String::from_str(&env, "ENG-ALLTAGS");
+    let tag_a = String::from_str(&env, "tag-a");
+    let tag_b = String::from_str(&env, "tag-b");
+
+    assert_eq!(client.get_all_tags().len(), 0);
+
+    client.add_engagement_tag(&company, &eng_id, &tag_a);
+    client.add_engagement_tag(&company, &eng_id, &tag_b);
+    assert_eq!(client.get_all_tags().len(), 2);
+
+    // Adding the same tag again must not create a duplicate entry.
+    client.add_engagement_tag(&company, &eng_id, &tag_a);
+    assert_eq!(client.get_all_tags().len(), 2);
+
+    client.remove_engagement_tag(&company, &eng_id, &tag_a);
+    let remaining = client.get_all_tags();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining.get(0).unwrap(), tag_b);
+
+    client.remove_engagement_tag(&company, &eng_id, &tag_b);
+    assert_eq!(client.get_all_tags().len(), 0);
+}
+
+// ============================================================
+// ISSUE #322 & #323 — MILESTONE EXTENSION COUNT & CAP
+// ============================================================
+
+#[test]
+fn test_get_milestone_extension_count_aggregates_across_milestones() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXT-COUNT",
+    );
+    let eng_id = String::from_str(&env, "ENG-EXT-COUNT");
+
+    assert_eq!(client.get_milestone_extension_count(&eng_id), 0);
+
+    client.propose_milestone_extension(&recruiter, &eng_id, &1, &1_000);
+    client.accept_milestone_extension(&company, &eng_id, &1);
+    assert_eq!(client.get_milestone_extension_count(&eng_id), 1);
+
+    client.propose_milestone_extension(&recruiter, &eng_id, &2, &2_000);
+    client.accept_milestone_extension(&company, &eng_id, &2);
+    assert_eq!(client.get_milestone_extension_count(&eng_id), 2);
+
+    // A second extension on milestone 1 should add to the same engagement total.
+    client.propose_milestone_extension(&recruiter, &eng_id, &1, &500);
+    client.accept_milestone_extension(&company, &eng_id, &1);
+    assert_eq!(client.get_milestone_extension_count(&eng_id), 3);
+}
+
+#[test]
+fn test_max_milestone_extensions_default_cap_enforced() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXT-CAP",
+    );
+    let eng_id = String::from_str(&env, "ENG-EXT-CAP");
+
+    assert_eq!(client.get_max_milestone_extensions(), 3);
+
+    for _ in 0..3 {
+        client.propose_milestone_extension(&recruiter, &eng_id, &1, &100);
+        client.accept_milestone_extension(&company, &eng_id, &1);
+    }
+    assert_eq!(client.get_milestone_extension_count(&eng_id), 3);
+
+    let result = client.try_propose_milestone_extension(&recruiter, &eng_id, &1, &100);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_set_max_milestone_extensions_admin_update() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXT-CAP-2",
+    );
+    let eng_id = String::from_str(&env, "ENG-EXT-CAP-2");
+
+    client.set_max_milestone_extensions(&company, &1);
+    assert_eq!(client.get_max_milestone_extensions(), 1);
+
+    client.propose_milestone_extension(&recruiter, &eng_id, &1, &100);
+    client.accept_milestone_extension(&company, &eng_id, &1);
+
+    let result = client.try_propose_milestone_extension(&recruiter, &eng_id, &1, &100);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_set_max_milestone_extensions_non_admin_rejected() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let stranger = Address::generate(&env);
+
+    let result = client.try_set_max_milestone_extensions(&stranger, &5);
+    assert!(result.is_err());
+}
