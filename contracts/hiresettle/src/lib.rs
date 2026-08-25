@@ -368,6 +368,36 @@ pub struct EngagementConfig {
     pub tags: Option<Vec<String>>,
 }
 
+/// A single engagement configuration inside a `batch_create_engagements` call.
+/// Bundles every `create_engagement` parameter so a caller can submit many
+/// engagements — each with its own company, recruiter, terms and milestones —
+/// in one contract invocation (issue #260).
+#[contracttype]
+#[derive(Clone)]
+pub struct BatchEngagementConfig {
+    /// Unique string identifier for this engagement — see `create_engagement`.
+    pub engagement_id: String,
+    /// The hiring company for this engagement. Must `require_auth` like any
+    /// direct `create_engagement` call — batching does not relax authorization.
+    pub company: Address,
+    /// The recruiter receiving milestone payments for this engagement.
+    pub recruiter: Address,
+    /// Arbitration panel configuration — see `ArbiterSetup`.
+    pub arbiter_setup: ArbiterSetup,
+    /// SAC address of the escrow token for this engagement.
+    pub token: Address,
+    /// Total fee locked in escrow for this engagement, in the token's smallest unit.
+    pub total_amount: i128,
+    /// Short job title string for this engagement.
+    pub job_title: String,
+    /// Ordered milestone list for this engagement.
+    pub milestones: Vec<Milestone>,
+    /// Retention windows (in days), one per Retention milestone.
+    pub retention_days: Vec<u32>,
+    /// Bundled optional configuration — see `EngagementConfig`.
+    pub config: EngagementConfig,
+}
+
 /// Returned by `get_contract_health` for quick off-chain diagnostics (issue #256).
 #[contracttype]
 #[derive(Clone)]
@@ -648,6 +678,10 @@ pub enum DataKey {
     /// Wraps a `ConfigKey` so every admin-tunable scalar setting shares one
     /// `DataKey` variant instead of each needing its own. See `ConfigKey`.
     Config(ConfigKey),
+    /// Ledger sequence at or after which `execute_scheduled_auto_confirm` may
+    /// release a `ProofSubmitted` (engagement_id, milestone_index), scheduled
+    /// in advance by the company via `schedule_auto_confirm` (issue #352).
+    ScheduledAutoConfirm(String, u32),
 }
 
 // ============================================================
@@ -688,6 +722,10 @@ const DEFAULT_DUE_SOON_WINDOW_LEDGERS: u32 = 17_280;
 const MAX_TAGS: u32 = 10;
 /// Maximum length, in characters, of a single engagement tag (issue #248).
 const MAX_TAG_LENGTH: u32 = 32;
+/// Maximum number of engagements a single `batch_create_engagements` call may
+/// create (issue #260). Mirrors the 20-item cap used by
+/// `batch_get_engagement_summary` to keep resource usage bounded.
+const MAX_BATCH_CREATE_ENGAGEMENTS: u32 = 20;
 
 /// Shared panic message constants for the most-repeated error strings
 /// (issue #171). Keeping these as constants means a typo can't silently
@@ -1215,7 +1253,44 @@ impl HireSettleContract {
     ) -> String {
         Self::assert_not_paused(&env);
         company.require_auth();
+        Self::create_engagement_impl(
+            env,
+            engagement_id,
+            company,
+            recruiter,
+            arbiter_setup,
+            token,
+            total_amount,
+            job_title,
+            milestones,
+            retention_days,
+            config,
+        )
+    }
 
+    /// Shared engagement-creation logic behind `create_engagement`, factored
+    /// out so `batch_create_engagements` (issue #260) can authorize each
+    /// distinct company address once up front and then create every one of
+    /// its engagements without re-`require_auth`-ing that address — calling
+    /// `require_auth()` twice for the same address within one call frame
+    /// (as opposed to across separate cross-contract invocations) is rejected
+    /// by the host as a duplicate authorization.
+    ///
+    /// Callers are responsible for `assert_not_paused` and
+    /// `company.require_auth()` before invoking this.
+    fn create_engagement_impl(
+        env: Env,
+        engagement_id: String,
+        company: Address,
+        recruiter: Address,
+        arbiter_setup: ArbiterSetup,
+        token: Address,
+        total_amount: i128,
+        job_title: String,
+        milestones: Vec<Milestone>,
+        retention_days: Vec<u32>,
+        config: EngagementConfig,
+    ) -> String {
         // Validate engagement_id format: non-empty, ≤ 64 chars, [A-Za-z0-9-] only.
         if engagement_id.len() == 0 || engagement_id.len() > MAX_ENGAGEMENT_ID_LENGTH {
             panic!("InvalidEngagementId");
@@ -1581,6 +1656,80 @@ impl HireSettleContract {
     }
 
     // ----------------------------------------------------------
+    // ISSUE #260 — BATCH CREATE ENGAGEMENTS
+    // ----------------------------------------------------------
+
+    /// Create multiple engagements from a list of configs in a single call.
+    ///
+    /// Each entry in `configs` carries the same fields as `create_engagement`'s
+    /// individual parameters, bundled into a `BatchEngagementConfig`. This is a
+    /// thin wrapper: every engagement is created via the same `create_engagement`
+    /// path (same validation, same `company.require_auth()` per entry, same
+    /// events), so batching relaxes nothing — a company creating several
+    /// engagements for itself still only needs to sign once, but a batch mixing
+    /// engagements for different companies requires every distinct company's
+    /// signature to be present in the transaction.
+    ///
+    /// # Atomicity
+    /// A panic on any entry aborts the whole call — Soroban invocations are
+    /// all-or-nothing, so no partial batch is ever persisted.
+    ///
+    /// # Panics
+    /// - `"EmptyConfigs"` — `configs` is empty.
+    /// - `"TooManyEngagements"` — `configs` has more than `MAX_BATCH_CREATE_ENGAGEMENTS` (20) entries.
+    /// - Any panic condition documented on `create_engagement`, raised by whichever entry triggers it.
+    ///
+    /// # Returns
+    /// The list of created `engagement_id`s, in the same order as `configs`.
+    pub fn batch_create_engagements(env: Env, configs: Vec<BatchEngagementConfig>) -> Vec<String> {
+        Self::assert_not_paused(&env);
+
+        if configs.is_empty() {
+            panic!("EmptyConfigs");
+        }
+        if configs.len() > MAX_BATCH_CREATE_ENGAGEMENTS {
+            panic!("TooManyEngagements");
+        }
+
+        // Authorize each distinct company address exactly once. `require_auth`
+        // ties to the current call frame; since every entry in this batch is
+        // created via a plain function call rather than a separate
+        // cross-contract invocation, requesting auth twice for the same
+        // address here would be treated as a duplicate authorization by the
+        // host. A batch is free to mix companies — every distinct one just
+        // needs its signature present in the transaction.
+        let mut authorized: Vec<Address> = Vec::new(&env);
+        for i in 0..configs.len() {
+            let company = configs.get(i).unwrap().company;
+            if !authorized.contains(&company) {
+                company.require_auth();
+                authorized.push_back(company);
+            }
+        }
+
+        let mut ids: Vec<String> = Vec::new(&env);
+        for i in 0..configs.len() {
+            let cfg = configs.get(i).unwrap();
+            let id = Self::create_engagement_impl(
+                env.clone(),
+                cfg.engagement_id,
+                cfg.company,
+                cfg.recruiter,
+                cfg.arbiter_setup,
+                cfg.token,
+                cfg.total_amount,
+                cfg.job_title,
+                cfg.milestones,
+                cfg.retention_days,
+                cfg.config,
+            );
+            ids.push_back(id);
+        }
+
+        ids
+    }
+
+    // ----------------------------------------------------------
     // UNLOCK RETENTION MILESTONE
     // ----------------------------------------------------------
 
@@ -1666,6 +1815,116 @@ impl HireSettleContract {
                 engagement_id.clone(),
             ),
             (milestone_index, valid_after_ledger, unlocked_at_ledger),
+        );
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #348 — MILESTONE REORDER BEFORE ACTIVATION
+    // ----------------------------------------------------------
+
+    /// Reorder an engagement's milestones, moving `Locked`/`Pending` ones
+    /// (i.e. still pre-`ProofSubmitted`) around while leaving any milestone
+    /// that has already progressed — `ProofSubmitted`, `Confirmed`,
+    /// `Disputed`, or `Resolved` — pinned to its original index.
+    ///
+    /// Reordering only the not-yet-activated milestones is safe because
+    /// `confirm_milestone` / `batch_confirm_milestones` enforce sequential
+    /// confirmation by index (issue #67): changing the order of what's still
+    /// ahead simply reprioritises which milestone must be completed next,
+    /// while every milestone the recruiter has already submitted proof for
+    /// (or that already carries a dispute outcome) keeps the position that
+    /// proof, dispute, and payout history refer to.
+    ///
+    /// # Caller
+    /// `company` — must match the engagement's company (or its registered
+    /// co-signer) and sign the transaction.
+    ///
+    /// # Arguments
+    /// - `new_order` — a permutation of `0..milestones.len()`; `new_order[i]`
+    ///   is the original index of the milestone that should end up at
+    ///   position `i`.
+    ///
+    /// # Panics
+    /// - `"engagement is not active"` — the engagement is not `Active`.
+    /// - `"unauthorized"` — caller is not the engagement's company or co-signer.
+    /// - `"InvalidReorderLength"` — `new_order.len()` does not match the
+    ///   engagement's milestone count.
+    /// - `"invalid milestone index"` — `new_order` contains an out-of-bounds index.
+    /// - `"DuplicateReorderIndex"` — `new_order` is not a valid permutation
+    ///   (an index appears more than once).
+    /// - `"CannotReorderProgressedMilestone"` — `new_order` would move a
+    ///   milestone that is `ProofSubmitted`, `Confirmed`, `Disputed`, or
+    ///   `Resolved` away from its original index.
+    ///
+    /// # Events
+    /// - `("milestones_reordered", engagement_id)` with `new_order`.
+    pub fn reorder_milestones(
+        env: Env,
+        company: Address,
+        engagement_id: String,
+        new_order: Vec<u32>,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        company.require_auth();
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::Active {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+
+        if !Self::is_authorized_company(&env, &company, &engagement.company) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let len = engagement.milestones.len();
+        if new_order.len() != len {
+            panic!("InvalidReorderLength");
+        }
+
+        // Validate that new_order is a permutation of 0..len before touching
+        // any state, so a malformed input never partially reorders anything.
+        let mut seen: Vec<u32> = Vec::new(&env);
+        for i in 0..new_order.len() {
+            let old_idx = new_order.get(i).unwrap();
+            if old_idx >= len {
+                panic!("{}", ERR_INVALID_MILESTONE_INDEX);
+            }
+            if seen.contains(&old_idx) {
+                panic!("DuplicateReorderIndex");
+            }
+            seen.push_back(old_idx);
+        }
+
+        let mut new_milestones: Vec<Milestone> = Vec::new(&env);
+        for i in 0..new_order.len() {
+            let old_idx = new_order.get(i).unwrap();
+            let m = engagement.milestones.get(old_idx).unwrap();
+            let progressed = matches!(
+                m.status,
+                MilestoneStatus::ProofSubmitted
+                    | MilestoneStatus::Confirmed
+                    | MilestoneStatus::Disputed
+                    | MilestoneStatus::Resolved
+            );
+            if progressed && i != old_idx {
+                panic!("CannotReorderProgressedMilestone");
+            }
+            new_milestones.push_back(m);
+        }
+
+        engagement.milestones = new_milestones;
+        engagement.last_activity_ledger = env.ledger().sequence();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
+
+        env.events().publish(
+            (Symbol::new(&env, "milestones_reordered"), engagement_id),
+            new_order,
         );
     }
 
@@ -2136,6 +2395,282 @@ impl HireSettleContract {
                 ),
                 (
                     engagement_id.clone(),
+                    engagement.released_amount,
+                    env.ledger().sequence(),
+                ),
+            );
+        }
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #352 — ESCROW RELEASE SCHEDULING
+    // ----------------------------------------------------------
+
+    /// Schedule a future-ledger auto-confirm for a milestone whose proof has
+    /// already been submitted, so its payment releases automatically once
+    /// `target_ledger` is reached instead of requiring the company to call
+    /// `confirm_milestone` in person.
+    ///
+    /// This does not release funds immediately or bypass the dispute window —
+    /// the company can still `raise_dispute` at any point before
+    /// `execute_scheduled_auto_confirm` is actually called, which moves the
+    /// milestone out of `ProofSubmitted` and makes the scheduled entry a no-op.
+    ///
+    /// # Caller
+    /// `company` — must match the engagement's company (or its registered
+    /// co-signer) and sign the transaction.
+    ///
+    /// # Panics
+    /// - `"engagement is not active"` — the engagement is not `Active`.
+    /// - `"unauthorized"` — caller is not the engagement's company or co-signer.
+    /// - `"invalid milestone index"` — `milestone_index` is out of bounds.
+    /// - `"milestone proof not yet submitted"` — the milestone is not in `ProofSubmitted` status.
+    /// - `"ScheduledLedgerInPast"` — `target_ledger` is at or before the current ledger.
+    ///
+    /// # Events
+    /// - `("auto_confirm_scheduled", engagement_id)` with `(milestone_index, target_ledger)`.
+    pub fn schedule_auto_confirm(
+        env: Env,
+        company: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        target_ledger: u32,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        company.require_auth();
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::Active {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+
+        if !Self::is_authorized_company(&env, &company, &engagement.company) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.status != MilestoneStatus::ProofSubmitted {
+            panic!("milestone proof not yet submitted");
+        }
+
+        if target_ledger <= env.ledger().sequence() {
+            panic!("ScheduledLedgerInPast");
+        }
+
+        let key = DataKey::ScheduledAutoConfirm(engagement_id.clone(), milestone_index);
+        env.storage().persistent().set(&key, &target_ledger);
+        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "auto_confirm_scheduled"),
+                engagement_id,
+            ),
+            (milestone_index, target_ledger),
+        );
+    }
+
+    /// Cancel a previously scheduled auto-confirm for a milestone. No-op if
+    /// none is scheduled.
+    ///
+    /// # Caller
+    /// `company` — must match the engagement's company (or its registered
+    /// co-signer) and sign the transaction.
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — caller is not the engagement's company or co-signer.
+    pub fn cancel_scheduled_auto_confirm(
+        env: Env,
+        company: Address,
+        engagement_id: String,
+        milestone_index: u32,
+    ) {
+        company.require_auth();
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        if !Self::is_authorized_company(&env, &company, &engagement.company) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let key = DataKey::ScheduledAutoConfirm(engagement_id.clone(), milestone_index);
+        if env.storage().persistent().has(&key) {
+            env.storage().persistent().remove(&key);
+            env.events().publish(
+                (
+                    Symbol::new(&env, "auto_confirm_cancelled"),
+                    engagement_id,
+                ),
+                milestone_index,
+            );
+        }
+    }
+
+    /// Return the ledger sequence at which a milestone's auto-confirm is
+    /// scheduled to become executable, or `None` if none is scheduled.
+    /// Read-only and permissionless.
+    pub fn get_scheduled_auto_confirm(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ScheduledAutoConfirm(engagement_id, milestone_index))
+    }
+
+    /// Execute a milestone's scheduled auto-confirm once `target_ledger` has
+    /// been reached, releasing payment exactly as `confirm_milestone` would.
+    ///
+    /// # Caller
+    /// Anyone — this function is permissionless. The company already
+    /// authorised the release when it called `schedule_auto_confirm`; this
+    /// call only carries out a commitment already made on-chain.
+    ///
+    /// # Panics
+    /// - `"engagement is not active"` — the engagement is not `Active`.
+    /// - `"NoScheduledAutoConfirm"` — no auto-confirm is scheduled for this milestone.
+    /// - `"ScheduledLedgerNotReached"` — the current ledger is still before the scheduled ledger.
+    /// - `"invalid milestone index"` — `milestone_index` is out of bounds.
+    /// - `"milestone proof not yet submitted"` — the milestone left `ProofSubmitted`
+    ///   in the meantime (e.g. a dispute was raised), so the schedule no longer applies.
+    /// - `"PreviousMilestoneNotComplete"` — an earlier milestone (by index) is not
+    ///   yet `Confirmed` or `Resolved` (issue #67 sequential-confirmation rule).
+    ///
+    /// # Events
+    /// - `("platform_fee_collected", engagement_id)` with `(milestone_index, fee_amount, treasury)` — when fee > 0.
+    /// - `("milestone_status_changed", engagement_id)` with `(milestone_index, old_status, new_status)`.
+    /// - `("milestone_auto_confirmed", engagement_id)` with `(milestone_index, payment)`.
+    /// - `("status_changed", engagement_id)` — if the engagement completes.
+    /// - `("engagement_completed", engagement_id)` — if all milestones are now done.
+    pub fn execute_scheduled_auto_confirm(env: Env, engagement_id: String, milestone_index: u32) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::Active {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+
+        let key = DataKey::ScheduledAutoConfirm(engagement_id.clone(), milestone_index);
+        let target_ledger: u32 = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("NoScheduledAutoConfirm"));
+
+        if env.ledger().sequence() < target_ledger {
+            panic!("ScheduledLedgerNotReached");
+        }
+
+        let mut milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.status != MilestoneStatus::ProofSubmitted {
+            panic!("milestone proof not yet submitted");
+        }
+
+        // Issue #67: enforce the same sequential-confirmation rule as confirm_milestone.
+        for i in 0..milestone_index {
+            let prev = engagement.milestones.get(i).unwrap();
+            if prev.status != MilestoneStatus::Confirmed && prev.status != MilestoneStatus::Resolved
+            {
+                panic!("PreviousMilestoneNotComplete");
+            }
+        }
+
+        // Release payment identically to confirm_milestone, including the
+        // issue #183 replacement-payout accounting.
+        let full_share = (engagement.total_amount * milestone.payment_percent as i128) / 100;
+        let payment = full_share - milestone.replacement_paid_out;
+        if payment > 0 {
+            let platform_fee = Self::get_platform_fee_internal(&env);
+            let base_bps =
+                Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
+            let effective_bps = Self::apply_referral_discount(&env, base_bps, &engagement.referrer);
+            let fee_amount = (payment * effective_bps as i128) / 10_000;
+            let net_payment = payment - fee_amount;
+            engagement.released_amount += payment;
+
+            let token_client = token::Client::new(&env, &engagement.token);
+            if fee_amount > 0 {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &platform_fee.treasury,
+                    &fee_amount,
+                );
+                env.events().publish(
+                    (
+                        Symbol::new(&env, "platform_fee_collected"),
+                        engagement_id.clone(),
+                    ),
+                    (milestone_index, fee_amount, platform_fee.treasury),
+                );
+            }
+            Self::distribute_recruiter_payout(&env, &engagement, net_payment, &token_client);
+            Self::on_escrow_lifecycle_checkpoint(
+                &env,
+                &engagement_id,
+                EscrowLifecycleAction::PayoutReleased,
+                -payment,
+                &engagement.token,
+                &engagement.company,
+                &engagement.recruiter,
+            );
+        }
+
+        let old_status = milestone.status.clone();
+        milestone.status = MilestoneStatus::Confirmed;
+        engagement.milestones.set(milestone_index, milestone);
+
+        let all_done = (0..engagement.milestones.len()).all(|i| {
+            let s = engagement.milestones.get(i).unwrap().status;
+            s == MilestoneStatus::Confirmed || s == MilestoneStatus::Resolved
+        });
+
+        let old_engagement_status = engagement.status.clone();
+        if all_done {
+            engagement.status = EngagementStatus::Completed;
+            Self::decrement_company_active_count(&env, &engagement.company);
+        }
+        engagement.last_activity_ledger = env.ledger().sequence();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
+        env.storage().persistent().remove(&key);
+
+        Self::emit_milestone_status_changed(
+            &env,
+            &engagement_id,
+            milestone_index,
+            old_status,
+            MilestoneStatus::Confirmed,
+        );
+        Self::emit_engagement_status_changed(
+            &env,
+            &engagement_id,
+            old_engagement_status,
+            engagement.status.clone(),
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "milestone_auto_confirmed"),
+                engagement_id.clone(),
+            ),
+            (milestone_index, payment),
+        );
+
+        if all_done {
+            env.events().publish(
+                (
+                    Symbol::new(&env, "engagement_completed"),
+                    engagement_id.clone(),
+                ),
+                (
+                    engagement_id,
                     engagement.released_amount,
                     env.ledger().sequence(),
                 ),
@@ -5324,6 +5859,110 @@ impl HireSettleContract {
                 .get::<DataKey, Engagement>(&DataKey::Engagement(id))
             {
                 if engagement.status == status {
+                    count += 1;
+                }
+            }
+        }
+        count
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #351 — ENGAGEMENT LIST BY AMOUNT RANGE
+    // ----------------------------------------------------------
+
+    /// Return a paginated slice of engagement IDs whose `total_amount` falls
+    /// within `[min_amount, max_amount]` (inclusive on both ends). `page` is
+    /// 0-indexed; out-of-range pages return an empty vec.
+    ///
+    /// Carries the same linear-scan cost and index-coverage caveats as
+    /// `get_engagement_ids_by_status` — an entry whose record has expired
+    /// from storage is skipped rather than treated as a match.
+    ///
+    /// # Panics
+    /// - `"InvalidAmountRange"` — `min_amount > max_amount`.
+    pub fn get_engagements_by_amount_range(
+        env: Env,
+        min_amount: i128,
+        max_amount: i128,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<String> {
+        let mut result = Vec::new(&env);
+        if page_size == 0 {
+            return result;
+        }
+        if min_amount > max_amount {
+            panic!("InvalidAmountRange");
+        }
+
+        let ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AllEngagements)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Use saturating arithmetic so a huge `page` / `page_size` combination
+        // clamps instead of wrapping around via u32 overflow.
+        let start = page.saturating_mul(page_size);
+        let end = start.saturating_add(page_size);
+
+        // Walk the index counting matches, collecting only those whose position
+        // within the filtered sequence falls inside the requested page.
+        let mut matched: u32 = 0;
+        for i in 0..ids.len() {
+            if matched >= end {
+                break;
+            }
+            let id = ids.get(i).unwrap();
+            let engagement: Engagement = match env
+                .storage()
+                .persistent()
+                .get(&DataKey::Engagement(id.clone()))
+            {
+                Some(e) => e,
+                None => continue,
+            };
+            if engagement.total_amount >= min_amount && engagement.total_amount <= max_amount {
+                if matched >= start {
+                    result.push_back(id);
+                }
+                matched += 1;
+            }
+        }
+
+        result
+    }
+
+    /// Return the total number of engagements whose `total_amount` falls
+    /// within `[min_amount, max_amount]` (inclusive). Companion to
+    /// `get_engagements_by_amount_range` for sizing pagination.
+    ///
+    /// # Panics
+    /// - `"InvalidAmountRange"` — `min_amount > max_amount`.
+    pub fn get_engagement_count_by_amount(
+        env: Env,
+        min_amount: i128,
+        max_amount: i128,
+    ) -> u32 {
+        if min_amount > max_amount {
+            panic!("InvalidAmountRange");
+        }
+
+        let ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AllEngagements)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let mut count: u32 = 0;
+        for i in 0..ids.len() {
+            let id = ids.get(i).unwrap();
+            if let Some(engagement) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, Engagement>(&DataKey::Engagement(id))
+            {
+                if engagement.total_amount >= min_amount && engagement.total_amount <= max_amount {
                     count += 1;
                 }
             }
