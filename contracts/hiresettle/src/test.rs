@@ -8653,3 +8653,321 @@ fn test_get_contract_health_emits_snapshot_event_reflects_paused_state() {
     assert!(health.paused);
     assert!(has_event(&env, "contract_health_snapshot"));
 }
+
+// ============================================================
+// ADDITIONAL COMPREHENSIVE TEST COVERAGE
+// ============================================================
+
+/// Test that arbiter nomination cannot be done on a non-existent engagement
+#[test]
+#[should_panic(expected = "engagement not found")]
+fn test_nominate_arbiter_on_nonexistent_engagement_rejected() {
+    let (env, contract_id, _token_id, _company, _recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let new_arbiter = Address::generate(&env);
+    let fake_eng_id = String::from_str(&env, "ENG-DOES-NOT-EXIST");
+    
+    client.nominate_arbiter_successor(&arbiter, &fake_eng_id, &new_arbiter);
+}
+
+/// Test that multiple companies can have independent engagement counts
+#[test]
+fn test_multiple_companies_independent_active_counts() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    // Setup second company with its own token
+    let token_admin2 = Address::generate(&env);
+    let token_id2 = env.register_stellar_asset_contract_v2(token_admin2.clone()).address();
+    let token_client2 = token::StellarAssetClient::new(&env, &token_id2);
+    let company2 = Address::generate(&env);
+    token_client2.mint(&company2, &500_000_000_000);
+    
+    // Create engagements for both companies
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-C1-1");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-C1-2");
+    
+    client.create_engagement(
+        &String::from_str(&env, "ENG-C2-1"),
+        &company2,
+        &recruiter,
+        &ArbiterSetup { arbiters: vec![&env, arbiter.clone()], quorum: 1 },
+        &token_id2,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+    
+    assert_eq!(client.get_company_active_count(&company), 2);
+    assert_eq!(client.get_company_active_count(&company2), 1);
+    assert_eq!(client.get_engagement_count(), 3);
+}
+
+/// Test that force_confirm_milestone emits the correct event with all data
+#[test]
+fn test_force_confirm_milestone_event_contains_correct_data() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    client.set_confirm_window(&company, &100u32);
+    
+    let eng_id = String::from_str(&env, "ENG-FC-EVT-DATA");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-FC-EVT-DATA");
+    
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    
+    advance_ledger(&env, 101);
+    let force_confirm_ledger = env.ledger().sequence();
+    
+    client.force_confirm_milestone(&arbiter, &eng_id, &0);
+    
+    let expected = Symbol::new(&env, "milestone_force_confirmed");
+    let mut found = false;
+    for (_, topics, data) in env.events().all().iter() {
+        let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        if topic == expected {
+            let (idx, ledger): (u32, u32) = data.try_into_val(&env).unwrap();
+            assert_eq!(idx, 0);
+            assert_eq!(ledger, force_confirm_ledger);
+            found = true;
+        }
+    }
+    assert!(found, "milestone_force_confirmed event not found with correct data");
+}
+
+/// Test that co-recruiter receives correct split even with platform fee
+#[test]
+fn test_co_recruiter_split_with_platform_fee() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+    let co_recruiter = Address::generate(&env);
+    
+    // Set 2% platform fee (200 bps)
+    client.set_platform_fee(&company, &200, &treasury);
+    
+    let config = EngagementConfig {
+        metadata_hash: None,
+        co_recruiter: Some(co_recruiter.clone()),
+        recruiter_split_bps: 6_000, // 60% to primary, 40% to co
+        contract_pdf_hash: None,
+        referrer: None,
+        tags: None,
+    };
+    
+    client.create_engagement(
+        &String::from_str(&env, "ENG-CO-PLAT-FEE"),
+        &company,
+        &recruiter,
+        &ArbiterSetup { arbiters: vec![&env, arbiter.clone()], quorum: 1 },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &config,
+    );
+    
+    let eng_id = String::from_str(&env, "ENG-CO-PLAT-FEE");
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.confirm_milestone(&company, &eng_id, &0);
+    
+    // Milestone 0: 30% of 1_000_000_000 = 300_000_000
+    // Platform fee: 300_000_000 * 200 / 10_000 = 6_000_000
+    // After platform fee: 300_000_000 - 6_000_000 = 294_000_000
+    // Primary (60%): 294_000_000 * 6000 / 10000 = 176_400_000
+    // Co (40%): 294_000_000 - 176_400_000 = 117_600_000
+    
+    assert_eq!(token_client.balance(&treasury), 6_000_000);
+    assert_eq!(token_client.balance(&recruiter), 176_400_000);
+    assert_eq!(token_client.balance(&co_recruiter), 117_600_000);
+}
+
+/// Test that amendment proposal expires correctly at the boundary
+#[test]
+#[should_panic(expected = "amendment_expired")]
+fn test_amendment_expiry_at_exact_boundary() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let eng_id = String::from_str(&env, "ENG-AMEND-BOUNDARY");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AMEND-BOUNDARY");
+    
+    // Set TTL to 100 ledgers
+    client.set_amendment_ttl(&company, &100u32);
+    
+    client.propose_amendment(&company, &eng_id, &0, &25);
+    
+    // Advance exactly 101 ledgers (one past the boundary)
+    advance_ledger(&env, 101);
+    
+    // Should fail: current > proposed_at + ttl
+    client.accept_amendment(&recruiter, &eng_id, &0);
+}
+
+/// Test that replacement milestone reset preserves correct milestone structure
+#[test]
+fn test_replacement_preserves_milestone_structure_after_multi_confirms() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    
+    let eng_id = String::from_str(&env, "ENG-REPL-STRUCT");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-REPL-STRUCT");
+    
+    // Confirm placement
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer-1"));
+    client.confirm_milestone(&company, &eng_id, &0);
+    assert_eq!(token_client.balance(&recruiter), 300_000_000);
+    
+    // Confirm first retention milestone
+    advance_ledger(&env, 31 * 17_280);
+    client.unlock_milestone(&eng_id, &1);
+    client.submit_proof(&recruiter, &eng_id, &1, &String::from_str(&env, "ipfs://30day-1"));
+    client.confirm_milestone(&company, &eng_id, &1);
+    assert_eq!(token_client.balance(&recruiter), 700_000_000);
+    
+    // Request replacement
+    client.request_replacement(&company, &eng_id, &String::from_str(&env, "candidate_left"));
+    
+    // Verify milestone structure: m0 should be Pending, m1 and m2 should be Locked
+    let m0 = client.get_milestone(&eng_id, &0);
+    let m1 = client.get_milestone(&eng_id, &1);
+    let m2 = client.get_milestone(&eng_id, &2);
+    
+    assert_eq!(m0.status, MilestoneStatus::Pending);
+    assert_eq!(m1.status, MilestoneStatus::Locked);
+    assert_eq!(m2.status, MilestoneStatus::Locked);
+    assert_eq!(m0.proof_hash, String::from_str(&env, ""));
+    assert_eq!(m1.proof_hash, String::from_str(&env, ""));
+}
+
+/// Test batch_get_engagement_summary with mixed valid and invalid IDs
+#[test]
+fn test_batch_get_engagement_summary_filters_invalid_ids() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "BATCH-V1");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "BATCH-V2");
+    
+    let ids = vec![
+        &env,
+        String::from_str(&env, "BATCH-V1"),
+        String::from_str(&env, "INVALID-1"),
+        String::from_str(&env, "BATCH-V2"),
+        String::from_str(&env, "INVALID-2"),
+    ];
+    
+    let summaries = client.batch_get_engagement_summary(&ids);
+    
+    // Should only return the 2 valid engagements
+    assert_eq!(summaries.len(), 2);
+    assert_eq!(summaries.get(0).unwrap().id, String::from_str(&env, "BATCH-V1"));
+    assert_eq!(summaries.get(1).unwrap().id, String::from_str(&env, "BATCH-V2"));
+}
+
+/// Test that proof resubmission cooldown is properly reset after dispute rejection
+#[test]
+fn test_proof_cooldown_reset_after_multiple_dispute_cycles() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    // Set a short cooldown for testing
+    client.set_proof_cooldown(&company, &10u32);
+    
+    let eng_id = String::from_str(&env, "ENG-COOL-MULTI");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-COOL-MULTI");
+    
+    // First cycle: submit, dispute, reject
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof1"));
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "dispute1"));
+    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &false);
+    
+    // Wait for cooldown
+    advance_ledger(&env, 11);
+    
+    // Second cycle: submit, dispute, reject
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof2"));
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "dispute2"));
+    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &false);
+    
+    // Wait for cooldown again
+    advance_ledger(&env, 11);
+    
+    // Third attempt should succeed
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof3"));
+    
+    let m0 = client.get_milestone(&eng_id, &0);
+    assert_eq!(m0.status, MilestoneStatus::ProofSubmitted);
+    assert_eq!(m0.proof_hash, String::from_str(&env, "ipfs://proof3"));
+}
+
+/// Test that early exit acceptance correctly handles partial milestone completion
+#[test]
+fn test_early_exit_with_multiple_confirmed_milestones() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    
+    let eng_id = String::from_str(&env, "ENG-EXIT-PARTIAL");
+    let company_balance_before = token_client.balance(&company);
+    
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXIT-PARTIAL");
+    
+    // Confirm milestone 0 (30%)
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    client.confirm_milestone(&company, &eng_id, &0);
+    
+    // Confirm milestone 1 (40%)
+    advance_ledger(&env, 31 * 17_280);
+    client.unlock_milestone(&eng_id, &1);
+    client.submit_proof(&recruiter, &eng_id, &1, &String::from_str(&env, "ipfs://30day"));
+    client.confirm_milestone(&company, &eng_id, &1);
+    
+    // Released: 30% + 40% = 70% = 700_000_000
+    assert_eq!(token_client.balance(&recruiter), 700_000_000);
+    
+    // Request and accept early exit
+    client.request_early_exit(&recruiter, &eng_id);
+    client.accept_early_exit(&company, &eng_id);
+    
+    // Unreleased: 30% = 300_000_000 should be refunded to company
+    let expected_refund = 300_000_000i128;
+    assert_eq!(
+        token_client.balance(&company),
+        company_balance_before - 1_000_000_000 + expected_refund
+    );
+    
+    let eng = client.get_engagement(&eng_id);
+    assert_eq!(eng.status, EngagementStatus::Cancelled);
+    assert_eq!(eng.released_amount, 700_000_000);
+}
+
+/// Test that get_estimated_unlock_seconds handles edge case at exact boundary
+#[test]
+fn test_estimated_unlock_seconds_at_exact_unlock_time() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let eng_id = String::from_str(&env, "ENG-UNLOCK-EXACT");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-UNLOCK-EXACT");
+    
+    let m1 = client.get_milestone(&eng_id, &1);
+    let valid_after = m1.valid_after_ledger;
+    
+    // Advance to exactly the unlock ledger
+    let ledgers_to_advance = valid_after - env.ledger().sequence();
+    advance_ledger(&env, ledgers_to_advance);
+    
+    // At the exact boundary, should return 0
+    let seconds = client.get_estimated_unlock_seconds(&eng_id, &1);
+    assert_eq!(seconds, 0);
+    
+    // Should be unlockable
+    assert!(client.is_milestone_unlockable(&eng_id, &1));
+}
