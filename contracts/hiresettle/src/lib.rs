@@ -338,9 +338,15 @@ pub struct PlatformFee {
 #[contracttype]
 #[derive(Clone)]
 pub struct FeeTier {
-    /// Minimum `total_amount` (inclusive) to qualify for this tier.
+    /// Minimum engagement `total_amount` (inclusive) required to fall into this
+    /// tier. Tiers are evaluated highest-`threshold` first, so an engagement is
+    /// charged the `bps` of the first (highest) tier whose `threshold` it meets
+    /// or exceeds; if it is below every tier's `threshold`, the contract-wide
+    /// default platform fee applies instead.
     pub threshold: i128,
-    /// Platform fee in basis points applied to engagements in this tier.
+    /// Platform fee, in basis points (1 bp = 0.01%), charged on engagements that
+    /// qualify for this tier (i.e. whose `total_amount` is at or above
+    /// `threshold`). Replaces the default platform fee for those engagements.
     pub bps: u32,
 }
 
@@ -372,9 +378,21 @@ pub struct EngagementConfig {
 #[contracttype]
 #[derive(Clone)]
 pub struct ContractHealth {
+    /// Whether the pause switch is engaged. While `true`, every entry point
+    /// guarded by `assert_not_paused` rejects. Reports `false` when the flag
+    /// has never been set.
     pub paused: bool,
+    /// Address currently allowed to call the admin-gated setters. Set by
+    /// `init` and replaced only when a nominee claims the role, so it never
+    /// reports a pending nomination.
     pub admin: Address,
+    /// Contract version string, as set by `set_version`. Falls back to
+    /// `DEFAULT_VERSION` when no version has been stored, so an absent value
+    /// is indistinguishable from one explicitly set to the default.
     pub version: String,
+    /// Number of engagements ever created (issue #34). Monotonic: it counts
+    /// creations, not live engagements, so cancelled and completed ones stay
+    /// included and the value never decreases.
     pub total_engagement_count: u64,
 }
 
@@ -601,7 +619,10 @@ pub enum DataKey {
     AdminRenounced,
     /// Per-company count of currently active (non-terminal) engagements.
     CompanyActiveCount(Address),
-    /// Per-tag list of engagement IDs (issue #249).
+    /// Legacy tag-index variant. Engagements are now indexed under
+    /// `TagEngagements`; this variant is retained only so the `DataKey`
+    /// discriminant layout is unchanged for already-deployed storage.
+    #[allow(dead_code)]
     EngagementTag(String),
     /// Optional co-signer address authorized to perform company-gated actions (issue #254).
     CompanyCosigner(Address),
@@ -1154,8 +1175,13 @@ impl HireSettleContract {
 
     /// Return a single diagnostic snapshot of the contract's health (issue #256).
     /// Returns paused state, admin, version, and total engagement count in one call.
+    ///
+    /// # Events
+    /// Emits `("contract_health_snapshot",)` with the returned `ContractHealth`
+    /// as data, so off-chain keepers polling this view can be observed and
+    /// indexed on-chain rather than only inferred from RPC traffic (issue #316).
     pub fn get_contract_health(env: Env) -> ContractHealth {
-        ContractHealth {
+        let health = ContractHealth {
             paused: Self::is_paused_internal(&env),
             admin: Self::get_admin_internal(&env),
             version: env
@@ -1168,7 +1194,14 @@ impl HireSettleContract {
                 .instance()
                 .get(&DataKey::EngagementCount)
                 .unwrap_or(0u64),
-        }
+        };
+
+        env.events().publish(
+            (Symbol::new(&env, "contract_health_snapshot"),),
+            health.clone(),
+        );
+
+        health
     }
 
     // ----------------------------------------------------------
@@ -2183,8 +2216,8 @@ impl HireSettleContract {
     /// arbiters can vote on the outcome.
     ///
     /// # Caller
-    /// `company` — must match the engagement's company address and sign
-    /// the transaction.
+    /// `company`: must be the engagement's company address or its registered
+    /// company co-signer, and must sign the transaction.
     ///
     /// # Behaviour
     /// - The engagement must be `Active`.
@@ -2198,12 +2231,20 @@ impl HireSettleContract {
     ///   see [`Self::cast_arbiter_vote`].
     ///
     /// # Panics
-    /// - `"ReasonTooLong"` — `reason` exceeds 128 bytes.
-    /// - `"engagement is not active"` — engagement is not `Active`.
-    /// - `"unauthorized"` — caller is not the engagement's company.
-    /// - `"can only dispute a submitted proof"` — milestone is not in
+    /// - `"EngagementPaused"`: the engagement has been paused by the admin.
+    /// - Authentication fails for `company` when `company.require_auth()` is
+    ///   evaluated.
+    /// - `"ReasonTooLong"`: `reason` is longer than 128 bytes.
+    /// - `"engagement not found"`: no engagement exists for `engagement_id`.
+    /// - `"engagement is not active"`: the engagement is not in `Active` status.
+    /// - `"unauthorized"`: the authenticated caller is neither the engagement's
+    ///   company nor its registered company co-signer.
+    /// - `"invalid milestone index"`: `milestone_index` does not identify a
+    ///   milestone in the engagement.
+    /// - `"can only dispute a submitted proof"`: the milestone is not in
     ///   `ProofSubmitted` status.
-    /// - `"DisputeWindowClosed"` — the dispute window has elapsed.
+    /// - `"DisputeWindowClosed"`: the current ledger is after the dispute
+    ///   window calculated from `proof_submitted_at`.
     ///
     /// # Events
     /// Emits `("dispute_raised", engagement_id)` with
@@ -5413,7 +5454,7 @@ impl HireSettleContract {
             panic!("{}", ERR_UNAUTHORIZED);
         }
 
-        let key = DataKey::EngagementTag(tag.clone());
+        let key = DataKey::TagEngagements(tag.clone());
         let mut ids: Vec<String> = env
             .storage()
             .persistent()
@@ -5442,7 +5483,7 @@ impl HireSettleContract {
             panic!("{}", ERR_UNAUTHORIZED);
         }
 
-        let key = DataKey::EngagementTag(tag.clone());
+        let key = DataKey::TagEngagements(tag.clone());
         let ids: Vec<String> = env
             .storage()
             .persistent()
@@ -5559,7 +5600,7 @@ impl HireSettleContract {
         let ids: Vec<String> = env
             .storage()
             .persistent()
-            .get(&DataKey::EngagementTag(tag))
+            .get(&DataKey::TagEngagements(tag))
             .unwrap_or_else(|| Vec::new(&env));
 
         let total = ids.len();
@@ -5583,7 +5624,7 @@ impl HireSettleContract {
         let ids: Vec<String> = env
             .storage()
             .persistent()
-            .get(&DataKey::EngagementTag(tag))
+            .get(&DataKey::TagEngagements(tag))
             .unwrap_or_else(|| Vec::new(&env));
         ids.len()
     }

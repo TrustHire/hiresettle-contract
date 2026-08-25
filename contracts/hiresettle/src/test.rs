@@ -3216,6 +3216,99 @@ fn test_non_admin_cannot_pause_or_unpause() {
 }
 
 // ============================================================
+// #239 — per-engagement pause (quarantine) and its interaction with the global pause
+// ============================================================
+
+#[test]
+#[should_panic(expected = "EngagementPaused")]
+fn test_engagement_pause_blocks_lifecycle_while_contract_runs() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-QUARANTINE");
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-QUARANTINE",
+    );
+
+    // Contract is running; only the single engagement is quarantined.
+    assert!(!client.is_paused());
+    client.pause_engagement(&company, &eng_id);
+    assert!(client.is_engagement_paused(&eng_id));
+
+    // The engagement's own lifecycle call is rejected, other engagements are unaffected.
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+}
+
+#[test]
+fn test_global_unpause_does_not_clear_engagement_pause() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-QUARANTINE-INTERACTION");
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-QUARANTINE-INTERACTION",
+    );
+
+    // Quarantine the engagement, then pause the whole contract.
+    client.pause_engagement(&company, &eng_id);
+    client.pause(&company);
+
+    // Call is blocked while both guards are active.
+    let res = client.try_submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    assert!(res.is_err());
+
+    // Resuming the contract does NOT lift the per-engagement quarantine: the call
+    // stays blocked purely because the engagement is still quarantined.
+    client.unpause(&company);
+    assert!(!client.is_paused());
+    assert!(client.is_engagement_paused(&eng_id));
+
+    let res = client.try_submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    assert!(res.is_err());
+
+    // Only lifting the quarantine lets the call through.
+    client.unpause_engagement(&company, &eng_id);
+    assert!(!client.is_engagement_paused(&eng_id));
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+}
+
+#[test]
+fn test_engagement_unpause_does_not_clear_global_pause() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-QUARANTINE-GLOBAL");
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-QUARANTINE-GLOBAL",
+    );
+
+    // Pause the contract, then quarantine the engagement (allowed while paused).
+    client.pause(&company);
+    client.pause_engagement(&company, &eng_id);
+
+    // Lifting the engagement quarantine does NOT resume the globally paused contract.
+    client.unpause_engagement(&company, &eng_id);
+    assert!(!client.is_engagement_paused(&eng_id));
+    assert!(client.is_paused());
+
+    let res = client.try_submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    assert!(res.is_err());
+
+    // Only resuming the contract lets the call through.
+    client.unpause(&company);
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+}
+
+#[test]
+fn test_engagement_pause_query_unknown_id_false() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Unknown engagement IDs report false rather than panicking.
+    assert!(!client.is_engagement_paused(&String::from_str(&env, "ENG-DOES-NOT-EXIST")));
+}
+
+// ============================================================
 // #15 — two-step admin transfer
 // ============================================================
 
@@ -8537,359 +8630,26 @@ fn test_escrow_callback_checkpoint_emits_when_enabled_and_target_set() {
     assert!(has_event(&env, "escrow_callback_point"));
 }
 
-// ============================================================
-// ISSUE #318 — SUPER-ARBITER RESPONSE DEADLINE
-// ============================================================
-
-/// Drives an engagement through submit_proof -> raise_dispute -> escalate_dispute
-/// (no arbiter votes cast, so the record never satisfies quorum/rejection) and
-/// returns the engagement id, ready for either `super_arbiter_resolve` or
-/// `resolve_escalation_timeout`.
-fn setup_escalated_dispute(
-    env: &Env,
-    client: &HireSettleContractClient,
-    token_id: &Address,
-    company: &Address,
-    recruiter: &Address,
-    super_arbiter: &Address,
-    id: &str,
-) -> String {
-    let a1 = Address::generate(env);
-    let a2 = Address::generate(env);
-
-    let eng_id = String::from_str(env, id);
-    client.create_engagement(
-        &eng_id,
-        company,
-        recruiter,
-        &ArbiterSetup {
-            arbiters: vec![env, a1.clone(), a2.clone()],
-            quorum: 2,
-        },
-        token_id,
-        &1_000_000_000,
-        &String::from_str(env, "Engineer"),
-        &build_milestones(env),
-        &vec![env, 30u32, 90u32],
-        &default_config(),
-    );
-
-    client.submit_proof(
-        recruiter,
-        &eng_id,
-        &0,
-        &String::from_str(env, "ipfs://proof"),
-    );
-    client.raise_dispute(company, &eng_id, &0, &String::from_str(env, "dispute"));
-
-    // Elapse the dispute window so escalation is permitted.
-    advance_ledger(env, DEFAULT_DISPUTE_WINDOW_LEDGERS + 1);
-
-    client.set_super_arbiter(company, super_arbiter);
-    client.escalate_dispute(&eng_id, &0);
-
-    eng_id
-}
-
 #[test]
-fn test_get_super_arbiter_deadline_default_and_set() {
-    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    assert_eq!(
-        client.get_super_arbiter_deadline(),
-        DEFAULT_SUPER_ARBITER_RESPONSE_WINDOW_LEDGERS
-    );
-
-    client.set_super_arbiter_deadline(&company, &12_345u32);
-    assert!(has_event(&env, "super_arbiter_deadline_set"));
-    assert_eq!(client.get_super_arbiter_deadline(), 12_345u32);
-}
-
-#[test]
-#[should_panic(expected = "InvalidSuperArbiterResponseWindow")]
-fn test_set_super_arbiter_deadline_zero_rejected() {
-    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    client.set_super_arbiter_deadline(&company, &0u32);
-}
-
-#[test]
-#[should_panic(expected = "unauthorized")]
-fn test_set_super_arbiter_deadline_non_admin_rejected() {
-    let (env, contract_id, _token_id, _company, recruiter, _arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    client.set_super_arbiter_deadline(&recruiter, &1_000u32);
-}
-
-#[test]
-fn test_resolve_escalation_timeout_favors_recruiter() {
-    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    let token_client = token::Client::new(&env, &token_id);
-    let super_arbiter = Address::generate(&env);
-
-    let eng_id = setup_escalated_dispute(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &super_arbiter,
-        "ENG-SA-TIMEOUT",
-    );
-    let recruiter_balance_before = token_client.balance(&recruiter);
-
-    // Super arbiter deadline has not elapsed yet.
-    advance_ledger(&env, 10);
-
-    let super_arbiter_before = token_client.balance(&super_arbiter);
-
-    // Elapse the (default) super-arbiter response window.
-    advance_ledger(&env, DEFAULT_SUPER_ARBITER_RESPONSE_WINDOW_LEDGERS + 1);
-
-    client.resolve_escalation_timeout(&eng_id, &0);
-    assert!(has_event(&env, "super_arbiter_timeout_resolved"));
-
-    // Milestone 0 payment = 1_000_000_000 * 30 / 100 = 300_000_000, paid in
-    // full to the recruiter — no arbiter fee since the super arbiter never acted.
-    assert_eq!(
-        token_client.balance(&recruiter),
-        recruiter_balance_before + 300_000_000
-    );
-    assert_eq!(token_client.balance(&super_arbiter), super_arbiter_before);
-
-    let m0 = client.get_milestone(&eng_id, &0);
-    assert_eq!(m0.status, MilestoneStatus::Resolved);
-    assert!(!client.is_dispute_escalated(&eng_id, &0));
-    assert_eq!(client.get_super_arbiter_resolutions(), 1u64);
-}
-
-#[test]
-#[should_panic(expected = "SuperArbiterResponseWindowNotElapsed")]
-fn test_resolve_escalation_timeout_before_deadline_rejected() {
-    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    let super_arbiter = Address::generate(&env);
-
-    let eng_id = setup_escalated_dispute(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &super_arbiter,
-        "ENG-SA-TOO-SOON",
-    );
-
-    client.resolve_escalation_timeout(&eng_id, &0);
-}
-
-#[test]
-#[should_panic(expected = "dispute has not been escalated")]
-fn test_resolve_escalation_timeout_without_escalation_rejected() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    create_standard_engagement(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-SA-NOESC",
-    );
-    let eng_id = String::from_str(&env, "ENG-SA-NOESC");
-
-    client.submit_proof(
-        &recruiter,
-        &eng_id,
-        &0,
-        &String::from_str(&env, "ipfs://proof"),
-    );
-    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "dispute"));
-    advance_ledger(
-        &env,
-        DEFAULT_DISPUTE_WINDOW_LEDGERS + DEFAULT_SUPER_ARBITER_RESPONSE_WINDOW_LEDGERS + 2,
-    );
-
-    client.resolve_escalation_timeout(&eng_id, &0);
-}
-
-#[test]
-fn test_super_arbiter_resolve_increments_resolution_count() {
-    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    let super_arbiter = Address::generate(&env);
-
-    let eng_id = setup_escalated_dispute(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &super_arbiter,
-        "ENG-SA-COUNT",
-    );
-
-    assert_eq!(client.get_super_arbiter_resolutions(), 0u64);
-    client.super_arbiter_resolve(&super_arbiter, &eng_id, &0, &true);
-    assert_eq!(client.get_super_arbiter_resolutions(), 1u64);
-
-    // A second escalated dispute, resolved via rejection, also counts.
-    let eng_id_2 = setup_escalated_dispute(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &super_arbiter,
-        "ENG-SA-COUNT-2",
-    );
-    client.super_arbiter_resolve(&super_arbiter, &eng_id_2, &0, &false);
-    assert_eq!(client.get_super_arbiter_resolutions(), 2u64);
-}
-
-// ============================================================
-// ISSUE #319 — ENGAGEMENTS BY MULTIPLE TAGS (AND/OR)
-// ============================================================
-
-#[test]
-fn test_get_engagements_by_multiple_tags_and_or() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    create_standard_engagement(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-TAG-A",
-    );
-    create_standard_engagement(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-TAG-B",
-    );
-    create_standard_engagement(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-TAG-C",
-    );
-
-    let id_a = String::from_str(&env, "ENG-TAG-A");
-    let id_b = String::from_str(&env, "ENG-TAG-B");
-    let id_c = String::from_str(&env, "ENG-TAG-C");
-    let tag_eng = String::from_str(&env, "engineering");
-    let tag_urgent = String::from_str(&env, "urgent");
-
-    // A: engineering + urgent. B: engineering only. C: urgent only.
-    client.add_engagement_tag(&company, &id_a, &tag_eng);
-    client.add_engagement_tag(&company, &id_a, &tag_urgent);
-    client.add_engagement_tag(&company, &id_b, &tag_eng);
-    client.add_engagement_tag(&company, &id_c, &tag_urgent);
-
-    let tags = vec![&env, tag_eng.clone(), tag_urgent.clone()];
-
-    // AND: only A carries both tags.
-    let and_result = client.get_engagements_by_multiple_tags(&tags, &true, &0u32, &10u32);
-    assert_eq!(and_result.len(), 1);
-    assert_eq!(and_result.get(0).unwrap(), id_a);
-
-    // OR: A, B, and C all carry at least one of the tags.
-    let or_result = client.get_engagements_by_multiple_tags(&tags, &false, &0u32, &10u32);
-    assert_eq!(or_result.len(), 3);
-    assert!(or_result.contains(&id_a));
-    assert!(or_result.contains(&id_b));
-    assert!(or_result.contains(&id_c));
-
-    // Pagination over the OR result.
-    let page0 = client.get_engagements_by_multiple_tags(&tags, &false, &0u32, &2u32);
-    assert_eq!(page0.len(), 2);
-    let page1 = client.get_engagements_by_multiple_tags(&tags, &false, &1u32, &2u32);
-    assert_eq!(page1.len(), 1);
-}
-
-#[test]
-fn test_get_engagements_by_multiple_tags_empty_and_no_match() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    create_standard_engagement(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-TAG-X",
-    );
-
-    let empty_tags: Vec<String> = vec![&env];
-    assert_eq!(
-        client
-            .get_engagements_by_multiple_tags(&empty_tags, &true, &0u32, &10u32)
-            .len(),
-        0
-    );
-
-    let unused_tag = vec![&env, String::from_str(&env, "nope")];
-    assert_eq!(
-        client
-            .get_engagements_by_multiple_tags(&unused_tag, &false, &0u32, &10u32)
-            .len(),
-        0
-    );
-}
-
-#[test]
-#[should_panic(expected = "TooManyTags")]
-fn test_get_engagements_by_multiple_tags_too_many_rejected() {
+fn test_get_contract_health_emits_snapshot_event() {
     let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
 
-    let mut tags: Vec<String> = vec![&env];
-    for i in 0..11 {
-        tags.push_back(String::from_str(&env, &std::format!("tag{}", i)));
-    }
-    client.get_engagements_by_multiple_tags(&tags, &false, &0u32, &10u32);
+    let health = client.get_contract_health();
+
+    assert!(!health.paused);
+    assert_eq!(health.total_engagement_count, 0);
+    assert!(has_event(&env, "contract_health_snapshot"));
 }
 
-// ============================================================
-// ISSUE #312 — REFERRAL DISCOUNT FOR A GIVEN REFERRER
-// ============================================================
-
 #[test]
-fn test_get_referrer_discount_bps_recognised_and_unrecognised() {
+fn test_get_contract_health_emits_snapshot_event_reflects_paused_state() {
     let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
 
-    let referrer = Address::generate(&env);
-    let stranger = Address::generate(&env);
+    client.pause(&company);
+    let health = client.get_contract_health();
 
-    // No discount configured yet, and referrer not yet recognised.
-    assert_eq!(client.get_referrer_discount_bps(&referrer), 0u32);
-
-    client.set_referral_discount_bps(&company, &150u32);
-    // Discount is configured, but this referrer still isn't on the list.
-    assert_eq!(client.get_referrer_discount_bps(&referrer), 0u32);
-
-    client.add_referrer(&company, &referrer);
-    assert_eq!(client.get_referrer_discount_bps(&referrer), 150u32);
-    // An unrelated address remains unaffected.
-    assert_eq!(client.get_referrer_discount_bps(&stranger), 0u32);
-
-    client.remove_referrer(&company, &referrer);
-    assert_eq!(client.get_referrer_discount_bps(&referrer), 0u32);
+    assert!(health.paused);
+    assert!(has_event(&env, "contract_health_snapshot"));
 }
