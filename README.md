@@ -499,6 +499,52 @@ The two pause mechanisms are orthogonal and both must pass for a call to
 proceed: an engagement can be quarantined while the contract runs normally, and
 calling `unpause` on the contract does **not** lift a per-engagement quarantine.
 
+#### Interaction with the global pause
+
+The two mechanisms are tracked in **separate storage flags** and enforced by two
+independent guards — `assert_not_paused` for the contract-wide pause and
+`assert_engagement_not_paused` for the quarantine (see `lib.rs`). A
+state-changing call must clear **both** guards to proceed; they are an **AND**,
+not an OR.
+
+Because they are independent, neither pause clears the other:
+
+- `unpause(admin)` — the contract-wide resume **does not** lift a per-engagement
+  quarantine. An engagement quarantined before the contract was paused stays
+  quarantined after the contract is resumed; its lifecycle calls keep failing
+  with `EngagementPaused` until `unpause_engagement` is called for that ID.
+- `unpause_engagement(admin, engagement_id)` — lifting a single engagement's
+  quarantine **does not** resume a globally paused contract. While the whole
+  contract is paused, that engagement's calls still fail with `ContractPaused`
+  regardless of its own quarantine state.
+
+The combined effect for any given engagement:
+
+| Global pause | Engagement quarantine | State-changing call |
+|---|---|---|
+| off | off | proceeds |
+| off | on  | rejected — `EngagementPaused` |
+| on  | off | rejected — `ContractPaused` |
+| on  | on  | rejected — `ContractPaused` (global guard checked first) |
+
+**Example.** An admin quarantines `ENG-42` with `pause_engagement` while the
+contract is running, then later pauses the whole contract with `pause` for
+maintenance:
+
+1. `pause_engagement(admin, "ENG-42")` → `is_engagement_paused("ENG-42")` is
+   `true`, while `is_paused()` is still `false`.
+2. `pause(admin)` → `is_paused()` becomes `true`; `ENG-42` remains quarantined.
+3. A lifecycle call on `ENG-42` now fails with `ContractPaused` (the global guard
+   is checked before the engagement guard).
+4. `unpause(admin)` → `is_paused()` is `false` again, **but** `ENG-42` is still
+   quarantined, so its calls still fail with `EngagementPaused`.
+5. `unpause_engagement(admin, "ENG-42")` → quarantine lifted; lifecycle calls on
+   `ENG-42` proceed normally.
+
+To check ahead of a write, query both `is_paused()` and
+`is_engagement_paused(engagement_id)` — a call is only accepted when **both**
+return `false`.
+
 ### Milestone Due-Soon Notifications
 
 Soroban contracts cannot schedule their own work, so the due-soon signal follows

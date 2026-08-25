@@ -372,9 +372,21 @@ pub struct EngagementConfig {
 #[contracttype]
 #[derive(Clone)]
 pub struct ContractHealth {
+    /// Whether the pause switch is engaged. While `true`, every entry point
+    /// guarded by `assert_not_paused` rejects. Reports `false` when the flag
+    /// has never been set.
     pub paused: bool,
+    /// Address currently allowed to call the admin-gated setters. Set by
+    /// `init` and replaced only when a nominee claims the role, so it never
+    /// reports a pending nomination.
     pub admin: Address,
+    /// Contract version string, as set by `set_version`. Falls back to
+    /// `DEFAULT_VERSION` when no version has been stored, so an absent value
+    /// is indistinguishable from one explicitly set to the default.
     pub version: String,
+    /// Number of engagements ever created (issue #34). Monotonic: it counts
+    /// creations, not live engagements, so cancelled and completed ones stay
+    /// included and the value never decreases.
     pub total_engagement_count: u64,
 }
 
