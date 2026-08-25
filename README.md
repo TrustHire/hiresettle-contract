@@ -37,6 +37,17 @@ cargo test
 
 ## Overview
 
+## Glossary
+
+- **Engagement**: An agreement or project contract initiated between parties on the platform.
+- **Milestone**: A specific checkpoint or deliverable within an engagement that triggers payouts upon approval.
+- **Retention**: Funds held in escrow until all engagement conditions or warranty periods are satisfied.
+- **Cosigner**: An authorized third party required to sign or approve specific actions or state transitions.
+- **Super-arbiter**: A high-level administrative entity with authority to resolve escalations and dispute deadlocks.
+- **Quorum**: The minimum threshold of votes or signatures required to execute a governance or arbitration action.
+- **Amendment**: A formal modification proposed and agreed upon to update the terms of an active engagement.
+
+
 HireSettle governs the relationship between a **hiring company** and a **recruiter** by locking the total agreed fee in an escrow wallet at engagement creation. As the recruiter delivers on each milestone (placement, 30-day retention, 90-day retention, etc.), the company confirms the deliverable, releasing a proportional payment from escrow. If disputes arise, an M-of-N arbiter panel votes to resolve them. The contract handles the entire lifecycle: creation, proof submission, confirmation, dispute, replacement, early exit, cancellation, and expiry.
 
 ### Core Concepts
