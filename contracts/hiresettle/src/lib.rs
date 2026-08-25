@@ -543,6 +543,10 @@ pub enum ConfigKey {
     DueSoonWindow,
     /// Admin-configured referral discount in basis points (issue #251).
     ReferralDiscountBps,
+    /// Admin-configurable deadline, in ledgers, for the super-arbiter to
+    /// resolve an escalated dispute before it auto-resolves in the
+    /// recruiter's favor (issue #318, default `DEFAULT_SUPER_ARBITER_RESPONSE_WINDOW_LEDGERS`).
+    SuperArbiterResponseWindow,
 }
 
 /// Contract storage key space. Instance keys reset between transactions;
@@ -648,6 +652,14 @@ pub enum DataKey {
     /// Wraps a `ConfigKey` so every admin-tunable scalar setting shares one
     /// `DataKey` variant instead of each needing its own. See `ConfigKey`.
     Config(ConfigKey),
+    /// Ledger at which a disputed (engagement_id, milestone_index) was
+    /// escalated to the super arbiter, used to measure the response
+    /// deadline before it auto-resolves in the recruiter's favor (issue #318).
+    EscalatedAt(String, u32),
+    /// Total number of disputes concluded via the super-arbiter escalation
+    /// path — either by an explicit `super_arbiter_resolve` call or by
+    /// `resolve_escalation_timeout` (issue #317).
+    SuperArbiterResolutionCount,
 }
 
 // ============================================================
@@ -684,6 +696,10 @@ const DEFAULT_EXTENSION_TTL: u32 = 17_280;
 /// milestone becomes "due soon" once it is within this many ledgers of its
 /// `valid_after_ledger`. ~1 day at 5 s/ledger.
 const DEFAULT_DUE_SOON_WINDOW_LEDGERS: u32 = 17_280;
+/// Default deadline, in ledgers, for the super-arbiter to resolve an
+/// escalated dispute before `resolve_escalation_timeout` can auto-favor the
+/// recruiter (issue #318). Mirrors the default dispute window (~3 days).
+const DEFAULT_SUPER_ARBITER_RESPONSE_WINDOW_LEDGERS: u32 = 51_840;
 /// Maximum number of tags stored on an engagement (issue #248).
 const MAX_TAGS: u32 = 10;
 /// Maximum length, in characters, of a single engagement tag (issue #248).
@@ -863,6 +879,21 @@ impl HireSettleContract {
 
     /// Return the current referral discount in basis points (default 0).
     pub fn get_referral_discount_bps(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::ReferralDiscountBps))
+            .unwrap_or(0u32)
+    }
+
+    /// Return the discount, in basis points, currently applied for a given
+    /// referrer (issue #312): the admin-configured discount if `referrer` is
+    /// on the recognised referral list, or 0 if it is not (or the list is
+    /// empty). Companion query to `get_referral_discount_bps`, which returns
+    /// the configured rate without regard to any specific referrer.
+    pub fn get_referrer_discount_bps(env: Env, referrer: Address) -> u32 {
+        if !Self::is_recognised_referrer(&env, &referrer) {
+            return 0;
+        }
         env.storage()
             .persistent()
             .get(&DataKey::Config(ConfigKey::ReferralDiscountBps))
@@ -2051,7 +2082,7 @@ impl HireSettleContract {
             let platform_fee = Self::get_platform_fee_internal(&env);
             let effective_bps =
                 Self::apply_referral_discount(&env, platform_fee.bps, &engagement.referrer);
-                Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
+            Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
             let fee_amount = (payment * effective_bps as i128) / 10_000;
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
@@ -2571,6 +2602,18 @@ impl HireSettleContract {
             6_300_000,
         );
 
+        // Issue #318: record the escalation ledger so `resolve_escalation_timeout`
+        // can measure the super-arbiter response deadline from this point.
+        env.storage().persistent().set(
+            &DataKey::EscalatedAt(engagement_id.clone(), milestone_index),
+            &current_ledger,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::EscalatedAt(engagement_id.clone(), milestone_index),
+            100_000,
+            6_300_000,
+        );
+
         env.events().publish(
             (
                 Symbol::new(&env, "dispute_escalated"),
@@ -2633,7 +2676,12 @@ impl HireSettleContract {
             panic!("dispute has not been escalated");
         }
 
+        // Issue #317: this call always concludes an escalated dispute (either
+        // branch below), so it always counts toward the resolution total.
+        Self::increment_super_arbiter_resolution_count(&env);
+
         let vote_key = DataKey::ArbiterVotes(engagement_id.clone(), milestone_index);
+        let escalated_at_key = DataKey::EscalatedAt(engagement_id.clone(), milestone_index);
 
         if approve {
             let payment = (engagement.total_amount * milestone.payment_percent as i128) / 100;
@@ -2690,6 +2738,7 @@ impl HireSettleContract {
                 milestone_index,
             ));
             env.storage().persistent().remove(&escalated_key);
+            env.storage().persistent().remove(&escalated_at_key);
 
             env.events().publish(
                 (Symbol::new(&env, "dispute_resolved"), engagement_id.clone()),
@@ -2736,6 +2785,7 @@ impl HireSettleContract {
                 milestone_index,
             ));
             env.storage().persistent().remove(&escalated_key);
+            env.storage().persistent().remove(&escalated_at_key);
 
             env.events().publish(
                 (Symbol::new(&env, "dispute_resolved"), engagement_id.clone()),
@@ -2762,6 +2812,184 @@ impl HireSettleContract {
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
         Self::extend_engagement_ttl(&env, &engagement_id);
+    }
+
+    /// Admin sets how many ledgers the super-arbiter has to resolve an
+    /// escalated dispute (via `super_arbiter_resolve`) before
+    /// `resolve_escalation_timeout` can be called to auto-favor the recruiter
+    /// (issue #318). Must be at least 1.
+    pub fn set_super_arbiter_deadline(env: Env, admin: Address, ledgers: u32) {
+        Self::assert_admin(&env, &admin);
+        if ledgers == 0 {
+            panic!("InvalidSuperArbiterResponseWindow");
+        }
+        env.storage().instance().set(
+            &DataKey::Config(ConfigKey::SuperArbiterResponseWindow),
+            &ledgers,
+        );
+        env.events()
+            .publish((Symbol::new(&env, "super_arbiter_deadline_set"),), ledgers);
+    }
+
+    /// Return the currently configured super-arbiter response window in
+    /// ledgers (default `DEFAULT_SUPER_ARBITER_RESPONSE_WINDOW_LEDGERS`).
+    pub fn get_super_arbiter_deadline(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::SuperArbiterResponseWindow))
+            .unwrap_or(DEFAULT_SUPER_ARBITER_RESPONSE_WINDOW_LEDGERS)
+    }
+
+    /// Permissionlessly conclude an escalated dispute in the recruiter's
+    /// favor once the super arbiter has failed to call `super_arbiter_resolve`
+    /// within the configured response window (issue #318). Mirrors the
+    /// `approve = true` outcome of `super_arbiter_resolve`, except no arbiter
+    /// fee is deducted — the super arbiter did not act, so it earns no fee.
+    ///
+    /// # Panics
+    /// - `"engagement is not active"` — engagement status is not `Active`.
+    /// - `"milestone is not in disputed status"` — the milestone isn't `Disputed`.
+    /// - `"dispute has not been escalated"` — `escalate_dispute` has not been
+    ///   called for this milestone yet.
+    /// - `"SuperArbiterResponseWindowNotElapsed"` — the super arbiter still
+    ///   has time left to resolve the dispute.
+    pub fn resolve_escalation_timeout(env: Env, engagement_id: String, milestone_index: u32) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::Active {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+
+        let mut milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+
+        if milestone.status != MilestoneStatus::Disputed {
+            panic!("milestone is not in disputed status");
+        }
+
+        let escalated_key = DataKey::EscalatedDispute(engagement_id.clone(), milestone_index);
+        let escalated: bool = env
+            .storage()
+            .persistent()
+            .get(&escalated_key)
+            .unwrap_or(false);
+        if !escalated {
+            panic!("dispute has not been escalated");
+        }
+
+        let escalated_at_key = DataKey::EscalatedAt(engagement_id.clone(), milestone_index);
+        let escalated_at: u32 = env
+            .storage()
+            .persistent()
+            .get(&escalated_at_key)
+            .unwrap_or_else(|| panic!("no escalation timestamp recorded"));
+
+        let response_window = Self::get_super_arbiter_deadline(env.clone());
+        let current_ledger = env.ledger().sequence();
+        if current_ledger <= escalated_at + response_window {
+            panic!("SuperArbiterResponseWindowNotElapsed");
+        }
+
+        Self::increment_super_arbiter_resolution_count(&env);
+
+        let vote_key = DataKey::ArbiterVotes(engagement_id.clone(), milestone_index);
+
+        let payment = (engagement.total_amount * milestone.payment_percent as i128) / 100;
+        engagement.released_amount += payment;
+
+        let token_client = token::Client::new(&env, &engagement.token);
+        Self::distribute_recruiter_payout(&env, &engagement, payment, &token_client);
+        Self::on_escrow_lifecycle_checkpoint(
+            &env,
+            &engagement_id,
+            EscrowLifecycleAction::PayoutReleased,
+            -payment,
+            &engagement.token,
+            &engagement.company,
+            &engagement.recruiter,
+        );
+
+        let old_status = milestone.status.clone();
+        milestone.status = MilestoneStatus::Resolved;
+        engagement.milestones.set(milestone_index, milestone);
+
+        let all_done = (0..engagement.milestones.len()).all(|i| {
+            let s = engagement.milestones.get(i).unwrap().status;
+            s == MilestoneStatus::Confirmed || s == MilestoneStatus::Resolved
+        });
+        let old_engagement_status = engagement.status.clone();
+        if all_done {
+            engagement.status = EngagementStatus::Completed;
+            Self::decrement_company_active_count(&env, &engagement.company);
+        }
+
+        env.storage().persistent().remove(&vote_key);
+        env.storage().persistent().remove(&DataKey::DisputeReason(
+            engagement_id.clone(),
+            milestone_index,
+        ));
+        env.storage().persistent().remove(&DataKey::DisputeRaisedAt(
+            engagement_id.clone(),
+            milestone_index,
+        ));
+        env.storage().persistent().remove(&escalated_key);
+        env.storage().persistent().remove(&escalated_at_key);
+
+        env.events().publish(
+            (Symbol::new(&env, "dispute_resolved"), engagement_id.clone()),
+            (milestone_index, true),
+        );
+        env.events().publish(
+            (
+                Symbol::new(&env, "super_arbiter_timeout_resolved"),
+                engagement_id.clone(),
+            ),
+            milestone_index,
+        );
+        Self::emit_milestone_status_changed(
+            &env,
+            &engagement_id,
+            milestone_index,
+            old_status,
+            MilestoneStatus::Resolved,
+        );
+        Self::emit_engagement_status_changed(
+            &env,
+            &engagement_id,
+            old_engagement_status,
+            engagement.status.clone(),
+        );
+
+        engagement.last_activity_ledger = env.ledger().sequence();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
+    }
+
+    /// Increment the counter of disputes concluded via the super-arbiter
+    /// escalation path (issue #317).
+    fn increment_super_arbiter_resolution_count(env: &Env) {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::SuperArbiterResolutionCount)
+            .unwrap_or(0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::SuperArbiterResolutionCount, &(count + 1));
+    }
+
+    /// Return the total number of disputes resolved via the super-arbiter
+    /// escalation path — counting both an explicit `super_arbiter_resolve`
+    /// call and a `resolve_escalation_timeout` auto-resolution (issue #317).
+    pub fn get_super_arbiter_resolutions(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::SuperArbiterResolutionCount)
+            .unwrap_or(0u64)
     }
 
     // ----------------------------------------------------------
@@ -2991,10 +3219,9 @@ impl HireSettleContract {
     /// of this company. Only the company address itself can set the cosigner.
     pub fn set_company_cosigner(env: Env, company: Address, cosigner: Address) {
         company.require_auth();
-        env.storage().persistent().set(
-            &DataKey::CompanyCosigner(company.clone()),
-            &cosigner,
-        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::CompanyCosigner(company.clone()), &cosigner);
         env.events().publish(
             (Symbol::new(&env, "company_cosigner_set"),),
             (company, cosigner),
@@ -3014,10 +3241,9 @@ impl HireSettleContract {
     /// co-signer.
     pub fn set_recruiter_cosigner(env: Env, recruiter: Address, cosigner: Address) {
         recruiter.require_auth();
-        env.storage().persistent().set(
-            &DataKey::RecruiterCosigner(recruiter.clone()),
-            &cosigner,
-        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::RecruiterCosigner(recruiter.clone()), &cosigner);
         env.events().publish(
             (Symbol::new(&env, "recruiter_cosigner_set"),),
             (recruiter, cosigner),
@@ -3100,10 +3326,8 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::EscrowCallbackEnabled, &enabled);
-        env.events().publish(
-            (Symbol::new(&env, "escrow_callback_enabled_set"),),
-            enabled,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "escrow_callback_enabled_set"),), enabled);
     }
 
     /// Return `(enabled, target)` for the reserved escrow callback checkpoint.
@@ -3989,9 +4213,11 @@ impl HireSettleContract {
             .persistent()
             .set(&DataKey::Config(ConfigKey::AmendmentTTL), &ledgers);
 
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Config(ConfigKey::AmendmentTTL), 100_000, 6_300_000);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Config(ConfigKey::AmendmentTTL),
+            100_000,
+            6_300_000,
+        );
     }
 
     /// Get the current amendment proposal TTL in ledgers.
@@ -4555,9 +4781,11 @@ impl HireSettleContract {
             .persistent()
             .set(&DataKey::Config(ConfigKey::MilestoneExtensionTTL), &ledgers);
 
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Config(ConfigKey::MilestoneExtensionTTL), 100_000, 6_300_000);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Config(ConfigKey::MilestoneExtensionTTL),
+            100_000,
+            6_300_000,
+        );
     }
 
     /// Get the current milestone extension proposal TTL in ledgers.
@@ -5178,12 +5406,7 @@ impl HireSettleContract {
     /// Add a tag to an engagement. Only the engagement's company (or its
     /// registered co-signer) may tag the engagement.
     /// Duplicate tags are silently ignored.
-    pub fn add_engagement_tag(
-        env: Env,
-        caller: Address,
-        engagement_id: String,
-        tag: String,
-    ) {
+    pub fn add_engagement_tag(env: Env, caller: Address, engagement_id: String, tag: String) {
         caller.require_auth();
         let engagement = Self::get_engagement_internal(&env, &engagement_id);
         if !Self::is_authorized_company(&env, &caller, &engagement.company) {
@@ -5212,12 +5435,7 @@ impl HireSettleContract {
     /// Remove a tag from an engagement. Only the engagement's company (or its
     /// registered co-signer) may remove a tag.
     /// No-op if the tag was not present.
-    pub fn remove_engagement_tag(
-        env: Env,
-        caller: Address,
-        engagement_id: String,
-        tag: String,
-    ) {
+    pub fn remove_engagement_tag(env: Env, caller: Address, engagement_id: String, tag: String) {
         caller.require_auth();
         let engagement = Self::get_engagement_internal(&env, &engagement_id);
         if !Self::is_authorized_company(&env, &caller, &engagement.company) {
@@ -5370,6 +5588,91 @@ impl HireSettleContract {
         ids.len()
     }
 
+    /// Return a paginated slice of engagement IDs matching across a list of
+    /// tags (issue #319). When `match_all` is `true`, an engagement must
+    /// carry every tag in `tags` (AND); when `false`, matching any one tag
+    /// is enough (OR). Reads the same per-tag index that backs
+    /// `get_engagements_by_tag`, so results only reflect tags applied via
+    /// `add_engagement_tag`. `page` is 0-indexed; out-of-range pages, an
+    /// empty `tags` list, or `page_size` of 0 return an empty vec.
+    ///
+    /// # Panics
+    /// - `"TooManyTags"` — `tags` has more entries than `MAX_TAGS`.
+    pub fn get_engagements_by_multiple_tags(
+        env: Env,
+        tags: Vec<String>,
+        match_all: bool,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<String> {
+        if page_size == 0 || tags.len() == 0 {
+            return Vec::new(&env);
+        }
+        if tags.len() > MAX_TAGS {
+            panic!("TooManyTags");
+        }
+
+        let mut per_tag_lists: Vec<Vec<String>> = Vec::new(&env);
+        for i in 0..tags.len() {
+            let ids: Vec<String> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::EngagementTag(tags.get(i).unwrap()))
+                .unwrap_or_else(|| Vec::new(&env));
+            per_tag_lists.push_back(ids);
+        }
+
+        let matched: Vec<String> = if match_all {
+            // AND: start from the first tag's list, keep only ids present in
+            // every other tag's list.
+            let mut acc = per_tag_lists.get(0).unwrap();
+            for i in 1..per_tag_lists.len() {
+                let other = per_tag_lists.get(i).unwrap();
+                let mut next = Vec::new(&env);
+                for j in 0..acc.len() {
+                    let id = acc.get(j).unwrap();
+                    let mut found = false;
+                    for k in 0..other.len() {
+                        if other.get(k).unwrap() == id {
+                            found = true;
+                            break;
+                        }
+                    }
+                    if found {
+                        next.push_back(id);
+                    }
+                }
+                acc = next;
+            }
+            acc
+        } else {
+            // OR: union, de-duplicated, preserving first-seen order across tags.
+            let mut union: Vec<String> = Vec::new(&env);
+            for i in 0..per_tag_lists.len() {
+                let list = per_tag_lists.get(i).unwrap();
+                for j in 0..list.len() {
+                    let id = list.get(j).unwrap();
+                    if !union.contains(&id) {
+                        union.push_back(id);
+                    }
+                }
+            }
+            union
+        };
+
+        let total = matched.len();
+        let start = page.saturating_mul(page_size);
+        if start >= total {
+            return Vec::new(&env);
+        }
+        let end = start.saturating_add(page_size).min(total);
+        let mut result = Vec::new(&env);
+        for i in start..end {
+            result.push_back(matched.get(i).unwrap());
+        }
+        result
+    }
+
     // ----------------------------------------------------------
     // ISSUE #41 — CONFIGURABLE LEDGERS PER DAY
     // ----------------------------------------------------------
@@ -5494,9 +5797,10 @@ impl HireSettleContract {
     /// Admin sets the inactivity timeout in ledgers.
     pub fn set_inactivity_timeout_ledgers(env: Env, admin: Address, ledgers: u32) {
         Self::assert_admin(&env, &admin);
-        env.storage()
-            .instance()
-            .set(&DataKey::Config(ConfigKey::InactivityTimeoutLedgers), &ledgers);
+        env.storage().instance().set(
+            &DataKey::Config(ConfigKey::InactivityTimeoutLedgers),
+            &ledgers,
+        );
         env.events()
             .publish((Symbol::new(&env, "inactivity_timeout_set"),), ledgers);
     }
@@ -6174,7 +6478,9 @@ impl HireSettleContract {
         if bps > MAX_ARBITER_FEE_BPS {
             panic!("ArbiterFeeTooHigh");
         }
-        env.storage().instance().set(&DataKey::Config(ConfigKey::ArbiterFee), &bps);
+        env.storage()
+            .instance()
+            .set(&DataKey::Config(ConfigKey::ArbiterFee), &bps);
         env.events()
             .publish((Symbol::new(&env, "arbiter_fee_set"),), bps);
     }
@@ -6542,28 +6848,30 @@ impl HireSettleContract {
         base_bps
     }
 
+    /// Whether `referrer` is on the admin-configured recognised referral list.
+    fn is_recognised_referrer(env: &Env, referrer: &Address) -> bool {
+        let referrers: Option<Vec<Address>> = env.storage().persistent().get(&DataKey::Referrers);
+        if let Some(list) = referrers {
+            for i in 0..list.len() {
+                if list.get(i).unwrap() == *referrer {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// If the engagement has a recognised referrer, reduce the given bps
     /// by the admin-configured referral discount (never below 0).
     fn apply_referral_discount(env: &Env, bps: u32, referrer: &Option<Address>) -> u32 {
         if let Some(ref_addr) = referrer {
-            let referrers: Option<Vec<Address>> =
-                env.storage().persistent().get(&DataKey::Referrers);
-            if let Some(list) = referrers {
-                let mut recognised = false;
-                for i in 0..list.len() {
-                    if list.get(i).unwrap() == *ref_addr {
-                        recognised = true;
-                        break;
-                    }
-                }
-                if recognised {
-                    let discount: u32 = env
-                        .storage()
-                        .persistent()
-                        .get(&DataKey::Config(ConfigKey::ReferralDiscountBps))
-                        .unwrap_or(0u32);
-                    return if discount >= bps { 0 } else { bps - discount };
-                }
+            if Self::is_recognised_referrer(env, ref_addr) {
+                let discount: u32 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::Config(ConfigKey::ReferralDiscountBps))
+                    .unwrap_or(0u32);
+                return if discount >= bps { 0 } else { bps - discount };
             }
         }
         bps
