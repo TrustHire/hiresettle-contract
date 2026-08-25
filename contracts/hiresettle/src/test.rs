@@ -8541,3 +8541,494 @@ fn test_escrow_callback_checkpoint_emits_when_enabled_and_target_set() {
 
     assert!(has_event(&env, "escrow_callback_point"));
 }
+
+// ============================================================
+// Issue #201 — ARBITER QUORUM VALIDATION ON CREATE
+// ============================================================
+
+/// Quorum of 0 must be rejected with "InvalidQuorum".
+#[test]
+#[should_panic(expected = "InvalidQuorum")]
+fn test_create_engagement_quorum_zero_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.create_engagement(
+        &String::from_str(&env, "ENG-Q0"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 0,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+}
+
+/// Quorum exceeding arbiter count must be rejected with "InvalidQuorum".
+#[test]
+#[should_panic(expected = "InvalidQuorum")]
+fn test_create_engagement_quorum_exceeds_arbiter_count_rejected() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+
+    client.create_engagement(
+        &String::from_str(&env, "ENG-Q-OVER"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, a1.clone(), a2.clone()],
+            quorum: 3, // 3 > 2 arbiters
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+}
+
+// ============================================================
+// Issue #202 — DUPLICATE ARBITER ADDRESSES IN ARBITERS VEC
+// ============================================================
+
+/// Creating an engagement with the same arbiter address twice in the arbiters
+/// vector must be rejected with "DuplicateArbiter".
+#[test]
+#[should_panic(expected = "DuplicateArbiter")]
+fn test_create_engagement_duplicate_arbiter_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.create_engagement(
+        &String::from_str(&env, "ENG-DUP-ARB"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone(), arbiter.clone()],
+            quorum: 2,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+}
+
+/// Three arbiters where two are duplicates must also be rejected.
+#[test]
+#[should_panic(expected = "DuplicateArbiter")]
+fn test_create_engagement_three_arbiters_with_one_duplicate_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let a2 = Address::generate(&env);
+
+    client.create_engagement(
+        &String::from_str(&env, "ENG-DUP-ARB-3"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone(), a2.clone(), arbiter.clone()],
+            quorum: 2,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+}
+
+// ============================================================
+// Issue #203 — EMPTY ARBITERS VECTOR VALIDATION
+// ============================================================
+
+/// Creating an engagement with an empty arbiters vector must be rejected
+/// with "NoArbitersProvided".
+#[test]
+#[should_panic(expected = "NoArbitersProvided")]
+fn test_create_engagement_empty_arbiters_rejected() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.create_engagement(
+        &String::from_str(&env, "ENG-NO-ARB"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env],
+            quorum: 1,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+}
+
+// ============================================================
+// Issue #204 — PROOF RESUBMISSION AFTER COMPANY CONFIRMATION
+// ============================================================
+
+/// Once a milestone is Confirmed by the company, the recruiter must not be
+/// able to submit a new proof for that same milestone — rejected with
+/// "MilestoneAlreadyConfirmed".
+#[test]
+#[should_panic(expected = "MilestoneAlreadyConfirmed")]
+fn test_submit_proof_after_confirmation_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-REPROOF");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-REPROOF",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof1"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    // Attempt to submit another proof after confirmation — must be rejected.
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof2"),
+    );
+}
+
+// ============================================================
+// Issue #205 — MILESTONE PERCENTAGE AMENDMENT TO INVALID SUM
+// ============================================================
+
+/// Accepting an amendment that would cause the sum of all milestone percentages
+/// to no longer equal 100 must be rejected with "milestone percentages must sum to 100".
+#[test]
+#[should_panic(expected = "milestone percentages must sum to 100")]
+fn test_accept_amendment_invalid_sum_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-AMEND-BAD-SUM");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-AMEND-BAD-SUM",
+    );
+
+    // Current milestones: 30, 40, 30 = 100
+    // Propose changing milestone 0 from 30% to 50% → sum becomes 50+40+30=120
+    client.propose_amendment(&company, &eng_id, &0, &50u32);
+    client.accept_amendment(&recruiter, &eng_id, &0);
+}
+
+// ============================================================
+// Issue #206 — RAISE DISPUTE ON NON-PROOF-SUBMITTED MILESTONE
+// ============================================================
+
+/// Company cannot raise a dispute on a milestone that is not in ProofSubmitted
+/// status — must be rejected with "milestone proof not yet submitted".
+#[test]
+#[should_panic(expected = "milestone proof not yet submitted")]
+fn test_raise_dispute_on_pending_milestone_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-DISP-PENDING");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-DISP-PENDING",
+    );
+
+    // Milestone 0 is still Pending — no proof submitted yet.
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "no proof"));
+}
+
+/// Company cannot raise a dispute on a Locked retention milestone.
+#[test]
+#[should_panic(expected = "milestone proof not yet submitted")]
+fn test_raise_dispute_on_locked_milestone_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-DISP-LOCKED");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-DISP-LOCKED",
+    );
+
+    // Milestone 1 is Locked — cannot dispute until it transitions to Pending/ProofSubmitted.
+    client.raise_dispute(&company, &eng_id, &1, &String::from_str(&env, "locked"));
+}
+
+// ============================================================
+// Issue #207 — UNLOCK MILESTONE ALREADY PENDING OR CONFIRMED
+// ============================================================
+
+/// Calling unlock_milestone on an already-Pending milestone must be rejected
+/// with "milestone is already unlocked".
+#[test]
+#[should_panic(expected = "milestone is already unlocked")]
+fn test_unlock_milestone_already_pending_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-UNLOCK-PENDING");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-UNLOCK-PENDING",
+    );
+
+    // Milestone 0 is Pending from creation — trying to unlock it is invalid.
+    client.unlock_milestone(&eng_id, &0);
+}
+
+/// Calling unlock_milestone on an already-Confirmed milestone must also be rejected.
+#[test]
+#[should_panic(expected = "milestone is already unlocked")]
+fn test_unlock_milestone_already_confirmed_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-UNLOCK-CONF");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-UNLOCK-CONF",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    // Milestone 0 is now Confirmed — trying to unlock it is invalid.
+    client.unlock_milestone(&eng_id, &0);
+}
+
+// ============================================================
+// Issue #208 — CO-RECRUITER WITHOUT RECRUITER_SPLIT_BPS VALIDATION
+// ============================================================
+
+/// If co_recruiter is Some but recruiter_split_bps is 0, the split would be
+/// invalid (primary gets 0%, co gets 100%) — must be rejected with "InvalidSplitBps".
+#[test]
+#[should_panic(expected = "InvalidSplitBps")]
+fn test_co_recruiter_with_zero_split_bps_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let co_recruiter = Address::generate(&env);
+
+    let config = EngagementConfig {
+        metadata_hash: None,
+        co_recruiter: Some(co_recruiter),
+        recruiter_split_bps: 0,
+        contract_pdf_hash: None,
+        referrer: None,
+        tags: None,
+    };
+
+    client.create_engagement(
+        &String::from_str(&env, "ENG-CO-ZERO"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &config,
+    );
+}
+
+// ============================================================
+// Issue #209 — FORCE CONFIRM WITHIN CONFIRM WINDOW BUT BEFORE DISPUTE WINDOW CLOSES
+// ============================================================
+
+/// The confirm window (for force_confirm) is measured from proof_submitted_at.
+/// The dispute window is also measured from proof_submitted_at. If the confirm
+/// window is shorter than the dispute window, force_confirm could be called
+/// while the company still has time to dispute. This is intentional: it allows
+/// the recruiter to force resolution if the company is unresponsive, even though
+/// a dispute could theoretically still be raised before force_confirm is called.
+/// This test documents the timing interaction between the two windows.
+#[test]
+fn test_force_confirm_can_succeed_before_dispute_window_closes() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+
+    // Set confirm window to 100 ledgers and dispute window to 200 ledgers.
+    // This creates a 100-ledger gap where force_confirm is allowed but disputes
+    // could still be raised (though the company hasn't done so in this test).
+    client.set_confirm_window(&company, &100u32);
+    client.set_dispute_window(&company, &200u32);
+
+    let eng_id = String::from_str(&env, "ENG-FC-VS-DW");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-FC-VS-DW",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof"),
+    );
+
+    // Advance 101 ledgers: past confirm window (100), still within dispute window (200).
+    advance_ledger(&env, 101);
+
+    // force_confirm succeeds — the confirm window has elapsed.
+    client.force_confirm_milestone(&arbiter, &eng_id, &0);
+
+    let m0 = client.get_milestone(&eng_id, &0);
+    assert_eq!(m0.status, MilestoneStatus::Confirmed);
+    assert_eq!(token_client.balance(&recruiter), 300_000_000);
+}
+
+// ============================================================
+// Issue #210 — TOP UP ESCROW ON TERMINAL ENGAGEMENT
+// ============================================================
+
+/// top_up_escrow must be rejected on a terminal engagement (Completed, Cancelled,
+/// or Expired) — panics with "engagement is in a terminal state".
+#[test]
+#[should_panic(expected = "engagement is in a terminal state")]
+fn test_top_up_escrow_on_completed_engagement_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Use a single-milestone engagement for quick completion.
+    let single_milestone = vec![
+        &env,
+        Milestone {
+            name: String::from_str(&env, "Placement"),
+            payment_percent: 100,
+            kind: MilestoneKind::Placement,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(&env, ""),
+            status: MilestoneStatus::Pending,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+        },
+    ];
+
+    let eng_id = String::from_str(&env, "ENG-TOPUP-DONE");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &single_milestone,
+        &vec![&env],
+        &default_config(),
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    let eng = client.get_engagement(&eng_id);
+    assert_eq!(eng.status, EngagementStatus::Completed);
+
+    // Attempting to top up a completed engagement must be rejected.
+    client.top_up_escrow(&company, &eng_id, &500_000_000);
+}
+
+/// top_up_escrow on a cancelled engagement must also be rejected.
+#[test]
+#[should_panic(expected = "engagement is in a terminal state")]
+fn test_top_up_escrow_on_cancelled_engagement_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-TOPUP-CANC");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-TOPUP-CANC",
+    );
+
+    client.cancel_engagement(&company, &recruiter, &eng_id);
+
+    let eng = client.get_engagement(&eng_id);
+    assert_eq!(eng.status, EngagementStatus::Cancelled);
+
+    client.top_up_escrow(&company, &eng_id, &500_000_000);
+}
