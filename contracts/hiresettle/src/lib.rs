@@ -5083,6 +5083,22 @@ impl HireSettleContract {
 
     /// Return a paginated slice of engagement IDs for a given company.
     /// `page` is 0-indexed; out-of-range pages return an empty vec.
+    ///
+    /// # Examples
+    ///
+    /// First page of 10 engagement IDs for a company:
+    ///
+    /// ```text
+    /// get_engagements_by_company(env, company, 0, 10)
+    /// ```
+    ///
+    /// Second page (IDs 10–19) with the same page size:
+    ///
+    /// ```text
+    /// get_engagements_by_company(env, company, 1, 10)
+    /// ```
+    ///
+    /// A `page_size` of `0` or a `page` past the end of the list returns an empty vec.
     pub fn get_engagements_by_company(
         env: Env,
         company: Address,
@@ -5113,7 +5129,6 @@ impl HireSettleContract {
         }
         result
     }
-
     /// Return the total number of engagements associated with a company.
     pub fn get_company_engagement_count(env: Env, company: Address) -> u32 {
         let ids: Vec<String> = env
