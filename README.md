@@ -1075,6 +1075,45 @@ The contract emits Soroban events for all state transitions. Events are grouped 
 | `arbiter_voted` | `engagement_id` | `(milestone_index, approve)` | `cast_arbiter_vote` |
 | `dispute_resolved` | `engagement_id` | `(milestone_index, approved)` | Quorum reached in `cast_arbiter_vote` |
 
+#### Dispute-to-Super-Arbiter Escalation Path
+
+Disputes normally resolve through M-of-N arbiter voting. If no quorum is reached
+before the dispute window elapses, the dispute can be escalated to a configured
+super arbiter for a tie-breaking resolution (issue #246):
+
+```
+   Company            Arbiter(s)           HireSettle           Super-Arbiter
+      │                    │                    │                     │
+      │ raise_dispute(engagement_id, milestone_index, reason)         │
+      │────────────────────────────────────────▶│                     │
+      │                    │                    │                     │
+      │                    │                    │ milestone: ProofSubmitted ▶ Disputed
+      │                    │                    │                     │
+      │                    │ cast_arbiter_vote(approve = true/false)  │
+      │                    │───────────────────▶│                     │
+      │                    │                    │                     │
+      │                    │                    │ tallies M-of-N votes│
+      │                    │                    │                     │
+      │                    │                    │ approve_votes >= quorum ▶ Confirmed (payment released)
+      │                    │                    │ reject_votes > N - quorum ▶ Pending (proof cleared)
+      │                    │                    │                     │
+      │                    │ no quorum reached  │                     │
+      │                    │ dispute window elapses                   │
+      │                    │                    │                     │
+      │ escalate_dispute(engagement_id, milestone_index) [any keeper] │
+      │────────────────────────────────────────▶│                     │
+      │                    │                    │                     │
+      │                    │                    │  dispute_escalated  │
+      │                    │                    │────────────────────▶│
+      │                    │                    │                     │
+      │                    │                    │ super_arbiter_resolve(engagement_id, milestone_index, approve)
+      │                    │                    │◀────────────────────│
+      │                    │                    │                     │
+      │                    │                    │ approve  ▶ Resolved (payment released)
+      │                    │                    │ reject   ▶ Pending (proof cleared)
+      │                    │                    │                     │
+```
+
 ### Amendment
 
 | Event | Topics | Payload | Trigger |
