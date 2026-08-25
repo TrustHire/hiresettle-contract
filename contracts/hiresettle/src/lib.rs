@@ -1,3 +1,25 @@
+//! # HireSettle Smart Contract
+//!
+//! ## Overview
+//! The HireSettle smart contract provides escrow and settlement mechanisms for decentralized work
+//! engagements. It manages the full lifecycle of milestone-based agreements, security retentions,
+//! disputes, and protocol fee distributions.
+//!
+//! ## Major Subsystems
+//! - **Escrow & Funding**: Handles locking user funds in contract storage during active engagements.
+//! - **Milestones**: Tracks deliverable checkpoints, approvals, and payout releases.
+//! - **Disputes & Arbitration**: Manages escalation paths, resolution voting, super-arbiters, and quorums.
+//! - **Amendments**: Facilitates proposed modifications to live contract parameters and agreements.
+//! - **Tags**: Enables metadata classification and custom key-value attributes for engagements.
+//! - **Fees & Retention**: Calculates protocol commissions, retention holds, and fee distributions.
+//!
+//! ## Section Navigation
+//! - `Data Types & Storage`: Core structs (`Engagement`, `Milestone`, `Dispute`), state keys, and enums.
+//! - `Contract Initialization`: Setup administrative defaults, fee structures, and protocol parameters.
+//! - `Core Lifecycle Functions`: Initializing engagements, funding escrow, approving, and releasing milestones.
+//! - `Dispute Resolution`: Escalating deadlocks, casting arbiter votes, and executing resolutions.
+//! - `Admin & Configuration`: Protocol parameter updates, fee withdrawals, and arbiter management.
+
 #![no_std]
 
 use soroban_sdk::{
@@ -2051,7 +2073,7 @@ impl HireSettleContract {
             let platform_fee = Self::get_platform_fee_internal(&env);
             let effective_bps =
                 Self::apply_referral_discount(&env, platform_fee.bps, &engagement.referrer);
-                Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
+            Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
             let fee_amount = (payment * effective_bps as i128) / 10_000;
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
@@ -2991,10 +3013,9 @@ impl HireSettleContract {
     /// of this company. Only the company address itself can set the cosigner.
     pub fn set_company_cosigner(env: Env, company: Address, cosigner: Address) {
         company.require_auth();
-        env.storage().persistent().set(
-            &DataKey::CompanyCosigner(company.clone()),
-            &cosigner,
-        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::CompanyCosigner(company.clone()), &cosigner);
         env.events().publish(
             (Symbol::new(&env, "company_cosigner_set"),),
             (company, cosigner),
@@ -3014,10 +3035,9 @@ impl HireSettleContract {
     /// co-signer.
     pub fn set_recruiter_cosigner(env: Env, recruiter: Address, cosigner: Address) {
         recruiter.require_auth();
-        env.storage().persistent().set(
-            &DataKey::RecruiterCosigner(recruiter.clone()),
-            &cosigner,
-        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::RecruiterCosigner(recruiter.clone()), &cosigner);
         env.events().publish(
             (Symbol::new(&env, "recruiter_cosigner_set"),),
             (recruiter, cosigner),
@@ -3100,10 +3120,8 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::EscrowCallbackEnabled, &enabled);
-        env.events().publish(
-            (Symbol::new(&env, "escrow_callback_enabled_set"),),
-            enabled,
-        );
+        env.events()
+            .publish((Symbol::new(&env, "escrow_callback_enabled_set"),), enabled);
     }
 
     /// Return `(enabled, target)` for the reserved escrow callback checkpoint.
@@ -3989,9 +4007,11 @@ impl HireSettleContract {
             .persistent()
             .set(&DataKey::Config(ConfigKey::AmendmentTTL), &ledgers);
 
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Config(ConfigKey::AmendmentTTL), 100_000, 6_300_000);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Config(ConfigKey::AmendmentTTL),
+            100_000,
+            6_300_000,
+        );
     }
 
     /// Get the current amendment proposal TTL in ledgers.
@@ -4555,9 +4575,11 @@ impl HireSettleContract {
             .persistent()
             .set(&DataKey::Config(ConfigKey::MilestoneExtensionTTL), &ledgers);
 
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Config(ConfigKey::MilestoneExtensionTTL), 100_000, 6_300_000);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Config(ConfigKey::MilestoneExtensionTTL),
+            100_000,
+            6_300_000,
+        );
     }
 
     /// Get the current milestone extension proposal TTL in ledgers.
@@ -5178,12 +5200,7 @@ impl HireSettleContract {
     /// Add a tag to an engagement. Only the engagement's company (or its
     /// registered co-signer) may tag the engagement.
     /// Duplicate tags are silently ignored.
-    pub fn add_engagement_tag(
-        env: Env,
-        caller: Address,
-        engagement_id: String,
-        tag: String,
-    ) {
+    pub fn add_engagement_tag(env: Env, caller: Address, engagement_id: String, tag: String) {
         caller.require_auth();
         let engagement = Self::get_engagement_internal(&env, &engagement_id);
         if !Self::is_authorized_company(&env, &caller, &engagement.company) {
@@ -5212,12 +5229,7 @@ impl HireSettleContract {
     /// Remove a tag from an engagement. Only the engagement's company (or its
     /// registered co-signer) may remove a tag.
     /// No-op if the tag was not present.
-    pub fn remove_engagement_tag(
-        env: Env,
-        caller: Address,
-        engagement_id: String,
-        tag: String,
-    ) {
+    pub fn remove_engagement_tag(env: Env, caller: Address, engagement_id: String, tag: String) {
         caller.require_auth();
         let engagement = Self::get_engagement_internal(&env, &engagement_id);
         if !Self::is_authorized_company(&env, &caller, &engagement.company) {
@@ -5494,9 +5506,10 @@ impl HireSettleContract {
     /// Admin sets the inactivity timeout in ledgers.
     pub fn set_inactivity_timeout_ledgers(env: Env, admin: Address, ledgers: u32) {
         Self::assert_admin(&env, &admin);
-        env.storage()
-            .instance()
-            .set(&DataKey::Config(ConfigKey::InactivityTimeoutLedgers), &ledgers);
+        env.storage().instance().set(
+            &DataKey::Config(ConfigKey::InactivityTimeoutLedgers),
+            &ledgers,
+        );
         env.events()
             .publish((Symbol::new(&env, "inactivity_timeout_set"),), ledgers);
     }
@@ -6174,7 +6187,9 @@ impl HireSettleContract {
         if bps > MAX_ARBITER_FEE_BPS {
             panic!("ArbiterFeeTooHigh");
         }
-        env.storage().instance().set(&DataKey::Config(ConfigKey::ArbiterFee), &bps);
+        env.storage()
+            .instance()
+            .set(&DataKey::Config(ConfigKey::ArbiterFee), &bps);
         env.events()
             .publish((Symbol::new(&env, "arbiter_fee_set"),), bps);
     }
