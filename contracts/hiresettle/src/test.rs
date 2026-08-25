@@ -8419,8 +8419,6 @@ fn test_expire_engagement_rejected_on_cancelled_engagement_before_timeout() {
     client.expire_engagement(&eng_id);
 }
 
-
-
 /// Admin can set the arbiter fee and get_arbiter_fee reflects it.
 #[test]
 fn test_set_and_get_arbiter_fee() {
@@ -8525,10 +8523,7 @@ fn test_arbiter_fee_deducted_on_dispute_approval() {
         recruiter_balance_before + 297_000_000
     );
     assert_eq!(token_client.balance(&a1), a1_balance_before);
-    assert_eq!(
-        token_client.balance(&a2),
-        a2_balance_before + 3_000_000
-    );
+    assert_eq!(token_client.balance(&a2), a2_balance_before + 3_000_000);
 }
 
 #[test]
