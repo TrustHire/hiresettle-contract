@@ -747,6 +747,9 @@ const DEFAULT_SUPER_ARBITER_RESPONSE_WINDOW_LEDGERS: u32 = 51_840;
 const MAX_TAGS: u32 = 10;
 /// Maximum length, in characters, of a single engagement tag (issue #248).
 const MAX_TAG_LENGTH: u32 = 32;
+/// Default maximum number of milestone extensions allowed per milestone
+/// (issue #323).
+const DEFAULT_MAX_MILESTONE_EXTENSIONS: u32 = 3;
 
 /// Shared panic message constants for the most-repeated error strings
 /// (issue #171). Keeping these as constants means a typo can't silently
@@ -4915,6 +4918,20 @@ impl HireSettleContract {
             panic!("additional ledgers must be greater than zero");
         }
 
+        // Issue #323: reject once this milestone has already been granted
+        // the configured maximum number of extensions.
+        let granted_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MilestoneExtensionCount(
+                engagement_id.clone(),
+                milestone_index,
+            ))
+            .unwrap_or(0);
+        if granted_count >= Self::get_max_milestone_extensions_internal(&env) {
+            panic!("MilestoneExtensionLimitReached");
+        }
+
         let current_ledger = env.ledger().sequence();
         let ttl = Self::get_extension_ttl(env.clone());
 
@@ -5027,6 +5044,23 @@ impl HireSettleContract {
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
         Self::extend_engagement_ttl(&env, &engagement_id);
 
+        // Issue #322 / #323: track that an extension was granted for this
+        // milestone, both for the aggregate query and the per-milestone cap.
+        let extension_count_key =
+            DataKey::MilestoneExtensionCount(engagement_id.clone(), milestone_index);
+        let new_extension_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&extension_count_key)
+            .unwrap_or(0)
+            + 1;
+        env.storage()
+            .persistent()
+            .set(&extension_count_key, &new_extension_count);
+        env.storage()
+            .persistent()
+            .extend_ttl(&extension_count_key, 100_000, 6_300_000);
+
         env.events().publish(
             (
                 Symbol::new(&env, "milestone_extension_accepted"),
@@ -5101,6 +5135,39 @@ impl HireSettleContract {
             }
             _ => None,
         }
+    }
+
+    /// Return the total number of milestone extensions granted (accepted)
+    /// across every milestone of an engagement (issue #322).
+    pub fn get_milestone_extension_count(env: Env, engagement_id: String) -> u32 {
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let mut total: u32 = 0;
+        for i in 0..engagement.milestones.len() {
+            total += env
+                .storage()
+                .persistent()
+                .get(&DataKey::MilestoneExtensionCount(engagement_id.clone(), i))
+                .unwrap_or(0u32);
+        }
+        total
+    }
+
+    /// Admin sets the maximum number of milestone extensions that may be
+    /// granted per milestone. Defaults to 3 when not explicitly configured.
+    /// See issue #323.
+    pub fn set_max_milestone_extensions(env: Env, admin: Address, count: u32) {
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::Config(ConfigKey::MaxMilestoneExtensions), &count);
+        env.events()
+            .publish((Symbol::new(&env, "max_milestone_extensions_set"),), count);
+    }
+
+    /// Return the current maximum milestone extension count cap.
+    /// Returns `DEFAULT_MAX_MILESTONE_EXTENSIONS` (3) when not configured.
+    pub fn get_max_milestone_extensions(env: Env) -> u32 {
+        Self::get_max_milestone_extensions_internal(&env)
     }
 
     // ----------------------------------------------------------
@@ -5505,6 +5572,11 @@ impl HireSettleContract {
                 return;
             }
         }
+        // Issue #321: this is the tag's first engagement, so it just became
+        // "in use" — track it in the global distinct-tag registry.
+        if ids.len() == 0 {
+            Self::track_tag_used(&env, &tag);
+        }
         ids.push_back(engagement_id.clone());
         env.storage().persistent().set(&key, &ids);
         env.events().publish(
@@ -5541,11 +5613,123 @@ impl HireSettleContract {
         }
         if found {
             env.storage().persistent().set(&key, &new_ids);
+            // Issue #321: no engagements left under this tag — it's no
+            // longer "in use", so drop it from the global tag registry.
+            if new_ids.len() == 0 {
+                Self::untrack_tag_used(&env, &tag);
+            }
             env.events().publish(
                 (Symbol::new(&env, "engagement_tag_removed"), tag),
                 engagement_id,
             );
         }
+    }
+
+    /// Rename a tag across its entire engagement index (issue #320). Every
+    /// engagement currently listed under `old_tag` is moved to `new_tag`,
+    /// merging with (and de-duplicating against) any engagements `new_tag`
+    /// already lists. Returns the resulting size of the `new_tag` index.
+    ///
+    /// # Caller
+    /// Either the platform admin, or a caller authorized (as company or its
+    /// registered co-signer — see `is_authorized_company`) for *every*
+    /// engagement currently under `old_tag`. A company cannot rename a tag
+    /// that also covers another company's engagements.
+    ///
+    /// # Panics
+    /// - `"TagEmpty"` — `new_tag` is empty.
+    /// - `"TagTooLong"` — `new_tag` exceeds `MAX_TAG_LENGTH` characters.
+    /// - `"NewTagSameAsOld"` — `old_tag` and `new_tag` are identical.
+    /// - `"TagNotFound"` — `old_tag` has no engagements indexed under it.
+    /// - `"unauthorized"` — caller is not the admin and is not authorized
+    ///   for every engagement currently under `old_tag`.
+    pub fn rename_engagement_tag(
+        env: Env,
+        caller: Address,
+        old_tag: String,
+        new_tag: String,
+    ) -> u32 {
+        Self::assert_not_paused(&env);
+        caller.require_auth();
+
+        if new_tag.len() == 0 {
+            panic!("TagEmpty");
+        }
+        if new_tag.len() > MAX_TAG_LENGTH {
+            panic!("TagTooLong");
+        }
+        if old_tag == new_tag {
+            panic!("NewTagSameAsOld");
+        }
+
+        let old_key = DataKey::EngagementTag(old_tag.clone());
+        let ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&old_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if ids.len() == 0 {
+            panic!("TagNotFound");
+        }
+
+        let is_admin = caller == Self::get_admin_internal(&env);
+        if !is_admin {
+            for i in 0..ids.len() {
+                let engagement = Self::get_engagement_internal(&env, &ids.get(i).unwrap());
+                if !Self::is_authorized_company(&env, &caller, &engagement.company) {
+                    panic!("{}", ERR_UNAUTHORIZED);
+                }
+            }
+        }
+
+        let new_key = DataKey::EngagementTag(new_tag.clone());
+        let mut new_ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&new_key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        for i in 0..ids.len() {
+            let id = ids.get(i).unwrap();
+            let mut already_present = false;
+            for j in 0..new_ids.len() {
+                if new_ids.get(j).unwrap() == id {
+                    already_present = true;
+                    break;
+                }
+            }
+            if !already_present {
+                new_ids.push_back(id);
+            }
+        }
+
+        env.storage().persistent().set(&new_key, &new_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&new_key, 100_000, 6_300_000);
+        env.storage().persistent().remove(&old_key);
+
+        Self::untrack_tag_used(&env, &old_tag);
+        Self::track_tag_used(&env, &new_tag);
+
+        let new_count = new_ids.len();
+        env.events().publish(
+            (Symbol::new(&env, "engagement_tag_renamed"), old_tag),
+            (new_tag, new_count),
+        );
+
+        new_count
+    }
+
+    /// Return the full set of distinct tags currently in use — i.e. every
+    /// tag with at least one engagement in its index (issue #321).
+    /// Read-only and permissionless. Order is insertion order, not sorted.
+    pub fn get_all_tags(env: Env) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::AllTags)
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     /// Return a paginated slice of engagement IDs currently in a given status
@@ -6977,6 +7161,58 @@ impl HireSettleContract {
             .instance()
             .get(&DataKey::Config(ConfigKey::MaxReplacements))
             .unwrap_or(DEFAULT_MAX_REPLACEMENTS)
+    }
+
+    fn get_max_milestone_extensions_internal(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::MaxMilestoneExtensions))
+            .unwrap_or(DEFAULT_MAX_MILESTONE_EXTENSIONS)
+    }
+
+    /// Add `tag` to the global distinct-tag registry if it isn't already
+    /// present (issue #321). Idempotent.
+    fn track_tag_used(env: &Env, tag: &String) {
+        let mut tags: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AllTags)
+            .unwrap_or_else(|| Vec::new(env));
+        for i in 0..tags.len() {
+            if tags.get(i).unwrap() == *tag {
+                return;
+            }
+        }
+        tags.push_back(tag.clone());
+        env.storage().persistent().set(&DataKey::AllTags, &tags);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::AllTags, 100_000, 6_300_000);
+    }
+
+    /// Remove `tag` from the global distinct-tag registry if present
+    /// (issue #321). No-op if the tag isn't tracked.
+    fn untrack_tag_used(env: &Env, tag: &String) {
+        let tags: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AllTags)
+            .unwrap_or_else(|| Vec::new(env));
+        let mut new_tags: Vec<String> = Vec::new(env);
+        let mut changed = false;
+        for i in 0..tags.len() {
+            let t = tags.get(i).unwrap();
+            if t == *tag {
+                changed = true;
+            } else {
+                new_tags.push_back(t);
+            }
+        }
+        if changed {
+            env.storage()
+                .persistent()
+                .set(&DataKey::AllTags, &new_tags);
+        }
     }
 
     /// Decrement the per-company active engagement count, saturating at 0.
