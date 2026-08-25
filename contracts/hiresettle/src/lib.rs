@@ -1931,10 +1931,13 @@ impl HireSettleContract {
     ///   the engagement reverts to `Active`.
     ///
     /// # Panics
-    /// - `"engagement not active"` — engagement is not `Active` or `ReplacementRequested`.
-    /// - `"milestone not pending"` — milestone is not in `Pending` status.
-    /// - `"proof cooldown active"` — resubmitting too soon after a previous proof.
-    /// - `"proof hash cannot be empty"` — empty string passed as `proof_hash`.
+    /// - `"ContractPaused"` / `"EngagementPaused"` — contract or engagement is paused.
+    /// - `"InvalidProofHash"` — empty string passed as `proof_hash`.
+    /// - `"ProofHashTooLong"` — `proof_hash` exceeds the configured max proof hash length.
+    /// - `"engagement is not active"` — engagement is not `Active` or `ReplacementRequested`.
+    /// - `"unauthorized"` — caller is not the engagement's recruiter.
+    /// - `"milestone is not pending"` — milestone is not in `Pending` status.
+    /// - `"ResubmitTooSoon"` — resubmitting before the proof cooldown has elapsed.
     /// - `"DuplicateProofHash"` — the proof hash is already used by another milestone
     ///   in this engagement.
     ///
