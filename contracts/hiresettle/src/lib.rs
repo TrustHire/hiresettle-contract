@@ -609,7 +609,10 @@ pub enum DataKey {
     AdminRenounced,
     /// Per-company count of currently active (non-terminal) engagements.
     CompanyActiveCount(Address),
-    /// Per-tag list of engagement IDs (issue #249).
+    /// Legacy tag-index variant. Engagements are now indexed under
+    /// `TagEngagements`; this variant is retained only so the `DataKey`
+    /// discriminant layout is unchanged for already-deployed storage.
+    #[allow(dead_code)]
     EngagementTag(String),
     /// Optional co-signer address authorized to perform company-gated actions (issue #254).
     CompanyCosigner(Address),
@@ -5202,7 +5205,7 @@ impl HireSettleContract {
             panic!("{}", ERR_UNAUTHORIZED);
         }
 
-        let key = DataKey::EngagementTag(tag.clone());
+        let key = DataKey::TagEngagements(tag.clone());
         let mut ids: Vec<String> = env
             .storage()
             .persistent()
@@ -5236,7 +5239,7 @@ impl HireSettleContract {
             panic!("{}", ERR_UNAUTHORIZED);
         }
 
-        let key = DataKey::EngagementTag(tag.clone());
+        let key = DataKey::TagEngagements(tag.clone());
         let ids: Vec<String> = env
             .storage()
             .persistent()
@@ -5353,7 +5356,7 @@ impl HireSettleContract {
         let ids: Vec<String> = env
             .storage()
             .persistent()
-            .get(&DataKey::EngagementTag(tag))
+            .get(&DataKey::TagEngagements(tag))
             .unwrap_or_else(|| Vec::new(&env));
 
         let total = ids.len();
@@ -5377,7 +5380,7 @@ impl HireSettleContract {
         let ids: Vec<String> = env
             .storage()
             .persistent()
-            .get(&DataKey::EngagementTag(tag))
+            .get(&DataKey::TagEngagements(tag))
             .unwrap_or_else(|| Vec::new(&env));
         ids.len()
     }
