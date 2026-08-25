@@ -699,6 +699,37 @@ On rejection, the engagement returns to `Active` and the recruiter must continue
 
 All read-only functions are permissionless and require no authentication.
 
+#### Which query do I call?
+
+A quick lookup for common frontend needs. See the subsections below for full
+argument and return-type details.
+
+| Frontend need | Function |
+|---|---|
+| Show a company their active engagements | `get_engagements_by_company` + `get_company_active_count` |
+| Show all engagements (admin / explorer view) | `get_engagement_ids_by_status` + `get_engagement_count` |
+| Show one engagement's full detail | `get_engagement` / `get_engagement_summary` |
+| Show an engagement's milestone list + status | `get_all_milestone_statuses` |
+| Show a single milestone's detail | `get_milestone` |
+| Check if a milestone is unlockable now | `is_milestone_unlockable` |
+| Show how long until a milestone unlocks | `ledgers_until_unlock` / `get_estimated_unlock_seconds` |
+| Warn a user a milestone is due soon | `is_milestone_due_soon` |
+| Show how much has been released / remains in escrow | `get_total_released` / `get_escrow_balance` |
+| Check if an engagement is finished | `get_is_engagement_complete` |
+| Show milestone unlock progress for a bar | `get_unlock_progress` |
+| Show a recruiter's / company's star rating | `get_recruiter_rating` / `get_company_rating` |
+| Check whether I already rated someone | `is_recruiter_rated` / `is_company_rated` |
+| Show pending milestone amendment / its TTL | `get_pending_amendment` / `get_amendment_ttl` |
+| Show amendment history for a milestone | `get_amendment_log` |
+| Show arbiter vote tally on a dispute | `get_arbiter_votes` |
+| Show why a milestone is in dispute | `get_dispute_reason` |
+| Show replacement history / reason | `get_replacement_count` / `get_replacement_reason` |
+| Fetch the contract PDF / metadata hash | `get_contract_pdf_hash` / `get_metadata_hash` |
+| Is the contract (or one engagement) paused? | `is_paused` / `is_engagement_paused` |
+| Load current config in one call (indexers) | `get_config_snapshot` |
+| Fetch a single config value | `get_version`, `get_min_amount`, `get_platform_fee`, `get_allowed_tokens`, … |
+| Show open dispute count on an engagement | `get_active_dispute_count` |
+
 #### Engagement Queries
 
 | Function | Arguments | Return Type |
