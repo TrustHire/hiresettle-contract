@@ -1,3 +1,25 @@
+//! # HireSettle Smart Contract
+//!
+//! ## Overview
+//! The HireSettle smart contract provides escrow and settlement mechanisms for decentralized work
+//! engagements. It manages the full lifecycle of milestone-based agreements, security retentions,
+//! disputes, and protocol fee distributions.
+//!
+//! ## Major Subsystems
+//! - **Escrow & Funding**: Handles locking user funds in contract storage during active engagements.
+//! - **Milestones**: Tracks deliverable checkpoints, approvals, and payout releases.
+//! - **Disputes & Arbitration**: Manages escalation paths, resolution voting, super-arbiters, and quorums.
+//! - **Amendments**: Facilitates proposed modifications to live contract parameters and agreements.
+//! - **Tags**: Enables metadata classification and custom key-value attributes for engagements.
+//! - **Fees & Retention**: Calculates protocol commissions, retention holds, and fee distributions.
+//!
+//! ## Section Navigation
+//! - `Data Types & Storage`: Core structs (`Engagement`, `Milestone`, `Dispute`), state keys, and enums.
+//! - `Contract Initialization`: Setup administrative defaults, fee structures, and protocol parameters.
+//! - `Core Lifecycle Functions`: Initializing engagements, funding escrow, approving, and releasing milestones.
+//! - `Dispute Resolution`: Escalating deadlocks, casting arbiter votes, and executing resolutions.
+//! - `Admin & Configuration`: Protocol parameter updates, fee withdrawals, and arbiter management.
+
 #![no_std]
 
 use soroban_sdk::{
