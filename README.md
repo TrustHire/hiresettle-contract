@@ -499,6 +499,52 @@ The two pause mechanisms are orthogonal and both must pass for a call to
 proceed: an engagement can be quarantined while the contract runs normally, and
 calling `unpause` on the contract does **not** lift a per-engagement quarantine.
 
+#### Interaction with the global pause
+
+The two mechanisms are tracked in **separate storage flags** and enforced by two
+independent guards — `assert_not_paused` for the contract-wide pause and
+`assert_engagement_not_paused` for the quarantine (see `lib.rs`). A
+state-changing call must clear **both** guards to proceed; they are an **AND**,
+not an OR.
+
+Because they are independent, neither pause clears the other:
+
+- `unpause(admin)` — the contract-wide resume **does not** lift a per-engagement
+  quarantine. An engagement quarantined before the contract was paused stays
+  quarantined after the contract is resumed; its lifecycle calls keep failing
+  with `EngagementPaused` until `unpause_engagement` is called for that ID.
+- `unpause_engagement(admin, engagement_id)` — lifting a single engagement's
+  quarantine **does not** resume a globally paused contract. While the whole
+  contract is paused, that engagement's calls still fail with `ContractPaused`
+  regardless of its own quarantine state.
+
+The combined effect for any given engagement:
+
+| Global pause | Engagement quarantine | State-changing call |
+|---|---|---|
+| off | off | proceeds |
+| off | on  | rejected — `EngagementPaused` |
+| on  | off | rejected — `ContractPaused` |
+| on  | on  | rejected — `ContractPaused` (global guard checked first) |
+
+**Example.** An admin quarantines `ENG-42` with `pause_engagement` while the
+contract is running, then later pauses the whole contract with `pause` for
+maintenance:
+
+1. `pause_engagement(admin, "ENG-42")` → `is_engagement_paused("ENG-42")` is
+   `true`, while `is_paused()` is still `false`.
+2. `pause(admin)` → `is_paused()` becomes `true`; `ENG-42` remains quarantined.
+3. A lifecycle call on `ENG-42` now fails with `ContractPaused` (the global guard
+   is checked before the engagement guard).
+4. `unpause(admin)` → `is_paused()` is `false` again, **but** `ENG-42` is still
+   quarantined, so its calls still fail with `EngagementPaused`.
+5. `unpause_engagement(admin, "ENG-42")` → quarantine lifted; lifecycle calls on
+   `ENG-42` proceed normally.
+
+To check ahead of a write, query both `is_paused()` and
+`is_engagement_paused(engagement_id)` — a call is only accepted when **both**
+return `false`.
+
 ### Milestone Due-Soon Notifications
 
 Soroban contracts cannot schedule their own work, so the due-soon signal follows
@@ -521,6 +567,35 @@ have already been announced.
 The call deliberately does **not** touch `last_activity_ledger`: a notification
 is not engagement activity, and bumping it would let a keeper postpone
 `expire_engagement` indefinitely.
+
+### Engagement Tags
+
+Engagements can be labelled with free-form string tags so off-chain tooling can
+group and filter them (e.g. by client, role, or campaign). Tags are managed by
+the engagement's **company** (or its registered co-signer) and are only ever read
+by the tag-based queries — they do not affect escrow, payments, or lifecycle.
+
+**Limits** (enforced when the engagement is created via `config.tags`):
+
+- **Max tags per engagement: 10** — creating with more panics `TooManyTags`.
+- **Max tag length: 32 characters** — a longer tag panics `TagTooLong`; a
+  zero-length tag panics `TagEmpty`.
+- Tags are de-duplicated at creation, so a repeated tag lists the engagement once
+  in its index.
+
+These bounds exist so storage stays predictable regardless of caller input. The
+cap is checked at creation time; `add_engagement_tag` appends to a tag's
+engagement index without re-checking the per-engagement cap.
+
+| Function | Caller | Purpose | Panics |
+|---|---|---|---|
+| `add_engagement_tag(company, engagement_id, tag)` | Company (or co-signer) | Add `engagement_id` to a tag's index. Duplicate tags are silently ignored. | `unauthorized`, `engagement not found` |
+| `remove_engagement_tag(company, engagement_id, tag)` | Company (or co-signer) | Remove `engagement_id` from a tag's index. No-op if the tag was not present. | `unauthorized`, `engagement not found` |
+| `get_engagements_by_tag(tag, page, page_size)` → `Vec<String>` | Anyone | Paginated engagement IDs tagged with `tag`. Out-of-range pages return an empty vec. | — |
+| `get_engagement_tag_count(tag)` → `u32` | Anyone | Total number of engagements tagged with `tag`. Returns `0` for a tag no engagement has. | — |
+
+`get_engagement_tag_count` is the companion to `get_engagements_by_tag` for
+sizing pagination: pass the same `tag` to both to know how many pages to fetch.
 
 ### Amendments
 `propose_amendment`, `accept_amendment`, `reject_amendment`, `withdraw_amendment_proposal`
@@ -623,6 +698,37 @@ On rejection, the engagement returns to `Active` and the recruiter must continue
 ### Read-Only Queries
 
 All read-only functions are permissionless and require no authentication.
+
+#### Which query do I call?
+
+A quick lookup for common frontend needs. See the subsections below for full
+argument and return-type details.
+
+| Frontend need | Function |
+|---|---|
+| Show a company their active engagements | `get_engagements_by_company` + `get_company_active_count` |
+| Show all engagements (admin / explorer view) | `get_engagement_ids_by_status` + `get_engagement_count` |
+| Show one engagement's full detail | `get_engagement` / `get_engagement_summary` |
+| Show an engagement's milestone list + status | `get_all_milestone_statuses` |
+| Show a single milestone's detail | `get_milestone` |
+| Check if a milestone is unlockable now | `is_milestone_unlockable` |
+| Show how long until a milestone unlocks | `ledgers_until_unlock` / `get_estimated_unlock_seconds` |
+| Warn a user a milestone is due soon | `is_milestone_due_soon` |
+| Show how much has been released / remains in escrow | `get_total_released` / `get_escrow_balance` |
+| Check if an engagement is finished | `get_is_engagement_complete` |
+| Show milestone unlock progress for a bar | `get_unlock_progress` |
+| Show a recruiter's / company's star rating | `get_recruiter_rating` / `get_company_rating` |
+| Check whether I already rated someone | `is_recruiter_rated` / `is_company_rated` |
+| Show pending milestone amendment / its TTL | `get_pending_amendment` / `get_amendment_ttl` |
+| Show amendment history for a milestone | `get_amendment_log` |
+| Show arbiter vote tally on a dispute | `get_arbiter_votes` |
+| Show why a milestone is in dispute | `get_dispute_reason` |
+| Show replacement history / reason | `get_replacement_count` / `get_replacement_reason` |
+| Fetch the contract PDF / metadata hash | `get_contract_pdf_hash` / `get_metadata_hash` |
+| Is the contract (or one engagement) paused? | `is_paused` / `is_engagement_paused` |
+| Load current config in one call (indexers) | `get_config_snapshot` |
+| Fetch a single config value | `get_version`, `get_min_amount`, `get_platform_fee`, `get_allowed_tokens`, … |
+| Show open dispute count on an engagement | `get_active_dispute_count` |
 
 #### Engagement Queries
 
