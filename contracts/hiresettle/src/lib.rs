@@ -2185,8 +2185,8 @@ impl HireSettleContract {
     /// arbiters can vote on the outcome.
     ///
     /// # Caller
-    /// `company` — must match the engagement's company address and sign
-    /// the transaction.
+    /// `company`: must be the engagement's company address or its registered
+    /// company co-signer, and must sign the transaction.
     ///
     /// # Behaviour
     /// - The engagement must be `Active`.
@@ -2200,12 +2200,20 @@ impl HireSettleContract {
     ///   see [`Self::cast_arbiter_vote`].
     ///
     /// # Panics
-    /// - `"ReasonTooLong"` — `reason` exceeds 128 bytes.
-    /// - `"engagement is not active"` — engagement is not `Active`.
-    /// - `"unauthorized"` — caller is not the engagement's company.
-    /// - `"can only dispute a submitted proof"` — milestone is not in
+    /// - `"EngagementPaused"`: the engagement has been paused by the admin.
+    /// - Authentication fails for `company` when `company.require_auth()` is
+    ///   evaluated.
+    /// - `"ReasonTooLong"`: `reason` is longer than 128 bytes.
+    /// - `"engagement not found"`: no engagement exists for `engagement_id`.
+    /// - `"engagement is not active"`: the engagement is not in `Active` status.
+    /// - `"unauthorized"`: the authenticated caller is neither the engagement's
+    ///   company nor its registered company co-signer.
+    /// - `"invalid milestone index"`: `milestone_index` does not identify a
+    ///   milestone in the engagement.
+    /// - `"can only dispute a submitted proof"`: the milestone is not in
     ///   `ProofSubmitted` status.
-    /// - `"DisputeWindowClosed"` — the dispute window has elapsed.
+    /// - `"DisputeWindowClosed"`: the current ledger is after the dispute
+    ///   window calculated from `proof_submitted_at`.
     ///
     /// # Events
     /// Emits `("dispute_raised", engagement_id)` with
