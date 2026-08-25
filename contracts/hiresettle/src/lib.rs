@@ -1144,8 +1144,13 @@ impl HireSettleContract {
 
     /// Return a single diagnostic snapshot of the contract's health (issue #256).
     /// Returns paused state, admin, version, and total engagement count in one call.
+    ///
+    /// # Events
+    /// Emits `("contract_health_snapshot",)` with the returned `ContractHealth`
+    /// as data, so off-chain keepers polling this view can be observed and
+    /// indexed on-chain rather than only inferred from RPC traffic (issue #316).
     pub fn get_contract_health(env: Env) -> ContractHealth {
-        ContractHealth {
+        let health = ContractHealth {
             paused: Self::is_paused_internal(&env),
             admin: Self::get_admin_internal(&env),
             version: env
@@ -1158,7 +1163,14 @@ impl HireSettleContract {
                 .instance()
                 .get(&DataKey::EngagementCount)
                 .unwrap_or(0u64),
-        }
+        };
+
+        env.events().publish(
+            (Symbol::new(&env, "contract_health_snapshot"),),
+            health.clone(),
+        );
+
+        health
     }
 
     // ----------------------------------------------------------
