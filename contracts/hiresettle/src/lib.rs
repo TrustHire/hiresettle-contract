@@ -338,9 +338,15 @@ pub struct PlatformFee {
 #[contracttype]
 #[derive(Clone)]
 pub struct FeeTier {
-    /// Minimum `total_amount` (inclusive) to qualify for this tier.
+    /// Minimum engagement `total_amount` (inclusive) required to fall into this
+    /// tier. Tiers are evaluated highest-`threshold` first, so an engagement is
+    /// charged the `bps` of the first (highest) tier whose `threshold` it meets
+    /// or exceeds; if it is below every tier's `threshold`, the contract-wide
+    /// default platform fee applies instead.
     pub threshold: i128,
-    /// Platform fee in basis points applied to engagements in this tier.
+    /// Platform fee, in basis points (1 bp = 0.01%), charged on engagements that
+    /// qualify for this tier (i.e. whose `total_amount` is at or above
+    /// `threshold`). Replaces the default platform fee for those engagements.
     pub bps: u32,
 }
 
