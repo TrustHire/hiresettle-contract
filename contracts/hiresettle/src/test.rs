@@ -8541,3 +8541,216 @@ fn test_escrow_callback_checkpoint_emits_when_enabled_and_target_set() {
 
     assert!(has_event(&env, "escrow_callback_point"));
 }
+
+// ============================================================
+// get_scheduled_confirmations query tests
+// ============================================================
+
+/// Returns empty list when no scheduled confirmations exist.
+#[test]
+fn test_get_scheduled_confirmations_empty_when_none_scheduled() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let scheduled = client.get_scheduled_confirmations(&0, &10);
+    assert_eq!(scheduled.len(), 0);
+}
+
+/// Returns scheduled confirmations after proof submission and before company confirm.
+#[test]
+fn test_get_scheduled_confirmations_returns_pending_after_proof_submission() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id_1 = String::from_str(&env, "ENG-SCHED-1");
+    let eng_id_2 = String::from_str(&env, "ENG-SCHED-2");
+
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-SCHED-1",
+    );
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-SCHED-2",
+    );
+
+    // Submit proof for both engagements
+    client.submit_proof(
+        &recruiter,
+        &eng_id_1,
+        &0,
+        &String::from_str(&env, "ipfs://proof-1"),
+    );
+    client.submit_proof(
+        &recruiter,
+        &eng_id_2,
+        &0,
+        &String::from_str(&env, "ipfs://proof-2"),
+    );
+
+    let scheduled = client.get_scheduled_confirmations(&0, &10);
+    assert_eq!(scheduled.len(), 2);
+}
+
+/// Scheduled confirmations list is cleared after manual confirmation.
+#[test]
+fn test_get_scheduled_confirmations_empty_after_manual_confirm() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-SCHED-CLEAR");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-SCHED-CLEAR",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof"),
+    );
+
+    let scheduled_before = client.get_scheduled_confirmations(&0, &10);
+    assert_eq!(scheduled_before.len(), 1);
+
+    // Company manually confirms
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    let scheduled_after = client.get_scheduled_confirmations(&0, &10);
+    assert_eq!(scheduled_after.len(), 0);
+}
+
+// ============================================================
+// get_due_soon_engagements query tests
+// ============================================================
+
+/// Returns empty list when no engagements have upcoming due-soon milestones.
+#[test]
+fn test_get_due_soon_engagements_empty_when_no_milestones_due() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-DUE-NONE",
+    );
+
+    // Set due-soon threshold to 1000 ledgers
+    let threshold = 1_000u32;
+    let due_soon = client.get_due_soon_engagements(&threshold, &0, &10);
+    assert_eq!(due_soon.len(), 0);
+}
+
+/// Returns engagements with retention milestones approaching their unlock window.
+#[test]
+fn test_get_due_soon_engagements_returns_approaching_retention_milestones() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-DUE-SOON");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-DUE-SOON",
+    );
+
+    // Confirm placement milestone so retention milestones become relevant
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    // Advance to within the due-soon threshold of milestone 1's unlock
+    let m1 = client.get_milestone(&eng_id, &1);
+    let ledgers_to_advance = m1.valid_after_ledger - env.ledger().sequence() - 500;
+    advance_ledger(&env, ledgers_to_advance);
+
+    // Set threshold to 1000 ledgers — milestone 1 is now 500 ledgers away, within threshold
+    let threshold = 1_000u32;
+    let due_soon = client.get_due_soon_engagements(&threshold, &0, &10);
+    assert_eq!(due_soon.len(), 1);
+    assert_eq!(due_soon.get(0).unwrap(), eng_id);
+}
+
+/// Tests pagination of due-soon engagements with multiple results.
+#[test]
+fn test_get_due_soon_engagements_pagination_multiple_results() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Create 3 engagements
+    let eng_ids = [
+        String::from_str(&env, "ENG-DUE-PAGE-1"),
+        String::from_str(&env, "ENG-DUE-PAGE-2"),
+        String::from_str(&env, "ENG-DUE-PAGE-3"),
+    ];
+
+    for id_str in ["ENG-DUE-PAGE-1", "ENG-DUE-PAGE-2", "ENG-DUE-PAGE-3"].iter() {
+        create_standard_engagement(
+            &env,
+            &client,
+            &token_id,
+            &company,
+            &recruiter,
+            &arbiter,
+            id_str,
+        );
+        
+        // Confirm placement for each
+        let eng_id = String::from_str(&env, id_str);
+        client.submit_proof(
+            &recruiter,
+            &eng_id,
+            &0,
+            &String::from_str(&env, "ipfs://proof"),
+        );
+        client.confirm_milestone(&company, &eng_id, &0);
+    }
+
+    // Advance to within threshold for all retention milestones
+    let m1 = client.get_milestone(&eng_ids[0], &1);
+    let ledgers_to_advance = m1.valid_after_ledger - env.ledger().sequence() - 500;
+    advance_ledger(&env, ledgers_to_advance);
+
+    let threshold = 1_000u32;
+
+    // Test first page (page 0, size 2) — should return 2 results
+    let page0 = client.get_due_soon_engagements(&threshold, &0, &2);
+    assert_eq!(page0.len(), 2);
+
+    // Test second page (page 1, size 2) — should return remaining 1 result
+    let page1 = client.get_due_soon_engagements(&threshold, &1, &2);
+    assert_eq!(page1.len(), 1);
+
+    // Test out of range page — should return empty
+    let page2 = client.get_due_soon_engagements(&threshold, &2, &2);
+    assert_eq!(page2.len(), 0);
+}
