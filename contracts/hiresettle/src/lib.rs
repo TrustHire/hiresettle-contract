@@ -492,6 +492,23 @@ pub struct RatingSummary {
     pub total_score: u32,
 }
 
+/// A single entry in the admin action audit log (issue #357). Recorded for
+/// every admin-gated mutation so off-chain tooling can reconstruct a history
+/// of privileged actions without re-deriving it from raw contract events.
+#[contracttype]
+#[derive(Clone)]
+pub struct AdminActionEntry {
+    /// Short identifier for the action taken, e.g. `"blacklist_company"`.
+    pub action: String,
+    /// The admin address that performed the action.
+    pub admin: Address,
+    /// The address the action targeted, if any (e.g. the blacklisted
+    /// company/recruiter). Absent for actions with no single target address.
+    pub target: Option<Address>,
+    /// Ledger sequence at which the action was recorded.
+    pub ledger: u32,
+}
+
 /// Full point-in-time snapshot of every admin-configurable parameter,
 /// returned by `get_config_snapshot` (issue #240) so off-chain callers don't
 /// need to call each individual getter (`get_platform_fee`, `get_arbiter_fee`,
@@ -765,6 +782,9 @@ pub enum DataKey {
     /// persistent. Keyed by role so the same address can be independently
     /// blacklisted from one role but not the other.
     Blacklisted(BlacklistRole, Address),
+    /// Append-only log of admin-gated actions taken on the contract
+    /// (issue #357). Backs `get_admin_audit_log`.
+    AdminAuditLog,
 }
 
 // ============================================================
@@ -5375,6 +5395,7 @@ impl HireSettleContract {
             &DataKey::Blacklisted(BlacklistRole::Company, company.clone()),
             &true,
         );
+        Self::record_admin_action(&env, "blacklist_company", &admin, Some(company.clone()));
         env.events()
             .publish((Symbol::new(&env, "company_blacklisted"),), company);
     }
@@ -5388,6 +5409,7 @@ impl HireSettleContract {
             BlacklistRole::Company,
             company.clone(),
         ));
+        Self::record_admin_action(&env, "unblacklist_company", &admin, Some(company.clone()));
         env.events()
             .publish((Symbol::new(&env, "company_unblacklisted"),), company);
     }
@@ -5411,6 +5433,7 @@ impl HireSettleContract {
             &DataKey::Blacklisted(BlacklistRole::Recruiter, recruiter.clone()),
             &true,
         );
+        Self::record_admin_action(&env, "blacklist_recruiter", &admin, Some(recruiter.clone()));
         env.events()
             .publish((Symbol::new(&env, "recruiter_blacklisted"),), recruiter);
     }
@@ -5424,6 +5447,12 @@ impl HireSettleContract {
             BlacklistRole::Recruiter,
             recruiter.clone(),
         ));
+        Self::record_admin_action(
+            &env,
+            "unblacklist_recruiter",
+            &admin,
+            Some(recruiter.clone()),
+        );
         env.events()
             .publish((Symbol::new(&env, "recruiter_unblacklisted"),), recruiter);
     }
@@ -5435,6 +5464,53 @@ impl HireSettleContract {
             .persistent()
             .get(&DataKey::Blacklisted(BlacklistRole::Recruiter, recruiter))
             .unwrap_or(false)
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #357 — ADMIN ACTION AUDIT LOG
+    // ----------------------------------------------------------
+
+    /// Return a paginated slice of the admin action audit log, most recent
+    /// first (issue #357). `page` is 0-indexed; an out-of-range page returns
+    /// an empty vec.
+    pub fn get_admin_audit_log(env: Env, page: u32, page_size: u32) -> Vec<AdminActionEntry> {
+        let mut result = Vec::new(&env);
+        if page_size == 0 {
+            return result;
+        }
+
+        let log: Vec<AdminActionEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AdminAuditLog)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total = log.len();
+        let start = page.saturating_mul(page_size);
+        if start >= total {
+            return result;
+        }
+        let end = start.saturating_add(page_size).min(total);
+
+        // Most-recent-first: index from the end of the append-only log.
+        let mut i = total - start;
+        while i > total - end {
+            result.push_back(log.get(i - 1).unwrap());
+            i -= 1;
+        }
+
+        result
+    }
+
+    /// Return the total number of entries in the admin action audit log
+    /// (issue #357). Companion to `get_admin_audit_log` for sizing pagination.
+    pub fn get_admin_audit_log_count(env: Env) -> u32 {
+        let log: Vec<AdminActionEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AdminAuditLog)
+            .unwrap_or_else(|| Vec::new(&env));
+        log.len()
     }
 
     // ----------------------------------------------------------
@@ -7765,6 +7841,29 @@ impl HireSettleContract {
             status,
             EngagementStatus::Completed | EngagementStatus::Cancelled | EngagementStatus::Expired
         )
+    }
+
+    /// Append one entry to the admin action audit log (issue #357). Shared by
+    /// every admin-gated mutator that wants its action recorded, so the log's
+    /// shape and storage key stay consistent across call sites.
+    fn record_admin_action(env: &Env, action: &str, admin: &Address, target: Option<Address>) {
+        let mut log: Vec<AdminActionEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AdminAuditLog)
+            .unwrap_or_else(|| Vec::new(env));
+        log.push_back(AdminActionEntry {
+            action: String::from_str(env, action),
+            admin: admin.clone(),
+            target,
+            ledger: env.ledger().sequence(),
+        });
+        env.storage()
+            .persistent()
+            .set(&DataKey::AdminAuditLog, &log);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::AdminAuditLog, 100_000, 6_300_000);
     }
 
     /// Shared 1–5 bounds check for both feedback-rating entry points

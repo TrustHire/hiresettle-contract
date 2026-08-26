@@ -9686,3 +9686,68 @@ fn test_blacklist_company_and_recruiter_are_independent() {
     assert!(client.is_company_blacklisted(&target));
     assert!(!client.is_recruiter_blacklisted(&target));
 }
+
+// ============================================================
+// #357 — ADMIN ACTION AUDIT LOG
+// ============================================================
+
+#[test]
+fn test_admin_audit_log_records_blacklist_actions() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let target = Address::generate(&env);
+
+    assert_eq!(client.get_admin_audit_log_count(), 0);
+
+    client.blacklist_company(&company, &target);
+    client.unblacklist_company(&company, &target);
+
+    assert_eq!(client.get_admin_audit_log_count(), 2);
+
+    // Most recent first.
+    let log = client.get_admin_audit_log(&0, &10);
+    assert_eq!(log.len(), 2);
+    assert_eq!(
+        log.get(0).unwrap().action,
+        String::from_str(&env, "unblacklist_company")
+    );
+    assert_eq!(log.get(0).unwrap().admin, company);
+    assert_eq!(log.get(0).unwrap().target, Some(target.clone()));
+    assert_eq!(
+        log.get(1).unwrap().action,
+        String::from_str(&env, "blacklist_company")
+    );
+}
+
+#[test]
+fn test_admin_audit_log_pagination_boundary() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    for _ in 0..10 {
+        let target = Address::generate(&env);
+        client.blacklist_recruiter(&company, &target);
+    }
+    assert_eq!(client.get_admin_audit_log_count(), 10);
+
+    let page0 = client.get_admin_audit_log(&0, &5);
+    assert_eq!(page0.len(), 5);
+
+    let page1 = client.get_admin_audit_log(&1, &5);
+    assert_eq!(page1.len(), 5);
+
+    // Out-of-range page returns empty.
+    let page2 = client.get_admin_audit_log(&2, &5);
+    assert_eq!(page2.len(), 0);
+}
+
+#[test]
+fn test_admin_audit_log_empty_page_size_returns_empty() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let target = Address::generate(&env);
+    client.blacklist_company(&company, &target);
+
+    let page = client.get_admin_audit_log(&0, &0);
+    assert_eq!(page.len(), 0);
+}
