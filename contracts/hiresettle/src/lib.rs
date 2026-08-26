@@ -617,6 +617,9 @@ pub enum ConfigKey {
     /// resolve an escalated dispute before it auto-resolves in the
     /// recruiter's favor (issue #318, default `DEFAULT_SUPER_ARBITER_RESPONSE_WINDOW_LEDGERS`).
     SuperArbiterResponseWindow,
+    /// Admin-configurable maximum number of extensions grantable per milestone
+    /// (issue #323, default `DEFAULT_MAX_MILESTONE_EXTENSIONS`).
+    MaxMilestoneExtensions,
 }
 
 /// Contract storage key space. Instance keys reset between transactions;
@@ -733,6 +736,15 @@ pub enum DataKey {
     /// path — either by an explicit `super_arbiter_resolve` call or by
     /// `resolve_escalation_timeout` (issue #317).
     SuperArbiterResolutionCount,
+    /// Ledger sequence at which a milestone's auto-confirm becomes executable
+    /// via `execute_scheduled_auto_confirm`, keyed by (engagement_id, milestone_index).
+    ScheduledAutoConfirm(String, u32),
+    /// Number of extensions already granted for (engagement_id, milestone_index)
+    /// (issue #323), capped by `ConfigKey::MaxMilestoneExtensions`.
+    MilestoneExtensionCount(String, u32),
+    /// Global registry of every distinct tag ever used across engagements
+    /// (issue #321). Backs tag discovery queries.
+    AllTags,
 }
 
 // ============================================================
@@ -769,6 +781,9 @@ const DEFAULT_EXTENSION_TTL: u32 = 17_280;
 /// milestone becomes "due soon" once it is within this many ledgers of its
 /// `valid_after_ledger`. ~1 day at 5 s/ledger.
 const DEFAULT_DUE_SOON_WINDOW_LEDGERS: u32 = 17_280;
+/// Maximum number of engagement configs accepted by a single
+/// `batch_create_engagements` call (issue #34 batch variant).
+const MAX_BATCH_CREATE_ENGAGEMENTS: u32 = 20;
 /// Default deadline, in ledgers, for the super-arbiter to resolve an
 /// escalated dispute before `resolve_escalation_timeout` can auto-favor the
 /// recruiter (issue #318). Mirrors the default dispute window (~3 days).
