@@ -733,6 +733,9 @@ pub enum DataKey {
     /// path — either by an explicit `super_arbiter_resolve` call or by
     /// `resolve_escalation_timeout` (issue #317).
     SuperArbiterResolutionCount,
+    /// Whether an address is currently blacklisted from participating in new
+    /// engagements (issue #360). Admin-gated; persistent.
+    Blacklisted(Address),
 }
 
 // ============================================================
@@ -934,6 +937,41 @@ impl HireSettleContract {
             .persistent()
             .get(&DataKey::Referrers)
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Admin blacklists an address, e.g. a company or recruiter flagged for
+    /// abuse (issue #360). Blacklisting is a standalone flag — it does not by
+    /// itself block any existing lifecycle call; integrators are expected to
+    /// check `get_blacklist_status` off-chain or at their own call sites.
+    pub fn add_to_blacklist(env: Env, admin: Address, address: Address) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Blacklisted(address.clone()), &true);
+        env.events()
+            .publish((Symbol::new(&env, "address_blacklisted"),), address);
+    }
+
+    /// Admin removes an address from the blacklist (issue #360).
+    pub fn remove_from_blacklist(env: Env, admin: Address, address: Address) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Blacklisted(address.clone()));
+        env.events()
+            .publish((Symbol::new(&env, "address_unblacklisted"),), address);
+    }
+
+    /// Return whether `address` is currently blacklisted (issue #360).
+    /// Returns `false` for any address never blacklisted. Read-only and
+    /// permissionless.
+    pub fn get_blacklist_status(env: Env, address: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Blacklisted(address))
+            .unwrap_or(false)
     }
 
     /// Admin sets the referral discount in basis points (issue #251).
