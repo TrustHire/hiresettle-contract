@@ -28,7 +28,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, BytesN, Env, String, Symbol, Vec,
+    contract, contractimpl, contracttype, token, Address, BytesN, Env, Map, String, Symbol, Vec,
 };
 
 const MAX_PLATFORM_FEE_BPS: u32 = 500;
@@ -631,6 +631,12 @@ pub enum ConfigKey {
     /// Admin-configurable maximum number of extensions grantable per milestone
     /// (issue #323, default `DEFAULT_MAX_MILESTONE_EXTENSIONS`).
     MaxMilestoneExtensions,
+    /// Per-token minimum engagement amount overrides (issue #366), stored as a
+    /// single `Map<Address, i128>` blob keyed by token SAC address. A token
+    /// with no entry here falls back to the admin-wide `MinEngagementAmount`.
+    /// Addresses this decimals-agnostic gap without a new `DataKey` variant
+    /// per token (see the note on `add_allowed_token`, issue #175).
+    TokenMinAmounts,
 }
 
 /// Contract storage key space. Instance keys reset between transactions;
@@ -1100,6 +1106,53 @@ impl HireSettleContract {
             .publish((Symbol::new(&env, "min_amount_set"),), amount);
     }
 
+    /// Admin sets a per-token minimum engagement amount override, in that
+    /// token's own smallest unit (issue #366). Takes precedence over the
+    /// admin-wide `MinEngagementAmount` for `token` specifically, so an
+    /// allowlist mixing tokens of different `decimals()` can give each one a
+    /// sane floor instead of sharing one global value (see the gap noted on
+    /// `add_allowed_token`, issue #175). Panics with "unauthorized" if caller
+    /// is not admin, or `"InvalidMinAmount"` if `amount` is not positive.
+    pub fn set_token_min_amount(env: Env, admin: Address, token: Address, amount: i128) {
+        Self::assert_admin(&env, &admin);
+        if amount <= 0 {
+            panic!("InvalidMinAmount");
+        }
+
+        let mut overrides: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenMinAmounts))
+            .unwrap_or_else(|| Map::new(&env));
+        overrides.set(token.clone(), amount);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Config(ConfigKey::TokenMinAmounts), &overrides);
+        env.events().publish(
+            (Symbol::new(&env, "token_min_amount_set"),),
+            (token, amount),
+        );
+    }
+
+    /// Admin removes a token's minimum-amount override (issue #366), so it
+    /// falls back to the admin-wide `MinEngagementAmount`. No-op if `token`
+    /// had no override set.
+    pub fn remove_token_min_amount(env: Env, admin: Address, token: Address) {
+        Self::assert_admin(&env, &admin);
+
+        let mut overrides: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenMinAmounts))
+            .unwrap_or_else(|| Map::new(&env));
+        overrides.remove(token.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::Config(ConfigKey::TokenMinAmounts), &overrides);
+        env.events()
+            .publish((Symbol::new(&env, "token_min_amount_removed"),), token);
+    }
+
     /// Pause state-changing contract operations.
     pub fn pause(env: Env, admin: Address) {
         Self::assert_admin(&env, &admin);
@@ -1491,8 +1544,10 @@ impl HireSettleContract {
             panic!("amount must be greater than zero");
         }
 
-        // Issue #17: Minimum amount validation
-        let min_amount = Self::get_min_amount(env.clone());
+        // Issue #17 / #366: minimum amount validation, using token's
+        // per-token override if the admin has set one, else the
+        // admin-wide default.
+        let min_amount = Self::get_effective_min_amount(env.clone(), token.clone());
         if total_amount < min_amount {
             panic!("AmountBelowMinimum");
         }
@@ -4384,6 +4439,27 @@ impl HireSettleContract {
             .persistent()
             .get(&DataKey::Config(ConfigKey::MinEngagementAmount))
             .unwrap_or(DEFAULT_MIN_ENGAGEMENT_AMOUNT)
+    }
+
+    /// Return `token`'s minimum-amount override, if the admin has set one
+    /// (issue #366). `None` means `token` uses the admin-wide
+    /// `MinEngagementAmount` instead — see `get_effective_min_amount` for the
+    /// resolved value `create_engagement` actually enforces.
+    pub fn get_token_min_amount(env: Env, token: Address) -> Option<i128> {
+        let overrides: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenMinAmounts))
+            .unwrap_or_else(|| Map::new(&env));
+        overrides.get(token)
+    }
+
+    /// Return the minimum engagement amount actually enforced for `token`
+    /// (issue #366): its per-token override if one is set, otherwise the
+    /// admin-wide `MinEngagementAmount`. This is what `create_engagement`
+    /// validates `total_amount` against.
+    pub fn get_effective_min_amount(env: Env, token: Address) -> i128 {
+        Self::get_token_min_amount(env.clone(), token).unwrap_or(Self::get_min_amount(env))
     }
 
     /// Returns the full engagement record for a given engagement ID.

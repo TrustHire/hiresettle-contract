@@ -10098,3 +10098,130 @@ fn test_get_public_engagement_ids_zero_page_size_returns_empty() {
     let page = client.get_public_engagement_ids(&0, &0);
     assert_eq!(page.len(), 0);
 }
+
+// ============================================================
+// #366 — PER-TOKEN MINIMUM AMOUNT
+// ============================================================
+
+#[test]
+fn test_get_token_min_amount_none_by_default() {
+    let (env, contract_id, token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_token_min_amount(&token_id), None);
+}
+
+#[test]
+fn test_set_token_min_amount_admin_sets_override() {
+    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.set_token_min_amount(&company, &token_id, &7_000_000);
+
+    assert_eq!(client.get_token_min_amount(&token_id), Some(7_000_000));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_set_token_min_amount_non_admin_rejected() {
+    let (env, contract_id, token_id, _company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.set_token_min_amount(&recruiter, &token_id, &7_000_000);
+}
+
+#[test]
+#[should_panic(expected = "InvalidMinAmount")]
+fn test_set_token_min_amount_zero_rejected() {
+    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.set_token_min_amount(&company, &token_id, &0);
+}
+
+#[test]
+fn test_get_effective_min_amount_falls_back_to_global_default() {
+    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.set_min_amount(&company, &2_000_000);
+
+    // No per-token override set — effective minimum is the admin-wide default.
+    assert_eq!(client.get_effective_min_amount(&token_id), 2_000_000);
+}
+
+#[test]
+fn test_get_effective_min_amount_prefers_token_override() {
+    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.set_min_amount(&company, &2_000_000);
+    client.set_token_min_amount(&company, &token_id, &9_000_000);
+
+    assert_eq!(client.get_effective_min_amount(&token_id), 9_000_000);
+}
+
+#[test]
+fn test_remove_token_min_amount_falls_back_to_global() {
+    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.set_min_amount(&company, &2_000_000);
+    client.set_token_min_amount(&company, &token_id, &9_000_000);
+    client.remove_token_min_amount(&company, &token_id);
+
+    assert_eq!(client.get_token_min_amount(&token_id), None);
+    assert_eq!(client.get_effective_min_amount(&token_id), 2_000_000);
+}
+
+#[test]
+fn test_create_engagement_uses_token_min_override() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Global default (100_000) would allow this amount, but a stricter
+    // per-token override should be the one actually enforced — succeeds
+    // once at/above the per-token override.
+    client.set_token_min_amount(&company, &token_id, &5_000_000);
+
+    client.create_engagement(
+        &String::from_str(&env, "ENG-TOKENMIN-OK"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+        },
+        &token_id,
+        &5_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+}
+
+#[test]
+#[should_panic(expected = "AmountBelowMinimum")]
+fn test_create_engagement_below_token_min_override_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.set_token_min_amount(&company, &token_id, &5_000_000);
+
+    client.create_engagement(
+        &String::from_str(&env, "ENG-TOKENMIN-REJECT"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+        },
+        &token_id,
+        &4_999_999,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+}
