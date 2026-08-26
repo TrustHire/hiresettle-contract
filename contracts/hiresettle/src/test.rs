@@ -3216,6 +3216,99 @@ fn test_non_admin_cannot_pause_or_unpause() {
 }
 
 // ============================================================
+// #239 — per-engagement pause (quarantine) and its interaction with the global pause
+// ============================================================
+
+#[test]
+#[should_panic(expected = "EngagementPaused")]
+fn test_engagement_pause_blocks_lifecycle_while_contract_runs() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-QUARANTINE");
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-QUARANTINE",
+    );
+
+    // Contract is running; only the single engagement is quarantined.
+    assert!(!client.is_paused());
+    client.pause_engagement(&company, &eng_id);
+    assert!(client.is_engagement_paused(&eng_id));
+
+    // The engagement's own lifecycle call is rejected, other engagements are unaffected.
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+}
+
+#[test]
+fn test_global_unpause_does_not_clear_engagement_pause() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-QUARANTINE-INTERACTION");
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-QUARANTINE-INTERACTION",
+    );
+
+    // Quarantine the engagement, then pause the whole contract.
+    client.pause_engagement(&company, &eng_id);
+    client.pause(&company);
+
+    // Call is blocked while both guards are active.
+    let res = client.try_submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    assert!(res.is_err());
+
+    // Resuming the contract does NOT lift the per-engagement quarantine: the call
+    // stays blocked purely because the engagement is still quarantined.
+    client.unpause(&company);
+    assert!(!client.is_paused());
+    assert!(client.is_engagement_paused(&eng_id));
+
+    let res = client.try_submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    assert!(res.is_err());
+
+    // Only lifting the quarantine lets the call through.
+    client.unpause_engagement(&company, &eng_id);
+    assert!(!client.is_engagement_paused(&eng_id));
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+}
+
+#[test]
+fn test_engagement_unpause_does_not_clear_global_pause() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-QUARANTINE-GLOBAL");
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-QUARANTINE-GLOBAL",
+    );
+
+    // Pause the contract, then quarantine the engagement (allowed while paused).
+    client.pause(&company);
+    client.pause_engagement(&company, &eng_id);
+
+    // Lifting the engagement quarantine does NOT resume the globally paused contract.
+    client.unpause_engagement(&company, &eng_id);
+    assert!(!client.is_engagement_paused(&eng_id));
+    assert!(client.is_paused());
+
+    let res = client.try_submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+    assert!(res.is_err());
+
+    // Only resuming the contract lets the call through.
+    client.unpause(&company);
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://offer"));
+}
+
+#[test]
+fn test_engagement_pause_query_unknown_id_false() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Unknown engagement IDs report false rather than panicking.
+    assert!(!client.is_engagement_paused(&String::from_str(&env, "ENG-DOES-NOT-EXIST")));
+}
+
+// ============================================================
 // #15 — two-step admin transfer
 // ============================================================
 
@@ -8326,8 +8419,6 @@ fn test_expire_engagement_rejected_on_cancelled_engagement_before_timeout() {
     client.expire_engagement(&eng_id);
 }
 
-
-
 /// Admin can set the arbiter fee and get_arbiter_fee reflects it.
 #[test]
 fn test_set_and_get_arbiter_fee() {
@@ -8432,10 +8523,7 @@ fn test_arbiter_fee_deducted_on_dispute_approval() {
         recruiter_balance_before + 297_000_000
     );
     assert_eq!(token_client.balance(&a1), a1_balance_before);
-    assert_eq!(
-        token_client.balance(&a2),
-        a2_balance_before + 3_000_000
-    );
+    assert_eq!(token_client.balance(&a2), a2_balance_before + 3_000_000);
 }
 
 #[test]
@@ -8542,392 +8630,26 @@ fn test_escrow_callback_checkpoint_emits_when_enabled_and_target_set() {
     assert!(has_event(&env, "escrow_callback_point"));
 }
 
-// ============================================================
-// ISSUE #260 — BATCH CREATE ENGAGEMENTS
-// ============================================================
+#[test]
+fn test_get_contract_health_emits_snapshot_event() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
 
-fn batch_config(
-    env: &Env,
-    engagement_id: &str,
-    company: &Address,
-    recruiter: &Address,
-    arbiter: &Address,
-) -> BatchEngagementConfig {
-    BatchEngagementConfig {
-        engagement_id: String::from_str(env, engagement_id),
-        company: company.clone(),
-        recruiter: recruiter.clone(),
-        arbiter_setup: ArbiterSetup {
-            arbiters: vec![env, arbiter.clone()],
-            quorum: 1,
-        },
-        token: company.clone(), // overwritten by caller before use
-        total_amount: 1_000_000_000,
-        job_title: String::from_str(env, "Senior Engineer"),
-        milestones: build_milestones(env),
-        retention_days: vec![env, 30u32, 90u32],
-        config: default_config(),
-    }
+    let health = client.get_contract_health();
+
+    assert!(!health.paused);
+    assert_eq!(health.total_engagement_count, 0);
+    assert!(has_event(&env, "contract_health_snapshot"));
 }
 
 #[test]
-fn test_batch_create_engagements_success() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+fn test_get_contract_health_emits_snapshot_event_reflects_paused_state() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
 
-    let mut cfg1 = batch_config(&env, "BATCH-1", &company, &recruiter, &arbiter);
-    cfg1.token = token_id.clone();
-    let mut cfg2 = batch_config(&env, "BATCH-2", &company, &recruiter, &arbiter);
-    cfg2.token = token_id.clone();
+    client.pause(&company);
+    let health = client.get_contract_health();
 
-    let configs = vec![&env, cfg1, cfg2];
-    let ids = client.batch_create_engagements(&configs);
-
-    assert_eq!(ids.len(), 2);
-    assert_eq!(ids.get(0).unwrap(), String::from_str(&env, "BATCH-1"));
-    assert_eq!(ids.get(1).unwrap(), String::from_str(&env, "BATCH-2"));
-    assert_eq!(client.get_engagement_count(), 2);
-
-    let eng1 = client.get_engagement(&String::from_str(&env, "BATCH-1"));
-    let eng2 = client.get_engagement(&String::from_str(&env, "BATCH-2"));
-    assert_eq!(eng1.status, EngagementStatus::Active);
-    assert_eq!(eng2.status, EngagementStatus::Active);
-}
-
-#[test]
-#[should_panic(expected = "EmptyConfigs")]
-fn test_batch_create_engagements_empty_rejected() {
-    let (env, contract_id, ..) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    let configs: Vec<BatchEngagementConfig> = Vec::new(&env);
-    client.batch_create_engagements(&configs);
-}
-
-#[test]
-#[should_panic(expected = "TooManyEngagements")]
-fn test_batch_create_engagements_too_many_rejected() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    let mut configs: Vec<BatchEngagementConfig> = Vec::new(&env);
-    let names = [
-        "B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B09", "B10", "B11", "B12", "B13",
-        "B14", "B15", "B16", "B17", "B18", "B19", "B20", "B21",
-    ];
-    for name in names.iter() {
-        let mut cfg = batch_config(&env, name, &company, &recruiter, &arbiter);
-        cfg.token = token_id.clone();
-        configs.push_back(cfg);
-    }
-    client.batch_create_engagements(&configs);
-}
-
-// ============================================================
-// ISSUE #348 — MILESTONE REORDER BEFORE ACTIVATION
-// ============================================================
-
-#[test]
-fn test_reorder_milestones_success_before_any_proof() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-001",
-    );
-    let eng_id = String::from_str(&env, "ENG-001");
-
-    let original = client.get_engagement(&eng_id);
-    let name0 = original.milestones.get(0).unwrap().name;
-    let name1 = original.milestones.get(1).unwrap().name;
-
-    client.reorder_milestones(&company, &eng_id, &vec![&env, 1u32, 0u32, 2u32]);
-
-    let m0 = client.get_milestone(&eng_id, &0);
-    let m1 = client.get_milestone(&eng_id, &1);
-    assert_eq!(m0.name, name1);
-    assert_eq!(m1.name, name0);
-}
-
-#[test]
-fn test_reorder_milestones_allows_unconfirmed_tail_after_progress() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-001",
-    );
-    let eng_id = String::from_str(&env, "ENG-001");
-
-    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof0"));
-
-    let before = client.get_engagement(&eng_id);
-    let name1 = before.milestones.get(1).unwrap().name;
-    let name2 = before.milestones.get(2).unwrap().name;
-
-    // Milestone 0 stays put (already ProofSubmitted); 1 and 2 swap freely.
-    client.reorder_milestones(&company, &eng_id, &vec![&env, 0u32, 2u32, 1u32]);
-
-    let m0 = client.get_milestone(&eng_id, &0);
-    let m1 = client.get_milestone(&eng_id, &1);
-    let m2 = client.get_milestone(&eng_id, &2);
-    assert_eq!(m0.status, MilestoneStatus::ProofSubmitted);
-    assert_eq!(m1.name, name2);
-    assert_eq!(m2.name, name1);
-}
-
-#[test]
-#[should_panic(expected = "CannotReorderProgressedMilestone")]
-fn test_reorder_milestones_rejects_moving_progressed_milestone() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-001",
-    );
-    let eng_id = String::from_str(&env, "ENG-001");
-
-    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof0"));
-
-    // Moving already-ProofSubmitted milestone 0 out of slot 0 must fail.
-    client.reorder_milestones(&company, &eng_id, &vec![&env, 1u32, 0u32, 2u32]);
-}
-
-#[test]
-#[should_panic(expected = "InvalidReorderLength")]
-fn test_reorder_milestones_wrong_length_rejected() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-001",
-    );
-    let eng_id = String::from_str(&env, "ENG-001");
-    client.reorder_milestones(&company, &eng_id, &vec![&env, 1u32, 0u32]);
-}
-
-#[test]
-#[should_panic(expected = "DuplicateReorderIndex")]
-fn test_reorder_milestones_duplicate_index_rejected() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-001",
-    );
-    let eng_id = String::from_str(&env, "ENG-001");
-    client.reorder_milestones(&company, &eng_id, &vec![&env, 0u32, 0u32, 2u32]);
-}
-
-#[test]
-#[should_panic(expected = "unauthorized")]
-fn test_reorder_milestones_unauthorized_rejected() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-001",
-    );
-    let eng_id = String::from_str(&env, "ENG-001");
-    client.reorder_milestones(&recruiter, &eng_id, &vec![&env, 1u32, 0u32, 2u32]);
-}
-
-// ============================================================
-// ISSUE #352 — ESCROW RELEASE SCHEDULING
-// ============================================================
-
-#[test]
-fn test_schedule_and_execute_auto_confirm_success() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    let token_client = token::Client::new(&env, &token_id);
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-001",
-    );
-    let eng_id = String::from_str(&env, "ENG-001");
-
-    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof0"));
-
-    let target = env.ledger().sequence() + 50;
-    client.schedule_auto_confirm(&company, &eng_id, &0, &target);
-    assert_eq!(
-        client.get_scheduled_auto_confirm(&eng_id, &0),
-        Some(target)
-    );
-
-    advance_ledger(&env, 51);
-    client.execute_scheduled_auto_confirm(&eng_id, &0);
-
-    let expected_payment = 1_000_000_000i128 * 30 / 100;
-    assert_eq!(token_client.balance(&recruiter), expected_payment);
-
-    let m0 = client.get_milestone(&eng_id, &0);
-    assert_eq!(m0.status, MilestoneStatus::Confirmed);
-    assert_eq!(client.get_scheduled_auto_confirm(&eng_id, &0), None);
-}
-
-#[test]
-#[should_panic(expected = "ScheduledLedgerNotReached")]
-fn test_execute_scheduled_auto_confirm_before_ledger_rejected() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-001",
-    );
-    let eng_id = String::from_str(&env, "ENG-001");
-
-    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof0"));
-    let target = env.ledger().sequence() + 50;
-    client.schedule_auto_confirm(&company, &eng_id, &0, &target);
-
-    client.execute_scheduled_auto_confirm(&eng_id, &0);
-}
-
-#[test]
-#[should_panic(expected = "milestone proof not yet submitted")]
-fn test_schedule_auto_confirm_requires_proof_submitted() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-001",
-    );
-    let eng_id = String::from_str(&env, "ENG-001");
-    let target = env.ledger().sequence() + 50;
-    // Milestone 1 is a Locked retention milestone — no proof possible yet.
-    client.schedule_auto_confirm(&company, &eng_id, &1, &target);
-}
-
-#[test]
-#[should_panic(expected = "ScheduledLedgerInPast")]
-fn test_schedule_auto_confirm_past_ledger_rejected() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-001",
-    );
-    let eng_id = String::from_str(&env, "ENG-001");
-    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof0"));
-    let current = env.ledger().sequence();
-    client.schedule_auto_confirm(&company, &eng_id, &0, &current);
-}
-
-#[test]
-#[should_panic(expected = "NoScheduledAutoConfirm")]
-fn test_cancel_scheduled_auto_confirm_then_execute_fails() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-001",
-    );
-    let eng_id = String::from_str(&env, "ENG-001");
-    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof0"));
-    let target = env.ledger().sequence() + 50;
-    client.schedule_auto_confirm(&company, &eng_id, &0, &target);
-
-    client.cancel_scheduled_auto_confirm(&company, &eng_id, &0);
-    assert_eq!(client.get_scheduled_auto_confirm(&eng_id, &0), None);
-
-    advance_ledger(&env, 51);
-    client.execute_scheduled_auto_confirm(&eng_id, &0);
-}
-
-#[test]
-#[should_panic(expected = "milestone proof not yet submitted")]
-fn test_execute_scheduled_auto_confirm_stale_after_dispute() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-001",
-    );
-    let eng_id = String::from_str(&env, "ENG-001");
-    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof0"));
-    let target = env.ledger().sequence() + 50;
-    client.schedule_auto_confirm(&company, &eng_id, &0, &target);
-
-    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "not satisfied"));
-
-    advance_ledger(&env, 51);
-    // The schedule is now stale — the milestone left ProofSubmitted for Disputed.
-    client.execute_scheduled_auto_confirm(&eng_id, &0);
-}
-
-// ============================================================
-// ISSUE #351 — ENGAGEMENT LIST BY AMOUNT RANGE
-// ============================================================
-
-fn create_engagement_with_amount(
-    env: &Env,
-    client: &HireSettleContractClient,
-    token_id: &Address,
-    company: &Address,
-    recruiter: &Address,
-    arbiter: &Address,
-    id: &str,
-    amount: i128,
-) {
-    client.create_engagement(
-        &String::from_str(env, id),
-        company,
-        recruiter,
-        &ArbiterSetup {
-            arbiters: vec![env, arbiter.clone()],
-            quorum: 1,
-        },
-        token_id,
-        &amount,
-        &String::from_str(env, "Senior Engineer"),
-        &build_milestones(env),
-        &vec![env, 30u32, 90u32],
-        &default_config(),
-    );
-}
-
-#[test]
-fn test_get_engagements_by_amount_range_filters_and_paginates() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    create_engagement_with_amount(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "AMT-LOW", 1_000_000_000,
-    );
-    create_engagement_with_amount(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "AMT-MID", 2_000_000_000,
-    );
-    create_engagement_with_amount(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "AMT-HIGH", 3_000_000_000,
-    );
-
-    let matched = client.get_engagements_by_amount_range(&1_500_000_000, &3_000_000_000, &0, &10);
-    assert_eq!(matched.len(), 2);
-    assert_eq!(matched.get(0).unwrap(), String::from_str(&env, "AMT-MID"));
-    assert_eq!(matched.get(1).unwrap(), String::from_str(&env, "AMT-HIGH"));
-
-    assert_eq!(
-        client.get_engagement_count_by_amount(&1_500_000_000, &3_000_000_000),
-        2
-    );
-
-    // Page through the same range one at a time.
-    let page0 = client.get_engagements_by_amount_range(&1_500_000_000, &3_000_000_000, &0, &1);
-    let page1 = client.get_engagements_by_amount_range(&1_500_000_000, &3_000_000_000, &1, &1);
-    assert_eq!(page0.get(0).unwrap(), String::from_str(&env, "AMT-MID"));
-    assert_eq!(page1.get(0).unwrap(), String::from_str(&env, "AMT-HIGH"));
-}
-
-#[test]
-fn test_get_engagements_by_amount_range_no_match_returns_empty() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    create_engagement_with_amount(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "AMT-ONLY", 1_000_000_000,
-    );
-
-    let matched = client.get_engagements_by_amount_range(&2_000_000_000, &3_000_000_000, &0, &10);
-    assert_eq!(matched.len(), 0);
-    assert_eq!(
-        client.get_engagement_count_by_amount(&2_000_000_000, &3_000_000_000),
-        0
-    );
-}
-
-#[test]
-#[should_panic(expected = "InvalidAmountRange")]
-fn test_get_engagements_by_amount_range_invalid_bounds_rejected() {
-    let (env, contract_id, ..) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    client.get_engagements_by_amount_range(&3_000_000_000, &1_000_000_000, &0, &10);
+    assert!(health.paused);
+    assert!(has_event(&env, "contract_health_snapshot"));
 }
