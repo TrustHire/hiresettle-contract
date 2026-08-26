@@ -9684,3 +9684,233 @@ fn test_get_company_total_spent_accumulates_across_engagements() {
     // 300_000_000 (30%) from each of the two engagements.
     assert_eq!(client.get_company_total_spent(&company), 600_000_000);
 }
+
+// ============================================================
+// #363 — DISPUTE EVIDENCE
+// ============================================================
+
+fn open_dispute(
+    env: &Env,
+    client: &HireSettleContractClient,
+    company: &Address,
+    recruiter: &Address,
+    eng_id: &String,
+) {
+    client.submit_proof(
+        recruiter,
+        eng_id,
+        &0,
+        &String::from_str(env, "ipfs://proof0"),
+    );
+    client.raise_dispute(company, eng_id, &0, &String::from_str(env, "bad_proof"));
+}
+
+#[test]
+fn test_submit_dispute_evidence_by_company() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-EVIDENCE-CO");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-EVIDENCE-CO",
+    );
+    open_dispute(&env, &client, &company, &recruiter, &eng_id);
+
+    client.submit_dispute_evidence(
+        &company,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://evidence1"),
+    );
+
+    let evidence = client.get_dispute_evidence(&eng_id, &0);
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(
+        evidence.get(0).unwrap(),
+        String::from_str(&env, "ipfs://evidence1")
+    );
+}
+
+#[test]
+fn test_submit_dispute_evidence_by_arbiter() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-EVIDENCE-ARB");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-EVIDENCE-ARB",
+    );
+    open_dispute(&env, &client, &company, &recruiter, &eng_id);
+
+    client.submit_dispute_evidence(
+        &arbiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://evidence-from-arbiter"),
+    );
+
+    let evidence = client.get_dispute_evidence(&eng_id, &0);
+    assert_eq!(evidence.len(), 1);
+}
+
+#[test]
+fn test_submit_dispute_evidence_accumulates_multiple() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-EVIDENCE-MULTI");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-EVIDENCE-MULTI",
+    );
+    open_dispute(&env, &client, &company, &recruiter, &eng_id);
+
+    client.submit_dispute_evidence(&company, &eng_id, &0, &String::from_str(&env, "ipfs://e1"));
+    client.submit_dispute_evidence(&arbiter, &eng_id, &0, &String::from_str(&env, "ipfs://e2"));
+
+    let evidence = client.get_dispute_evidence(&eng_id, &0);
+    assert_eq!(evidence.len(), 2);
+    assert_eq!(
+        evidence.get(0).unwrap(),
+        String::from_str(&env, "ipfs://e1")
+    );
+    assert_eq!(
+        evidence.get(1).unwrap(),
+        String::from_str(&env, "ipfs://e2")
+    );
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_submit_dispute_evidence_unrelated_address_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let stranger = Address::generate(&env);
+
+    let eng_id = String::from_str(&env, "ENG-EVIDENCE-UNAUTH");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-EVIDENCE-UNAUTH",
+    );
+    open_dispute(&env, &client, &company, &recruiter, &eng_id);
+
+    client.submit_dispute_evidence(
+        &stranger,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://evidence"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "MilestoneNotDisputed")]
+fn test_submit_dispute_evidence_requires_disputed_status() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-EVIDENCE-NODISPUTE");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-EVIDENCE-NODISPUTE",
+    );
+
+    client.submit_dispute_evidence(
+        &company,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://evidence"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "InvalidEvidenceHash")]
+fn test_submit_dispute_evidence_empty_hash_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-EVIDENCE-EMPTY");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-EVIDENCE-EMPTY",
+    );
+    open_dispute(&env, &client, &company, &recruiter, &eng_id);
+
+    client.submit_dispute_evidence(&company, &eng_id, &0, &String::from_str(&env, ""));
+}
+
+#[test]
+fn test_dispute_evidence_cleared_after_resolution() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-EVIDENCE-CLEAR");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-EVIDENCE-CLEAR",
+    );
+    open_dispute(&env, &client, &company, &recruiter, &eng_id);
+    client.submit_dispute_evidence(&company, &eng_id, &0, &String::from_str(&env, "ipfs://e1"));
+
+    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &true);
+
+    let evidence = client.get_dispute_evidence(&eng_id, &0);
+    assert_eq!(evidence.len(), 0);
+}
+
+#[test]
+fn test_get_dispute_evidence_empty_when_none_submitted() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-EVIDENCE-NONE");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-EVIDENCE-NONE",
+    );
+    open_dispute(&env, &client, &company, &recruiter, &eng_id);
+
+    let evidence = client.get_dispute_evidence(&eng_id, &0);
+    assert_eq!(evidence.len(), 0);
+}

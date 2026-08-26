@@ -755,6 +755,10 @@ pub enum DataKey {
     /// Incremented wherever a milestone payout is released — `confirm_milestone`
     /// and every dispute-resolution path that pays the recruiter.
     CompanyTotalSpent(Address),
+    /// Stored evidence hashes for a disputed (engagement_id, milestone_index)
+    /// (issue #363). Companion to `DisputeReason`; submitted separately via
+    /// `submit_dispute_evidence` so `raise_dispute`'s signature stays stable.
+    DisputeEvidence(String, u32),
 }
 
 // ============================================================
@@ -805,6 +809,11 @@ const MAX_TAG_LENGTH: u32 = 32;
 /// Default maximum number of milestone extensions allowed per milestone
 /// (issue #323).
 const DEFAULT_MAX_MILESTONE_EXTENSIONS: u32 = 3;
+/// Maximum number of evidence hashes stored per disputed milestone (issue #363).
+const MAX_DISPUTE_EVIDENCE_ITEMS: u32 = 10;
+/// Maximum length, in characters, of a single evidence hash/CID (issue #363).
+/// Mirrors `MAX_PROOF_HASH_LENGTH`.
+const MAX_DISPUTE_EVIDENCE_HASH_LENGTH: u32 = 200;
 
 /// Shared panic message constants for the most-repeated error strings
 /// (issue #171). Keeping these as constants means a typo can't silently
@@ -3031,6 +3040,10 @@ impl HireSettleContract {
                 engagement_id.clone(),
                 milestone_index,
             ));
+            env.storage().persistent().remove(&DataKey::DisputeEvidence(
+                engagement_id.clone(),
+                milestone_index,
+            ));
             env.storage()
                 .persistent()
                 .remove(&DataKey::EscalatedDispute(
@@ -3074,6 +3087,10 @@ impl HireSettleContract {
                 milestone_index,
             ));
             env.storage().persistent().remove(&DataKey::DisputeRaisedAt(
+                engagement_id.clone(),
+                milestone_index,
+            ));
+            env.storage().persistent().remove(&DataKey::DisputeEvidence(
                 engagement_id.clone(),
                 milestone_index,
             ));
@@ -3358,6 +3375,10 @@ impl HireSettleContract {
                 engagement_id.clone(),
                 milestone_index,
             ));
+            env.storage().persistent().remove(&DataKey::DisputeEvidence(
+                engagement_id.clone(),
+                milestone_index,
+            ));
             env.storage().persistent().remove(&escalated_key);
             env.storage().persistent().remove(&escalated_at_key);
 
@@ -3402,6 +3423,10 @@ impl HireSettleContract {
                 milestone_index,
             ));
             env.storage().persistent().remove(&DataKey::DisputeRaisedAt(
+                engagement_id.clone(),
+                milestone_index,
+            ));
+            env.storage().persistent().remove(&DataKey::DisputeEvidence(
                 engagement_id.clone(),
                 milestone_index,
             ));
@@ -3553,6 +3578,10 @@ impl HireSettleContract {
             milestone_index,
         ));
         env.storage().persistent().remove(&DataKey::DisputeRaisedAt(
+            engagement_id.clone(),
+            milestone_index,
+        ));
+        env.storage().persistent().remove(&DataKey::DisputeEvidence(
             engagement_id.clone(),
             milestone_index,
         ));
@@ -3740,6 +3769,9 @@ impl HireSettleContract {
                             env.storage()
                                 .persistent()
                                 .remove(&DataKey::DisputeRaisedAt(engagement_id.clone(), i));
+                            env.storage()
+                                .persistent()
+                                .remove(&DataKey::DisputeEvidence(engagement_id.clone(), i));
                             env.storage()
                                 .persistent()
                                 .remove(&DataKey::EscalatedDispute(engagement_id.clone(), i));
@@ -7081,6 +7113,97 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .get(&DataKey::DisputeReason(engagement_id, milestone_index))
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #363 — DISPUTE EVIDENCE
+    // ----------------------------------------------------------
+
+    /// Attach an evidence hash (e.g. an IPFS CID) to a disputed milestone, so
+    /// arbiters have supporting material beyond the free-text `reason` string
+    /// stored by `raise_dispute` (issue #363). Kept as its own entry point,
+    /// separate from `raise_dispute`, so evidence can be submitted at any
+    /// point while the dispute is open and `raise_dispute`'s signature stays
+    /// stable.
+    ///
+    /// # Caller
+    /// The engagement's company (or its co-signer) or any address on the
+    /// engagement's arbiter panel.
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — caller is neither the company/co-signer nor an arbiter.
+    /// - `"MilestoneNotDisputed"` — the milestone is not currently `Disputed`.
+    /// - `"InvalidEvidenceHash"` — `evidence_hash` is empty or exceeds
+    ///   `MAX_DISPUTE_EVIDENCE_HASH_LENGTH` (200) characters.
+    /// - `"TooManyEvidenceItems"` — the milestone already has
+    ///   `MAX_DISPUTE_EVIDENCE_ITEMS` (10) evidence hashes stored.
+    pub fn submit_dispute_evidence(
+        env: Env,
+        caller: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        evidence_hash: String,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        caller.require_auth();
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        let is_arbiter =
+            (0..engagement.arbiters.len()).any(|i| engagement.arbiters.get(i).unwrap() == caller);
+        if !Self::is_authorized_company(&env, &caller, &engagement.company) && !is_arbiter {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.status != MilestoneStatus::Disputed {
+            panic!("MilestoneNotDisputed");
+        }
+
+        if evidence_hash.is_empty() || evidence_hash.len() > MAX_DISPUTE_EVIDENCE_HASH_LENGTH {
+            panic!("InvalidEvidenceHash");
+        }
+
+        let key = DataKey::DisputeEvidence(engagement_id.clone(), milestone_index);
+        let mut evidence: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if evidence.len() >= MAX_DISPUTE_EVIDENCE_ITEMS {
+            panic!("TooManyEvidenceItems");
+        }
+
+        evidence.push_back(evidence_hash.clone());
+        env.storage().persistent().set(&key, &evidence);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "dispute_evidence_submitted"),
+                engagement_id,
+            ),
+            (milestone_index, evidence_hash),
+        );
+    }
+
+    /// Return the stored evidence hashes for a disputed milestone (issue #363),
+    /// in submission order. Returns an empty vec if none have been submitted.
+    ///
+    /// Read-only and permissionless.
+    pub fn get_dispute_evidence(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeEvidence(engagement_id, milestone_index))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     // ----------------------------------------------------------
