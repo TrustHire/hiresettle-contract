@@ -9751,3 +9751,127 @@ fn test_admin_audit_log_empty_page_size_returns_empty() {
     let page = client.get_admin_audit_log(&0, &0);
     assert_eq!(page.len(), 0);
 }
+
+// ============================================================
+// #337 — AVERAGE COMPANY RATING
+// ============================================================
+
+/// Create and complete a single-milestone, 100%-placement engagement — no
+/// retention unlock/ledger-advance needed, so callers can complete several
+/// of these in one test without accumulating ledger sequence toward
+/// `max_entry_ttl` and archiving earlier engagements' storage entries.
+fn complete_standard_engagement(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    arbiter: &Address,
+    id: &str,
+) {
+    let eng_id = String::from_str(env, id);
+    client.create_engagement(
+        &eng_id,
+        company,
+        recruiter,
+        &ArbiterSetup {
+            arbiters: vec![env, arbiter.clone()],
+            quorum: 1,
+        },
+        token_id,
+        &1_000_000_000,
+        &String::from_str(env, "Senior Engineer"),
+        &vec![
+            env,
+            Milestone {
+                name: String::from_str(env, "Candidate Placed"),
+                payment_percent: 100,
+                kind: MilestoneKind::Placement,
+                valid_after_ledger: 0,
+                proof_hash: String::from_str(env, ""),
+                status: MilestoneStatus::Pending,
+                proof_submitted_at: 0,
+                replacement_paid_out: 0,
+            },
+        ],
+        &vec![env],
+        &default_config(),
+    );
+
+    client.submit_proof(
+        recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(env, "ipfs://proof0"),
+    );
+    client.confirm_milestone(company, &eng_id, &0);
+}
+
+#[test]
+fn test_get_average_company_rating_matches_get_company_rating() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    complete_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-AVG-RATE-1",
+    );
+    client.submit_company_rating(&recruiter, &String::from_str(&env, "ENG-AVG-RATE-1"), &4);
+
+    let average = client.get_average_company_rating(&company);
+    let summary = client.get_company_rating(&company);
+    assert_eq!(average.average_x100, summary.average_x100);
+    assert_eq!(average.count, 1);
+    assert_eq!(average.total_score, 4);
+}
+
+#[test]
+fn test_get_average_company_rating_across_multiple_engagements() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    complete_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-AVG-RATE-A",
+    );
+    client.submit_company_rating(&recruiter, &String::from_str(&env, "ENG-AVG-RATE-A"), &5);
+
+    complete_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-AVG-RATE-B",
+    );
+    client.submit_company_rating(&recruiter, &String::from_str(&env, "ENG-AVG-RATE-B"), &3);
+
+    let average = client.get_average_company_rating(&company);
+    assert_eq!(average.count, 2);
+    assert_eq!(average.total_score, 8);
+    // (5 + 3) / 2 = 4.00 -> 400
+    assert_eq!(average.average_x100, 400);
+}
+
+#[test]
+fn test_get_average_company_rating_unrated_company_is_zeroed() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let unrated = Address::generate(&env);
+
+    let average = client.get_average_company_rating(&unrated);
+    assert_eq!(average.count, 0);
+    assert_eq!(average.total_score, 0);
+    assert_eq!(average.average_x100, 0);
+}

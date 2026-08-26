@@ -5381,6 +5381,18 @@ impl HireSettleContract {
             .unwrap_or(false)
     }
 
+    /// Return a company's mean feedback rating across every engagement it has
+    /// been rated on (issue #337). Thin named wrapper over
+    /// [`Self::get_company_rating`] — same zeroed-summary and
+    /// `count`-before-`average_x100` notes apply — kept as a distinct entry
+    /// point so callers can query the average by its more specific name
+    /// without depending on the general rating-summary shape.
+    ///
+    /// Read-only and permissionless.
+    pub fn get_average_company_rating(env: Env, company: Address) -> RatingSummary {
+        Self::get_company_rating(env, company)
+    }
+
     // ----------------------------------------------------------
     // ISSUES #358, #359 — COMPANY / RECRUITER BLACKLIST
     // ----------------------------------------------------------
