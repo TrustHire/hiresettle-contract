@@ -2745,11 +2745,8 @@ impl HireSettleContract {
             let effective_bps = if Self::is_fee_waived_internal(&env, &engagement_id) {
                 0
             } else {
-                let base_bps = Self::resolve_platform_fee_bps(
-                    &env,
-                    platform_fee.bps,
-                    engagement.total_amount,
-                );
+                let base_bps =
+                    Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
                 Self::apply_referral_discount(&env, base_bps, &engagement.referrer)
             };
             let fee_amount = (payment * effective_bps as i128) / 10_000;
@@ -7902,8 +7899,12 @@ impl HireSettleContract {
     fn credit_treasury_balance(env: &Env, token: &Address, fee_amount: i128) {
         let key = DataKey::PlatformTreasuryBalance(token.clone());
         let balance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
-        env.storage().persistent().set(&key, &(balance + fee_amount));
-        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+        env.storage()
+            .persistent()
+            .set(&key, &(balance + fee_amount));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
     }
 
     /// Credit `amount` to the recruiter's running lifetime earnings total
@@ -7916,7 +7917,9 @@ impl HireSettleContract {
         let key = DataKey::RecruiterTotalEarnings(recruiter.clone());
         let total: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         env.storage().persistent().set(&key, &(total + amount));
-        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
     }
 
     /// Whether `referrer` is on the admin-configured recognised referral list.

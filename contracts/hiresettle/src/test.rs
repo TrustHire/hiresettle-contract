@@ -9058,7 +9058,6 @@ fn test_recruiter_total_earnings_unpaid_recruiter_is_zero() {
     assert_eq!(client.get_recruiter_total_earnings(&recruiter), 0);
 }
 
-
 // ============================================================
 // ISSUE #334 — get_platform_treasury_balance
 // ============================================================
@@ -9150,7 +9149,6 @@ fn test_platform_treasury_balance_unused_token_is_zero() {
 
     assert_eq!(client.get_platform_treasury_balance(&other_token), 0);
 }
-
 
 // ============================================================
 // ISSUE #335 — fee waiver
@@ -9294,7 +9292,6 @@ fn test_waive_platform_fee_idempotent() {
     client.waive_platform_fee(&company, &eng_id);
     assert!(client.is_fee_waived(&eng_id));
 }
-
 
 // ============================================================
 // ISSUE #336 — get_average_recruiter_rating
