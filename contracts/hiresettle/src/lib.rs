@@ -5378,6 +5378,21 @@ impl HireSettleContract {
         Self::rating_summary(&env, &DataKey::RecruiterRating(recruiter))
     }
 
+    /// Return a recruiter's mean feedback rating across every engagement
+    /// that has rated them (issue #336).
+    ///
+    /// A thin convenience wrapper around [`Self::get_recruiter_rating`] that
+    /// returns just the scaled average instead of the full `RatingSummary`.
+    /// Scaled by 100 to keep two decimal places without floating point
+    /// (e.g. `425` means 4.25 stars). Returns `0` for a recruiter that has
+    /// never been rated — check `get_recruiter_rating(..).count` first if you
+    /// need to distinguish "no ratings yet" from "rated zero".
+    ///
+    /// Read-only and permissionless.
+    pub fn get_average_recruiter_rating(env: Env, recruiter: Address) -> u32 {
+        Self::rating_summary(&env, &DataKey::RecruiterRating(recruiter)).average_x100
+    }
+
     /// Return a company's aggregate feedback rating (issue #244).
     /// Mirror of [`Self::get_recruiter_rating`]; the same zeroed-summary and
     /// `count`-before-`average_x100` notes apply.

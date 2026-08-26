@@ -9295,3 +9295,124 @@ fn test_waive_platform_fee_idempotent() {
     assert!(client.is_fee_waived(&eng_id));
 }
 
+
+// ============================================================
+// ISSUE #336 — get_average_recruiter_rating
+// ============================================================
+
+#[test]
+fn test_average_recruiter_rating_matches_summary() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_average_recruiter_rating(&recruiter), 0);
+
+    let eng_id = String::from_str(&env, "ENG-AVG-RATING");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-AVG-RATING",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer-letter"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    advance_ledger(&env, 31 * 17_280);
+    client.unlock_milestone(&eng_id, &1);
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &1,
+        &String::from_str(&env, "ipfs://30-day-hr-confirmation"),
+    );
+    client.confirm_milestone(&company, &eng_id, &1);
+
+    advance_ledger(&env, 60 * 17_280);
+    client.unlock_milestone(&eng_id, &2);
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &2,
+        &String::from_str(&env, "ipfs://90-day-payroll"),
+    );
+    client.confirm_milestone(&company, &eng_id, &2);
+
+    client.submit_recruiter_rating(&company, &eng_id, &4);
+
+    let summary = client.get_recruiter_rating(&recruiter);
+    assert_eq!(
+        client.get_average_recruiter_rating(&recruiter),
+        summary.average_x100
+    );
+    assert_eq!(client.get_average_recruiter_rating(&recruiter), 400);
+}
+
+#[test]
+fn test_average_recruiter_rating_averages_multiple_ratings() {
+    let (env, contract_id, token_id, company1, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let company2 = Address::generate(&env);
+    let token_client = token::StellarAssetClient::new(&env, &token_id);
+    token_client.mint(&company2, &500_000_000_000);
+
+    // Single-milestone (Placement-only, 100%) engagements avoid the
+    // retention time-gate entirely, so both engagements can complete
+    // without advancing the ledger.
+    let single_placement_milestone = |env: &Env| {
+        vec![
+            env,
+            Milestone {
+                name: String::from_str(env, "Candidate Placed"),
+                payment_percent: 100,
+                kind: MilestoneKind::Placement,
+                valid_after_ledger: 0,
+                proof_hash: String::from_str(env, ""),
+                status: MilestoneStatus::Pending,
+                proof_submitted_at: 0,
+                replacement_paid_out: 0,
+            },
+        ]
+    };
+
+    for (id, company, rating) in [
+        ("ENG-AVG-A", company1.clone(), 5u32),
+        ("ENG-AVG-B", company2.clone(), 3u32),
+    ] {
+        let eng_id = String::from_str(&env, id);
+        client.create_engagement(
+            &eng_id,
+            &company,
+            &recruiter,
+            &ArbiterSetup {
+                arbiters: vec![&env, arbiter.clone()],
+                quorum: 1,
+            },
+            &token_id,
+            &1_000_000_000,
+            &String::from_str(&env, "Senior Engineer"),
+            &single_placement_milestone(&env),
+            &vec![&env],
+            &default_config(),
+        );
+        client.submit_proof(
+            &recruiter,
+            &eng_id,
+            &0,
+            &String::from_str(&env, "ipfs://offer-letter"),
+        );
+        client.confirm_milestone(&company, &eng_id, &0);
+        client.submit_recruiter_rating(&company, &eng_id, &rating);
+    }
+
+    // Mean of 5 and 3 is 4.00 -> 400.
+    assert_eq!(client.get_average_recruiter_rating(&recruiter), 400);
+}
