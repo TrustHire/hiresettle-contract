@@ -245,6 +245,9 @@ pub struct Engagement {
     pub referrer: Option<Address>,
     /// Optional list of short string tags for categorization (issue #248, #249).
     pub tags: Option<Vec<String>>,
+    /// Whether this engagement is listed by `get_public_engagement_ids`
+    /// (issue #365). Set at creation time from `EngagementConfig::is_public`.
+    pub is_public: bool,
 }
 
 /// A lightweight read-only view of an engagement, suitable for list/dashboard APIs.
@@ -399,6 +402,9 @@ pub struct EngagementConfig {
     pub referrer: Option<Address>,
     /// Optional list of short string tags for off-chain categorization (issue #248, #249).
     pub tags: Option<Vec<String>>,
+    /// Whether this engagement should be listed by `get_public_engagement_ids`
+    /// (issue #365). Most engagements are private; set `true` to opt in.
+    pub is_public: bool,
 }
 
 /// A single engagement configuration inside a `batch_create_engagements` call.
@@ -1650,6 +1656,7 @@ impl HireSettleContract {
             contract_pdf_hash: config.contract_pdf_hash,
             referrer: config.referrer,
             tags: config.tags.clone(),
+            is_public: config.is_public,
         };
 
         env.storage()
@@ -6393,6 +6400,55 @@ impl HireSettleContract {
             }
         }
         count
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #365 — PUBLIC ENGAGEMENT LIST
+    // ----------------------------------------------------------
+
+    /// Return a paginated slice of IDs for engagements marked public at
+    /// creation time (issue #365), i.e. `EngagementConfig::is_public == true`.
+    /// `page` is 0-indexed; out-of-range pages return an empty vec. Carries
+    /// the same scan cost and index-coverage caveats as
+    /// `get_engagement_ids_by_status`.
+    pub fn get_public_engagement_ids(env: Env, page: u32, page_size: u32) -> Vec<String> {
+        let mut result = Vec::new(&env);
+        if page_size == 0 {
+            return result;
+        }
+
+        let ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AllEngagements)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let start = page.saturating_mul(page_size);
+        let end = start.saturating_add(page_size);
+
+        let mut matched: u32 = 0;
+        for i in 0..ids.len() {
+            if matched >= end {
+                break;
+            }
+            let id = ids.get(i).unwrap();
+            let engagement: Engagement = match env
+                .storage()
+                .persistent()
+                .get(&DataKey::Engagement(id.clone()))
+            {
+                Some(e) => e,
+                None => continue,
+            };
+            if engagement.is_public {
+                if matched >= start {
+                    result.push_back(id);
+                }
+                matched += 1;
+            }
+        }
+
+        result
     }
 
     // ----------------------------------------------------------
