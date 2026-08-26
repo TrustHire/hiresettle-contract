@@ -736,6 +736,9 @@ pub enum DataKey {
     /// Whether an address is currently blacklisted from participating in new
     /// engagements (issue #360). Admin-gated; persistent.
     Blacklisted(Address),
+    /// Additional proof attachment hashes for (engagement_id, milestone_index),
+    /// appended alongside the milestone's primary `proof_hash` (issue #361).
+    MilestoneAttachments(String, u32),
 }
 
 // ============================================================
@@ -778,6 +781,7 @@ const DEFAULT_DUE_SOON_WINDOW_LEDGERS: u32 = 17_280;
 const DEFAULT_SUPER_ARBITER_RESPONSE_WINDOW_LEDGERS: u32 = 51_840;
 /// Maximum number of tags stored on an engagement (issue #248).
 const MAX_TAGS: u32 = 10;
+const MAX_MILESTONE_ATTACHMENTS: u32 = 10;
 /// Maximum length, in characters, of a single engagement tag (issue #248).
 const MAX_TAG_LENGTH: u32 = 32;
 /// Default maximum number of milestone extensions allowed per milestone
@@ -2373,6 +2377,97 @@ impl HireSettleContract {
                 milestone_index,
             );
         }
+    }
+
+    // ----------------------------------------------------------
+    // MILESTONE ATTACHMENTS (issue #361)
+    // ----------------------------------------------------------
+
+    /// Attach an additional proof hash to a milestone, alongside its primary
+    /// `proof_hash` set by `submit_proof` (issue #361). Lets the recruiter
+    /// supply multiple pieces of evidence (e.g. an offer letter CID plus a
+    /// signed start-date confirmation) instead of being limited to one hash.
+    ///
+    /// # Caller
+    /// `recruiter` — must match the engagement's recruiter and sign the transaction.
+    ///
+    /// # Panics
+    /// - `"InvalidProofHash"` — empty string passed as `hash`.
+    /// - `"ProofHashTooLong"` — `hash` exceeds the configured max proof hash length.
+    /// - `"TooManyAttachments"` — milestone already has `MAX_MILESTONE_ATTACHMENTS` entries.
+    /// - `"unauthorized"` — caller is not the engagement's recruiter.
+    /// - `"invalid milestone index"` — `milestone_index` is out of range.
+    ///
+    /// # Events
+    /// Emits `("milestone_attachment_added", engagement_id)` with `(milestone_index, hash)`.
+    pub fn add_milestone_attachment(
+        env: Env,
+        recruiter: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        hash: String,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+
+        if hash.len() == 0 {
+            panic!("InvalidProofHash");
+        }
+        if hash.len() > Self::get_max_proof_hash_length_internal(&env) {
+            panic!("ProofHashTooLong");
+        }
+
+        recruiter.require_auth();
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        if !Self::is_authorized_recruiter(&env, &recruiter, &engagement.recruiter) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+        // Validates the milestone index exists; the milestone value itself is unused.
+        Self::get_milestone_or_panic(&engagement, milestone_index);
+
+        let key = DataKey::MilestoneAttachments(engagement_id.clone(), milestone_index);
+        let mut attachments: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if attachments.len() >= MAX_MILESTONE_ATTACHMENTS {
+            panic!("TooManyAttachments");
+        }
+
+        attachments.push_back(hash.clone());
+        env.storage().persistent().set(&key, &attachments);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "milestone_attachment_added"),
+                engagement_id,
+            ),
+            (milestone_index, hash),
+        );
+    }
+
+    /// Return all attachment hashes recorded for a milestone via
+    /// `add_milestone_attachment` (issue #361). Does not include the
+    /// milestone's primary `proof_hash` — read that from `get_milestone`.
+    /// Returns an empty vec if none were ever added. Read-only and permissionless.
+    pub fn get_milestone_attachments(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MilestoneAttachments(
+                engagement_id,
+                milestone_index,
+            ))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     // ----------------------------------------------------------
