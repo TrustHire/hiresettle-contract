@@ -742,6 +742,9 @@ pub enum DataKey {
     /// Whether an engagement is flagged public for off-chain analytics
     /// indexing (issue #364). Defaults to `true` (public) when unset.
     EngagementVisibility(String),
+    /// Evidence hash attached by a party to a disputed (engagement_id,
+    /// milestone_index) (issue #362).
+    DisputeEvidence(String, u32),
 }
 
 // ============================================================
@@ -3015,6 +3018,82 @@ impl HireSettleContract {
             (Symbol::new(&env, "dispute_raised"), engagement_id.clone()),
             (milestone_index, reason),
         );
+    }
+
+    // ----------------------------------------------------------
+    // DISPUTE EVIDENCE (issue #362)
+    // ----------------------------------------------------------
+
+    /// Attach an evidence hash to a disputed milestone (issue #362). Either
+    /// party may call this when raising or responding to a dispute, letting
+    /// arbiters review off-chain evidence (e.g. a screenshot or document CID)
+    /// alongside the dispute reason text.
+    ///
+    /// # Caller
+    /// The engagement's `company` or `recruiter` (or either's registered co-signer).
+    ///
+    /// # Panics
+    /// - `"InvalidProofHash"` — empty string passed as `evidence_hash`.
+    /// - `"ProofHashTooLong"` — `evidence_hash` exceeds the configured max proof hash length.
+    /// - `"unauthorized"` — caller is neither the engagement's company nor recruiter.
+    /// - `"milestone is not disputed"` — the target milestone is not currently `Disputed`.
+    ///
+    /// # Events
+    /// Emits `("dispute_evidence_added", engagement_id)` with `(milestone_index, evidence_hash)`.
+    pub fn add_dispute_evidence(
+        env: Env,
+        caller: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        evidence_hash: String,
+    ) {
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+
+        if evidence_hash.len() == 0 {
+            panic!("InvalidProofHash");
+        }
+        if evidence_hash.len() > Self::get_max_proof_hash_length_internal(&env) {
+            panic!("ProofHashTooLong");
+        }
+
+        caller.require_auth();
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        if !Self::is_authorized_company(&env, &caller, &engagement.company)
+            && !Self::is_authorized_recruiter(&env, &caller, &engagement.recruiter)
+        {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.status != MilestoneStatus::Disputed {
+            panic!("milestone is not disputed");
+        }
+
+        env.storage().persistent().set(
+            &DataKey::DisputeEvidence(engagement_id.clone(), milestone_index),
+            &evidence_hash.clone(),
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "dispute_evidence_added"),
+                engagement_id,
+            ),
+            (milestone_index, evidence_hash),
+        );
+    }
+
+    /// Return the evidence hash attached to a disputed milestone via
+    /// `add_dispute_evidence`, if any (issue #362). Read-only and permissionless.
+    pub fn get_dispute_evidence(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeEvidence(engagement_id, milestone_index))
     }
 
     // ----------------------------------------------------------
