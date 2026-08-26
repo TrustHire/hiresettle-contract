@@ -868,6 +868,19 @@ index is populated at `create_engagement`, so engagements created before this
 function was deployed are not enumerated (their records stay readable via
 `get_engagement`).
 
+`page` is 0-indexed and `status` accepts any
+[`EngagementStatus`](#engagementstatus) variant, so
+`get_engagement_ids_by_status(EngagementStatus::Active, 0, 50)` returns the
+first 50 IDs currently in `Active` status. A `page_size` of `0` returns an
+empty vec rather than erroring or falling back to a default size; an unset
+caller-side page size therefore silently yields nothing. Requesting a page
+past the last match also returns an empty vec, so iterate until a page comes
+back empty instead of precomputing a page count
+(`get_engagement_count_by_status` can size one, but its count shifts as
+engagements change status between calls). Results reflect each engagement's
+status at call time, and index entries whose engagement record has expired
+from storage are skipped rather than returned stale.
+
 #### Amendment Queries
 
 | Function | Arguments | Return Type |
