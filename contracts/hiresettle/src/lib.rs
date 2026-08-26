@@ -738,6 +738,11 @@ pub enum DataKey {
     /// `distribute_recruiter_payout` releases funds, so it reflects the
     /// after-fee amount actually received, not the gross milestone payment.
     RecruiterTotalEarnings(Address),
+    /// Running total of platform-fee amounts ever collected into the
+    /// treasury for a given token (issue #334). Credited alongside every
+    /// `platform_fee_collected` event; distinct tokens accumulate
+    /// independently since fees are paid in the engagement's escrow token.
+    PlatformTreasuryBalance(Address),
 }
 
 // ============================================================
@@ -877,6 +882,23 @@ impl HireSettleContract {
     pub fn get_platform_fee(env: Env) -> (u32, Address) {
         let fee = Self::get_platform_fee_internal(&env);
         (fee.bps, fee.treasury)
+    }
+
+    /// Return the accumulated platform-fee balance ever collected into the
+    /// treasury for `token` (issue #334).
+    ///
+    /// Sums every `platform_fee_collected` transfer made in that token across
+    /// all engagements, from `confirm_milestone`, `execute_scheduled_auto_confirm`,
+    /// `batch_confirm_milestones`, and `force_confirm_milestone`. Arbiter fees
+    /// (paid to arbiters, not the treasury) are not included. A token that has
+    /// never generated fees returns `0` rather than panicking.
+    ///
+    /// Read-only and permissionless.
+    pub fn get_platform_treasury_balance(env: Env, token: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PlatformTreasuryBalance(token))
+            .unwrap_or(0)
     }
 
     /// Admin adds a referrer address to the recognised referral list (issue #251).
@@ -2411,6 +2433,7 @@ impl HireSettleContract {
                     &platform_fee.treasury,
                     &fee_amount,
                 );
+                Self::credit_treasury_balance(&env, &engagement.token, fee_amount);
                 env.events().publish(
                     (
                         Symbol::new(&env, "platform_fee_collected"),
@@ -2688,6 +2711,7 @@ impl HireSettleContract {
                     &platform_fee.treasury,
                     &fee_amount,
                 );
+                Self::credit_treasury_balance(&env, &engagement.token, fee_amount);
                 env.events().publish(
                     (
                         Symbol::new(&env, "platform_fee_collected"),
@@ -6983,6 +7007,7 @@ impl HireSettleContract {
                     &platform_fee.treasury,
                     &fee_amount,
                 );
+                Self::credit_treasury_balance(&env, &engagement.token, fee_amount);
                 env.events().publish(
                     (
                         Symbol::new(&env, "platform_fee_collected"),
@@ -7180,6 +7205,7 @@ impl HireSettleContract {
                 &platform_fee.treasury,
                 &fee_amount,
             );
+            Self::credit_treasury_balance(&env, &engagement.token, fee_amount);
             env.events().publish(
                 (
                     Symbol::new(&env, "platform_fee_collected"),
@@ -7768,6 +7794,17 @@ impl HireSettleContract {
             }
         }
         base_bps
+    }
+
+    /// Credit `fee_amount` of `token` into the running platform treasury
+    /// balance (issue #334). Called wherever a `platform_fee_collected`
+    /// event is emitted so the accumulator always matches fees actually
+    /// transferred to the treasury.
+    fn credit_treasury_balance(env: &Env, token: &Address, fee_amount: i128) {
+        let key = DataKey::PlatformTreasuryBalance(token.clone());
+        let balance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage().persistent().set(&key, &(balance + fee_amount));
+        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
     }
 
     /// Credit `amount` to the recruiter's running lifetime earnings total

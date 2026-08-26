@@ -9058,3 +9058,96 @@ fn test_recruiter_total_earnings_unpaid_recruiter_is_zero() {
     assert_eq!(client.get_recruiter_total_earnings(&recruiter), 0);
 }
 
+
+// ============================================================
+// ISSUE #334 — get_platform_treasury_balance
+// ============================================================
+
+#[test]
+fn test_platform_treasury_balance_accumulates() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let treasury = Address::generate(&env);
+
+    client.set_platform_fee(&company, &250, &treasury); // 2.5%
+    assert_eq!(client.get_platform_treasury_balance(&token_id), 0);
+
+    let eng_id = String::from_str(&env, "ENG-TREASURY");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-TREASURY",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    let gross = 300_000_000i128;
+    let expected_fee = gross * 250 / 10_000;
+    assert_eq!(
+        client.get_platform_treasury_balance(&token_id),
+        expected_fee
+    );
+
+    advance_ledger(&env, 31 * 17_280);
+    client.unlock_milestone(&eng_id, &1);
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &1,
+        &String::from_str(&env, "ipfs://30-day-hr-confirmation"),
+    );
+    client.confirm_milestone(&company, &eng_id, &1);
+
+    let gross2 = 400_000_000i128;
+    let expected_fee2 = gross2 * 250 / 10_000;
+    assert_eq!(
+        client.get_platform_treasury_balance(&token_id),
+        expected_fee + expected_fee2
+    );
+}
+
+#[test]
+fn test_platform_treasury_balance_zero_when_no_fee_collected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "ENG-NO-FEE-TREASURY");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-NO-FEE-TREASURY",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    assert_eq!(client.get_platform_treasury_balance(&token_id), 0);
+}
+
+#[test]
+fn test_platform_treasury_balance_unused_token_is_zero() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let other_token = Address::generate(&env);
+
+    assert_eq!(client.get_platform_treasury_balance(&other_token), 0);
+}
+
