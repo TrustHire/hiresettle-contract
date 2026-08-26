@@ -1315,6 +1315,11 @@ impl HireSettleContract {
     /// - `"CompanyRecruiterCollision"` — `company` and `recruiter` are the same address.
     /// - `"CompanyArbiterCollision"` — `company` also appears in the arbiter set.
     /// - `"RecruiterArbiterCollision"` — `recruiter` also appears in the arbiter set.
+    /// - `"AlreadyInitialized"` — engagement ID already exists.
+    /// - `"AmountTooLow"` — `total_amount` is lower than minimum configured threshold.
+    /// - `"InvalidMilestones"` — milestone vector is empty or exceeds maximum milestone limit.
+    /// - `"InvalidNameLength"` — `job_title` string length is invalid or empty.
+    /// - `"TokenNotAllowed"` — payment token is not present in the allowed token list.
     ///
     /// These checks exist so a company cannot name itself (or a colluding address)
     /// as arbiter and vote on its own disputes, or name itself as recruiter to
