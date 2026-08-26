@@ -9588,3 +9588,101 @@ fn test_create_engagement_rejects_99_percent_total() {
         &default_config(),
     );
 }
+
+// ============================================================
+// #358, #359 — COMPANY / RECRUITER BLACKLIST
+// ============================================================
+
+#[test]
+fn test_blacklist_company_admin() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let target = Address::generate(&env);
+
+    assert!(!client.is_company_blacklisted(&target));
+    client.blacklist_company(&company, &target);
+    assert!(client.is_company_blacklisted(&target));
+
+    client.unblacklist_company(&company, &target);
+    assert!(!client.is_company_blacklisted(&target));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_blacklist_company_non_admin_rejected() {
+    let (env, contract_id, _token_id, _company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let target = Address::generate(&env);
+    client.blacklist_company(&recruiter, &target);
+}
+
+#[test]
+#[should_panic(expected = "CompanyBlacklisted")]
+fn test_create_engagement_rejects_blacklisted_company() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.blacklist_company(&company, &company);
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-BL-CO",
+    );
+}
+
+#[test]
+fn test_blacklist_recruiter_admin() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let target = Address::generate(&env);
+
+    assert!(!client.is_recruiter_blacklisted(&target));
+    client.blacklist_recruiter(&company, &target);
+    assert!(client.is_recruiter_blacklisted(&target));
+
+    client.unblacklist_recruiter(&company, &target);
+    assert!(!client.is_recruiter_blacklisted(&target));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_blacklist_recruiter_non_admin_rejected() {
+    let (env, contract_id, _token_id, _company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let target = Address::generate(&env);
+    client.blacklist_recruiter(&recruiter, &target);
+}
+
+#[test]
+#[should_panic(expected = "RecruiterBlacklisted")]
+fn test_create_engagement_rejects_blacklisted_recruiter() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.blacklist_recruiter(&company, &recruiter);
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-BL-REC",
+    );
+}
+
+#[test]
+fn test_blacklist_company_and_recruiter_are_independent() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let target = Address::generate(&env);
+
+    // Blacklisting an address as a company must not blacklist it as a recruiter.
+    client.blacklist_company(&company, &target);
+    assert!(client.is_company_blacklisted(&target));
+    assert!(!client.is_recruiter_blacklisted(&target));
+}

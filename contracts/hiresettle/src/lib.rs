@@ -39,6 +39,16 @@ const FULL_SPLIT_BPS: u32 = 10_000;
 // DATA TYPES
 // ============================================================
 
+/// Distinguishes which role an address is blocked from acting as, so both
+/// blacklists (issues #358, #359) can share a single `DataKey` variant
+/// instead of doubling the enum's discriminant count.
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum BlacklistRole {
+    Company,
+    Recruiter,
+}
+
 /// Lifecycle state of a single milestone.
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
@@ -750,6 +760,11 @@ pub enum DataKey {
     /// Global registry of every distinct tag ever used across engagements
     /// (issue #321). Backs tag discovery queries.
     AllTags,
+    /// Whether an address is currently blocked from being used as a company
+    /// or recruiter in new engagements (issues #358, #359). Admin-gated;
+    /// persistent. Keyed by role so the same address can be independently
+    /// blacklisted from one role but not the other.
+    Blacklisted(BlacklistRole, Address),
 }
 
 // ============================================================
@@ -1493,6 +1508,15 @@ impl HireSettleContract {
             if !is_allowed {
                 panic!("TokenNotAllowed");
             }
+        }
+
+        // Issues #358, #359: reject blacklisted company/recruiter addresses
+        // before any state is written.
+        if Self::is_company_blacklisted(env.clone(), company.clone()) {
+            panic!("CompanyBlacklisted");
+        }
+        if Self::is_recruiter_blacklisted(env.clone(), recruiter.clone()) {
+            panic!("RecruiterBlacklisted");
         }
 
         let arbiters = arbiter_setup.arbiters;
@@ -5334,6 +5358,82 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .get(&DataKey::CompanyRated(engagement_id))
+            .unwrap_or(false)
+    }
+
+    // ----------------------------------------------------------
+    // ISSUES #358, #359 — COMPANY / RECRUITER BLACKLIST
+    // ----------------------------------------------------------
+
+    /// Admin blocks `company` from being used as a company in any new
+    /// engagement (issue #358). Does not affect engagements already created
+    /// with this address as company.
+    pub fn blacklist_company(env: Env, admin: Address, company: Address) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        env.storage().persistent().set(
+            &DataKey::Blacklisted(BlacklistRole::Company, company.clone()),
+            &true,
+        );
+        env.events()
+            .publish((Symbol::new(&env, "company_blacklisted"),), company);
+    }
+
+    /// Admin lifts a company blacklist entry (issue #358). No-op if `company`
+    /// was not blacklisted.
+    pub fn unblacklist_company(env: Env, admin: Address, company: Address) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        env.storage().persistent().remove(&DataKey::Blacklisted(
+            BlacklistRole::Company,
+            company.clone(),
+        ));
+        env.events()
+            .publish((Symbol::new(&env, "company_unblacklisted"),), company);
+    }
+
+    /// Return whether `company` is currently blocked from being used as a
+    /// company (issue #358). Read-only and permissionless.
+    pub fn is_company_blacklisted(env: Env, company: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Blacklisted(BlacklistRole::Company, company))
+            .unwrap_or(false)
+    }
+
+    /// Admin blocks `recruiter` from being used as a recruiter in any new
+    /// engagement (issue #359). Does not affect engagements already created
+    /// with this address as recruiter.
+    pub fn blacklist_recruiter(env: Env, admin: Address, recruiter: Address) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        env.storage().persistent().set(
+            &DataKey::Blacklisted(BlacklistRole::Recruiter, recruiter.clone()),
+            &true,
+        );
+        env.events()
+            .publish((Symbol::new(&env, "recruiter_blacklisted"),), recruiter);
+    }
+
+    /// Admin lifts a recruiter blacklist entry (issue #359). No-op if
+    /// `recruiter` was not blacklisted.
+    pub fn unblacklist_recruiter(env: Env, admin: Address, recruiter: Address) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        env.storage().persistent().remove(&DataKey::Blacklisted(
+            BlacklistRole::Recruiter,
+            recruiter.clone(),
+        ));
+        env.events()
+            .publish((Symbol::new(&env, "recruiter_unblacklisted"),), recruiter);
+    }
+
+    /// Return whether `recruiter` is currently blocked from being used as a
+    /// recruiter (issue #359). Read-only and permissionless.
+    pub fn is_recruiter_blacklisted(env: Env, recruiter: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Blacklisted(BlacklistRole::Recruiter, recruiter))
             .unwrap_or(false)
     }
 
