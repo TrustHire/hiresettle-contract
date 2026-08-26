@@ -9588,3 +9588,99 @@ fn test_create_engagement_rejects_99_percent_total() {
         &default_config(),
     );
 }
+
+// ============================================================
+// #333 — COMPANY TOTAL SPENT
+// ============================================================
+
+#[test]
+fn test_get_company_total_spent_zero_before_any_confirmation() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_company_total_spent(&company), 0);
+}
+
+#[test]
+fn test_get_company_total_spent_accumulates_across_milestones() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-SPENT-1");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-SPENT-1",
+    );
+
+    // First milestone: 30% of 1_000_000_000 = 300_000_000.
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof0"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+    assert_eq!(client.get_company_total_spent(&company), 300_000_000);
+
+    // Second milestone (40%) after the retention window elapses.
+    advance_ledger(&env, 31 * 17_280);
+    client.unlock_milestone(&eng_id, &1);
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &1,
+        &String::from_str(&env, "ipfs://proof1"),
+    );
+    client.confirm_milestone(&company, &eng_id, &1);
+    assert_eq!(client.get_company_total_spent(&company), 700_000_000);
+}
+
+#[test]
+fn test_get_company_total_spent_accumulates_across_engagements() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id_a = String::from_str(&env, "ENG-SPENT-A");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-SPENT-A",
+    );
+    client.submit_proof(
+        &recruiter,
+        &eng_id_a,
+        &0,
+        &String::from_str(&env, "ipfs://proof0"),
+    );
+    client.confirm_milestone(&company, &eng_id_a, &0);
+
+    let eng_id_b = String::from_str(&env, "ENG-SPENT-B");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-SPENT-B",
+    );
+    client.submit_proof(
+        &recruiter,
+        &eng_id_b,
+        &0,
+        &String::from_str(&env, "ipfs://proof0"),
+    );
+    client.confirm_milestone(&company, &eng_id_b, &0);
+
+    // 300_000_000 (30%) from each of the two engagements.
+    assert_eq!(client.get_company_total_spent(&company), 600_000_000);
+}

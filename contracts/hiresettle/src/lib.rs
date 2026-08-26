@@ -750,6 +750,11 @@ pub enum DataKey {
     /// Global registry of every distinct tag ever used across engagements
     /// (issue #321). Backs tag discovery queries.
     AllTags,
+    /// Running total of confirmed milestone payouts (gross, before platform
+    /// fee deduction) released on behalf of a company address (issue #333).
+    /// Incremented wherever a milestone payout is released — `confirm_milestone`
+    /// and every dispute-resolution path that pays the recruiter.
+    CompanyTotalSpent(Address),
 }
 
 // ============================================================
@@ -2415,6 +2420,7 @@ impl HireSettleContract {
             let fee_amount = (payment * effective_bps as i128) / 10_000;
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
+            Self::record_company_spend(&env, &engagement.company, payment);
 
             let token_client = token::Client::new(&env, &engagement.token);
             if fee_amount > 0 {
@@ -2691,6 +2697,7 @@ impl HireSettleContract {
             let fee_amount = (payment * effective_bps as i128) / 10_000;
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
+            Self::record_company_spend(&env, &engagement.company, payment);
 
             let token_client = token::Client::new(&env, &engagement.token);
             if fee_amount > 0 {
@@ -2972,6 +2979,7 @@ impl HireSettleContract {
         if record.approve_votes >= quorum {
             let payment = (engagement.total_amount * milestone.payment_percent as i128) / 100;
             engagement.released_amount += payment;
+            Self::record_company_spend(&env, &engagement.company, payment);
 
             let arbiter_fee_bps: u32 = env
                 .storage()
@@ -3298,6 +3306,7 @@ impl HireSettleContract {
         if approve {
             let payment = (engagement.total_amount * milestone.payment_percent as i128) / 100;
             engagement.released_amount += payment;
+            Self::record_company_spend(&env, &engagement.company, payment);
 
             let arbiter_fee_bps: u32 = env
                 .storage()
@@ -3510,6 +3519,7 @@ impl HireSettleContract {
 
         let payment = (engagement.total_amount * milestone.payment_percent as i128) / 100;
         engagement.released_amount += payment;
+        Self::record_company_spend(&env, &engagement.company, payment);
 
         let token_client = token::Client::new(&env, &engagement.token);
         Self::distribute_recruiter_payout(&env, &engagement, payment, &token_client);
@@ -6694,6 +6704,20 @@ impl HireSettleContract {
             .unwrap_or(0u32)
     }
 
+    /// Return the total confirmed milestone payouts released on behalf of a
+    /// company (issue #333), summed across every engagement it has funded.
+    /// This is the gross amount before platform-fee deduction, mirroring how
+    /// each engagement's own `released_amount` is tracked. Returns `0` for a
+    /// company that has never had a milestone confirmed or resolved.
+    ///
+    /// Read-only and permissionless.
+    pub fn get_company_total_spent(env: Env, company: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CompanyTotalSpent(company))
+            .unwrap_or(0)
+    }
+
     // ----------------------------------------------------------
     // ISSUE #38 — INACTIVITY TIMEOUT
     // ----------------------------------------------------------
@@ -6958,6 +6982,7 @@ impl HireSettleContract {
             let fee_amount = (payment * effective_bps as i128) / 10_000;
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
+            Self::record_company_spend(&env, &engagement.company, payment);
 
             if fee_amount > 0 {
                 token_client.transfer(
@@ -7154,6 +7179,7 @@ impl HireSettleContract {
         let fee_amount = (payment * effective_bps as i128) / 10_000;
         let net_payment = payment - fee_amount;
         engagement.released_amount += payment;
+        Self::record_company_spend(&env, &engagement.company, payment);
 
         let token_client = token::Client::new(&env, &engagement.token);
         if fee_amount > 0 {
@@ -7865,6 +7891,23 @@ impl HireSettleContract {
             &DataKey::CompanyActiveCount(company.clone()),
             &active_count.saturating_sub(1),
         );
+    }
+
+    /// Add `payment` (the gross, pre-fee milestone payout) to `company`'s
+    /// running total-spent tally (issue #333). Called from every payout-release
+    /// path alongside its `engagement.released_amount += payment` update, so
+    /// the two figures always move together.
+    fn record_company_spend(env: &Env, company: &Address, payment: i128) {
+        let total: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CompanyTotalSpent(company.clone()))
+            .unwrap_or(0);
+        let key = DataKey::CompanyTotalSpent(company.clone());
+        env.storage().persistent().set(&key, &(total + payment));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
     }
 
     // ----------------------------------------------------------
