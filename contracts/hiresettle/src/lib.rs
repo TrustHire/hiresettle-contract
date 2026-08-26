@@ -21,6 +21,11 @@
 //! - `Admin & Configuration`: Protocol parameter updates, fee withdrawals, and arbiter management.
 
 #![no_std]
+// `#[contractimpl]` expands `create_engagement`'s many required fields into a
+// flat parameter list on the generated contract, client, and args types;
+// bundling them into a struct would break the deployed ABI, so the lint is
+// disabled crate-wide for the macro-generated bindings it triggers on.
+#![allow(clippy::too_many_arguments)]
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, token, Address, BytesN, Env, String, Symbol, Vec,
@@ -1388,25 +1393,22 @@ impl HireSettleContract {
         config: EngagementConfig,
     ) -> String {
         // Validate engagement_id format: non-empty, ≤ 64 chars, [A-Za-z0-9-] only.
-        if engagement_id.len() == 0 || engagement_id.len() > MAX_ENGAGEMENT_ID_LENGTH {
+        if engagement_id.is_empty() || engagement_id.len() > MAX_ENGAGEMENT_ID_LENGTH {
             panic!("InvalidEngagementId");
         }
         let id_len = engagement_id.len() as usize;
         let mut id_buf = [0u8; MAX_ENGAGEMENT_ID_LENGTH as usize];
         engagement_id.copy_into_slice(&mut id_buf[..id_len]);
-        for i in 0..id_len {
-            let b = id_buf[i];
-            let valid = (b >= b'A' && b <= b'Z')
-                || (b >= b'a' && b <= b'z')
-                || (b >= b'0' && b <= b'9')
-                || b == b'-';
+        for &b in &id_buf[..id_len] {
+            let valid =
+                b.is_ascii_uppercase() || b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-';
             if !valid {
                 panic!("InvalidEngagementId");
             }
         }
 
         // Issue #24: Job title validation
-        if job_title.len() == 0 {
+        if job_title.is_empty() {
             panic!("JobTitleEmpty");
         }
         if job_title.len() > 64 {
@@ -1414,7 +1416,7 @@ impl HireSettleContract {
         }
 
         // Issue #21: Max milestone count cap validation
-        if milestones.len() == 0 {
+        if milestones.is_empty() {
             panic!("ZeroMilestones");
         }
         let max_milestones = Self::get_max_milestones(env.clone());
@@ -1425,7 +1427,7 @@ impl HireSettleContract {
         // Issue #22: Milestone name max length validation
         for i in 0..milestones.len() {
             let m = milestones.get(i).unwrap();
-            if m.name.len() == 0 {
+            if m.name.is_empty() {
                 panic!("MilestoneNameEmpty: index {}", i);
             }
             if m.name.len() > 64 {
@@ -1456,7 +1458,7 @@ impl HireSettleContract {
             }
             for i in 0..tags.len() {
                 let tag = tags.get(i).unwrap();
-                if tag.len() == 0 {
+                if tag.is_empty() {
                     panic!("TagEmpty: index {}", i);
                 }
                 if tag.len() > MAX_TAG_LENGTH {
@@ -1522,14 +1524,14 @@ impl HireSettleContract {
 
         // Reject empty metadata hash — caller must either omit or provide a real CID.
         if let Some(ref hash) = config.metadata_hash {
-            if hash.len() == 0 {
+            if hash.is_empty() {
                 panic!("InvalidMetadataHash");
             }
         }
 
         // Reject empty contract_pdf_hash — caller must either omit or provide a real hash.
         if let Some(ref hash) = config.contract_pdf_hash {
-            if hash.len() == 0 {
+            if hash.is_empty() {
                 panic!("InvalidContractPdfHash");
             }
         }
@@ -1987,7 +1989,7 @@ impl HireSettleContract {
             if old_idx >= len {
                 panic!("{}", ERR_INVALID_MILESTONE_INDEX);
             }
-            if seen.contains(&old_idx) {
+            if seen.contains(old_idx) {
                 panic!("DuplicateReorderIndex");
             }
             seen.push_back(old_idx);
@@ -2245,7 +2247,7 @@ impl HireSettleContract {
         Self::assert_engagement_not_paused(&env, &engagement_id);
 
         // Issue #20: Proof hash format validation (before require_auth for fail-fast)
-        if proof_hash.len() == 0 {
+        if proof_hash.is_empty() {
             panic!("InvalidProofHash");
         }
 
@@ -2289,7 +2291,7 @@ impl HireSettleContract {
         for i in 0..engagement.milestones.len() {
             if i != milestone_index {
                 let existing_milestone = engagement.milestones.get(i).unwrap();
-                if existing_milestone.proof_hash.len() > 0
+                if !existing_milestone.proof_hash.is_empty()
                     && existing_milestone.proof_hash == proof_hash
                 {
                     panic!("DuplicateProofHash");
@@ -2303,7 +2305,7 @@ impl HireSettleContract {
             .persistent()
             .extend_ttl(&last_key, 100_000, 6_300_000);
 
-        let is_resubmission = milestone.proof_hash.len() > 0;
+        let is_resubmission = !milestone.proof_hash.is_empty();
         let old_hash = milestone.proof_hash.clone();
 
         milestone.proof_hash = proof_hash.clone();
@@ -2560,13 +2562,12 @@ impl HireSettleContract {
 
         let key = DataKey::ScheduledAutoConfirm(engagement_id.clone(), milestone_index);
         env.storage().persistent().set(&key, &target_ledger);
-        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
 
         env.events().publish(
-            (
-                Symbol::new(&env, "auto_confirm_scheduled"),
-                engagement_id,
-            ),
+            (Symbol::new(&env, "auto_confirm_scheduled"), engagement_id),
             (milestone_index, target_ledger),
         );
     }
@@ -2597,10 +2598,7 @@ impl HireSettleContract {
         if env.storage().persistent().has(&key) {
             env.storage().persistent().remove(&key);
             env.events().publish(
-                (
-                    Symbol::new(&env, "auto_confirm_cancelled"),
-                    engagement_id,
-                ),
+                (Symbol::new(&env, "auto_confirm_cancelled"), engagement_id),
                 milestone_index,
             );
         }
@@ -2616,7 +2614,10 @@ impl HireSettleContract {
     ) -> Option<u32> {
         env.storage()
             .persistent()
-            .get(&DataKey::ScheduledAutoConfirm(engagement_id, milestone_index))
+            .get(&DataKey::ScheduledAutoConfirm(
+                engagement_id,
+                milestone_index,
+            ))
     }
 
     /// Execute a milestone's scheduled auto-confirm once `target_ledger` has
@@ -4406,11 +4407,7 @@ impl HireSettleContract {
         let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
 
         let current = env.ledger().sequence();
-        if current >= milestone.valid_after_ledger {
-            0
-        } else {
-            milestone.valid_after_ledger - current
-        }
+        milestone.valid_after_ledger.saturating_sub(current)
     }
 
     /// Returns approximate seconds until a Locked retention milestone unlocks.
@@ -6116,7 +6113,7 @@ impl HireSettleContract {
         }
         // Issue #321: this is the tag's first engagement, so it just became
         // "in use" — track it in the global distinct-tag registry.
-        if ids.len() == 0 {
+        if ids.is_empty() {
             Self::track_tag_used(&env, &tag);
         }
         ids.push_back(engagement_id.clone());
@@ -6157,7 +6154,7 @@ impl HireSettleContract {
             env.storage().persistent().set(&key, &new_ids);
             // Issue #321: no engagements left under this tag — it's no
             // longer "in use", so drop it from the global tag registry.
-            if new_ids.len() == 0 {
+            if new_ids.is_empty() {
                 Self::untrack_tag_used(&env, &tag);
             }
             env.events().publish(
@@ -6194,7 +6191,7 @@ impl HireSettleContract {
         Self::assert_not_paused(&env);
         caller.require_auth();
 
-        if new_tag.len() == 0 {
+        if new_tag.is_empty() {
             panic!("TagEmpty");
         }
         if new_tag.len() > MAX_TAG_LENGTH {
@@ -6211,7 +6208,7 @@ impl HireSettleContract {
             .get(&old_key)
             .unwrap_or_else(|| Vec::new(&env));
 
-        if ids.len() == 0 {
+        if ids.is_empty() {
             panic!("TagNotFound");
         }
 
@@ -6429,11 +6426,7 @@ impl HireSettleContract {
     ///
     /// # Panics
     /// - `"InvalidAmountRange"` — `min_amount > max_amount`.
-    pub fn get_engagement_count_by_amount(
-        env: Env,
-        min_amount: i128,
-        max_amount: i128,
-    ) -> u32 {
+    pub fn get_engagement_count_by_amount(env: Env, min_amount: i128, max_amount: i128) -> u32 {
         if min_amount > max_amount {
             panic!("InvalidAmountRange");
         }
@@ -6516,7 +6509,7 @@ impl HireSettleContract {
         page: u32,
         page_size: u32,
     ) -> Vec<String> {
-        if page_size == 0 || tags.len() == 0 {
+        if page_size == 0 || tags.is_empty() {
             return Vec::new(&env);
         }
         if tags.len() > MAX_TAGS {
@@ -6591,7 +6584,7 @@ impl HireSettleContract {
     /// Admin sets how many ledgers constitute one day (min 1, max 25_920).
     pub fn set_ledgers_per_day(env: Env, admin: Address, value: u32) {
         Self::assert_admin(&env, &admin);
-        if value < 1 || value > 25_920 {
+        if !(1..=25_920).contains(&value) {
             panic!("InvalidLedgersPerDay");
         }
         env.storage()
@@ -7362,7 +7355,7 @@ impl HireSettleContract {
     /// `len` must be in the range 1–500. Panics with `"InvalidMaxProofHashLength"` otherwise.
     pub fn set_max_proof_hash_length(env: Env, admin: Address, len: u32) {
         Self::assert_admin(&env, &admin);
-        if len < 1 || len > 500 {
+        if !(1..=500).contains(&len) {
             panic!("InvalidMaxProofHashLength");
         }
         env.storage()
@@ -7677,7 +7670,7 @@ impl HireSettleContract {
     /// Shared 1–5 bounds check for both feedback-rating entry points
     /// (issues #242, #243).
     fn assert_valid_rating(rating: u32) {
-        if rating < 1 || rating > 5 {
+        if !(1..=5).contains(&rating) {
             panic!("InvalidRating");
         }
     }
@@ -7782,7 +7775,7 @@ impl HireSettleContract {
                     .persistent()
                     .get(&DataKey::Config(ConfigKey::ReferralDiscountBps))
                     .unwrap_or(0u32);
-                return if discount >= bps { 0 } else { bps - discount };
+                return bps.saturating_sub(discount);
             }
         }
         bps
@@ -7855,9 +7848,7 @@ impl HireSettleContract {
             }
         }
         if changed {
-            env.storage()
-                .persistent()
-                .set(&DataKey::AllTags, &new_tags);
+            env.storage().persistent().set(&DataKey::AllTags, &new_tags);
         }
     }
 
