@@ -739,6 +739,9 @@ pub enum DataKey {
     /// Additional proof attachment hashes for (engagement_id, milestone_index),
     /// appended alongside the milestone's primary `proof_hash` (issue #361).
     MilestoneAttachments(String, u32),
+    /// Whether an engagement is flagged public for off-chain analytics
+    /// indexing (issue #364). Defaults to `true` (public) when unset.
+    EngagementVisibility(String),
 }
 
 // ============================================================
@@ -6615,6 +6618,60 @@ impl HireSettleContract {
             .get(&DataKey::TagEngagements(tag))
             .unwrap_or_else(|| Vec::new(&env));
         ids.len()
+    }
+
+    // ----------------------------------------------------------
+    // ENGAGEMENT VISIBILITY (issue #364)
+    // ----------------------------------------------------------
+
+    /// Mark an engagement public or private for off-chain analytics indexing
+    /// (issue #364). Purely informational — it does not affect escrow,
+    /// payments, or any lifecycle call; indexers are expected to honour it
+    /// when deciding what to surface.
+    ///
+    /// # Caller
+    /// The engagement's `company` (or its registered co-signer).
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — caller is not the engagement's company.
+    /// - `"engagement not found"` — `engagement_id` does not exist.
+    ///
+    /// # Events
+    /// Emits `("engagement_visibility_set", engagement_id)` with `is_public`.
+    pub fn set_engagement_visibility(
+        env: Env,
+        company: Address,
+        engagement_id: String,
+        is_public: bool,
+    ) {
+        company.require_auth();
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        if !Self::is_authorized_company(&env, &company, &engagement.company) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        env.storage().persistent().set(
+            &DataKey::EngagementVisibility(engagement_id.clone()),
+            &is_public,
+        );
+        env.events().publish(
+            (
+                Symbol::new(&env, "engagement_visibility_set"),
+                engagement_id,
+            ),
+            is_public,
+        );
+    }
+
+    /// Return whether an engagement is flagged public (issue #364). Defaults
+    /// to `true` for an engagement whose visibility was never explicitly set,
+    /// so existing engagements remain indexable without a migration.
+    /// Read-only and permissionless.
+    pub fn get_engagement_visibility(env: Env, engagement_id: String) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::EngagementVisibility(engagement_id))
+            .unwrap_or(true)
     }
 
     /// Return a paginated slice of engagement IDs matching across a list of
