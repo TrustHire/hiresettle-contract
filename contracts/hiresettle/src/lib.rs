@@ -733,6 +733,11 @@ pub enum DataKey {
     /// path — either by an explicit `super_arbiter_resolve` call or by
     /// `resolve_escalation_timeout` (issue #317).
     SuperArbiterResolutionCount,
+    /// Running total of net milestone payouts ever paid to a recruiter
+    /// address (issue #332), across every engagement. Credited wherever
+    /// `distribute_recruiter_payout` releases funds, so it reflects the
+    /// after-fee amount actually received, not the gross milestone payment.
+    RecruiterTotalEarnings(Address),
 }
 
 // ============================================================
@@ -6074,6 +6079,27 @@ impl HireSettleContract {
         ids.len()
     }
 
+    /// Return the sum of every confirmed milestone payout ever paid to
+    /// `recruiter` across all engagements (issue #332).
+    ///
+    /// Reflects the net amount actually received — after platform fees,
+    /// arbiter fees, and (when `recruiter` is a co-recruiter) its split
+    /// share — credited from `confirm_milestone`, `execute_scheduled_auto_confirm`,
+    /// `batch_confirm_milestones`, `force_confirm_milestone`, `cast_arbiter_vote`,
+    /// `super_arbiter_resolve`, and `resolve_escalation_timeout`. Mixes
+    /// amounts across engagements paid in different tokens, so callers with
+    /// multi-token deployments should track earnings per token off-chain if
+    /// that distinction matters. An address that has never been paid returns
+    /// `0` rather than panicking.
+    ///
+    /// Read-only and permissionless.
+    pub fn get_recruiter_total_earnings(env: Env, recruiter: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RecruiterTotalEarnings(recruiter))
+            .unwrap_or(0)
+    }
+
     // ----------------------------------------------------------
     // ISSUE #249 — ENGAGEMENT TAGS
     // ----------------------------------------------------------
@@ -7744,6 +7770,19 @@ impl HireSettleContract {
         base_bps
     }
 
+    /// Credit `amount` to the recruiter's running lifetime earnings total
+    /// (issue #332). `amount` is the net amount that address actually
+    /// receives (after platform/arbiter fees and any co-recruiter split).
+    fn credit_recruiter_earnings(env: &Env, recruiter: &Address, amount: i128) {
+        if amount <= 0 {
+            return;
+        }
+        let key = DataKey::RecruiterTotalEarnings(recruiter.clone());
+        let total: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage().persistent().set(&key, &(total + amount));
+        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+    }
+
     /// Whether `referrer` is on the admin-configured recognised referral list.
     fn is_recognised_referrer(env: &Env, referrer: &Address) -> bool {
         let referrers: Option<Vec<Address>> = env.storage().persistent().get(&DataKey::Referrers);
@@ -7888,6 +7927,8 @@ impl HireSettleContract {
                     &primary_payment,
                 );
                 token_client.transfer(&env.current_contract_address(), co_recruiter, &co_payment);
+                Self::credit_recruiter_earnings(env, &engagement.recruiter, primary_payment);
+                Self::credit_recruiter_earnings(env, co_recruiter, co_payment);
             }
             None => {
                 token_client.transfer(
@@ -7895,6 +7936,7 @@ impl HireSettleContract {
                     &engagement.recruiter,
                     &net_payment,
                 );
+                Self::credit_recruiter_earnings(env, &engagement.recruiter, net_payment);
             }
         }
     }

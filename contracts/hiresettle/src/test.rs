@@ -8971,3 +8971,90 @@ fn test_estimated_unlock_seconds_at_exact_unlock_time() {
     // Should be unlockable
     assert!(client.is_milestone_unlockable(&eng_id, &1));
 }
+
+// ============================================================
+// ISSUE #332 — get_recruiter_total_earnings
+// ============================================================
+
+#[test]
+fn test_recruiter_total_earnings_accumulates_across_milestones() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_recruiter_total_earnings(&recruiter), 0);
+
+    let eng_id = String::from_str(&env, "ENG-EARNINGS");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-EARNINGS",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer-letter"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+    assert_eq!(client.get_recruiter_total_earnings(&recruiter), 300_000_000);
+
+    advance_ledger(&env, 31 * 17_280);
+    client.unlock_milestone(&eng_id, &1);
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &1,
+        &String::from_str(&env, "ipfs://30-day-hr-confirmation"),
+    );
+    client.confirm_milestone(&company, &eng_id, &1);
+    assert_eq!(
+        client.get_recruiter_total_earnings(&recruiter),
+        300_000_000 + 400_000_000
+    );
+}
+
+#[test]
+fn test_recruiter_total_earnings_net_of_platform_fee() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let treasury = Address::generate(&env);
+
+    client.set_platform_fee(&company, &250, &treasury); // 2.5%
+
+    let eng_id = String::from_str(&env, "ENG-EARNINGS-FEE");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-EARNINGS-FEE",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    let gross = 300_000_000i128;
+    let fee = gross * 250 / 10_000;
+    assert_eq!(client.get_recruiter_total_earnings(&recruiter), gross - fee);
+}
+
+#[test]
+fn test_recruiter_total_earnings_unpaid_recruiter_is_zero() {
+    let (env, contract_id, _token_id, _company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_recruiter_total_earnings(&recruiter), 0);
+}
+
