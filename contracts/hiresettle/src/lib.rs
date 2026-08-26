@@ -743,6 +743,10 @@ pub enum DataKey {
     /// `platform_fee_collected` event; distinct tokens accumulate
     /// independently since fees are paid in the engagement's escrow token.
     PlatformTreasuryBalance(Address),
+    /// Whether the platform fee has been waived (zeroed) for a specific
+    /// engagement by the admin (issue #335). When `true`, every milestone
+    /// payout on this engagement skips platform-fee collection entirely.
+    FeeWaived(String),
 }
 
 // ============================================================
@@ -899,6 +903,44 @@ impl HireSettleContract {
             .persistent()
             .get(&DataKey::PlatformTreasuryBalance(token))
             .unwrap_or(0)
+    }
+
+    /// Admin waives the platform fee for a single engagement (issue #335),
+    /// zeroing it for every future milestone payout on that engagement
+    /// regardless of the contract-wide fee, fee tiers, or referral discount.
+    /// Idempotent — waiving an already-waived engagement is a no-op.
+    ///
+    /// Does not retroactively refund fees already collected before the
+    /// waiver was granted.
+    ///
+    /// # Panics
+    /// - `"NoAdmin"` — the admin role has been permanently renounced.
+    /// - `"unauthorized"` — caller is not the current admin.
+    /// - `"engagement not found"` — no engagement with this ID.
+    ///
+    /// # Events
+    /// Emits `("platform_fee_waived", engagement_id)` with `(admin,)`.
+    pub fn waive_platform_fee(env: Env, admin: Address, engagement_id: String) {
+        Self::assert_admin(&env, &admin);
+        // Confirms the engagement exists before recording the waiver.
+        Self::get_engagement_internal(&env, &engagement_id);
+
+        let key = DataKey::FeeWaived(engagement_id.clone());
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (Symbol::new(&env, "platform_fee_waived"), engagement_id),
+            (admin,),
+        );
+    }
+
+    /// Return whether the platform fee has been waived for `engagement_id`
+    /// (issue #335).
+    pub fn is_fee_waived(env: Env, engagement_id: String) -> bool {
+        Self::is_fee_waived_internal(&env, &engagement_id)
     }
 
     /// Admin adds a referrer address to the recognised referral list (issue #251).
@@ -2419,8 +2461,11 @@ impl HireSettleContract {
         let payment = full_share - milestone.replacement_paid_out;
         if payment > 0 {
             let platform_fee = Self::get_platform_fee_internal(&env);
-            let effective_bps =
-                Self::apply_referral_discount(&env, platform_fee.bps, &engagement.referrer);
+            let effective_bps = if Self::is_fee_waived_internal(&env, &engagement_id) {
+                0
+            } else {
+                Self::apply_referral_discount(&env, platform_fee.bps, &engagement.referrer)
+            };
             Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
             let fee_amount = (payment * effective_bps as i128) / 10_000;
             let net_payment = payment - fee_amount;
@@ -2697,9 +2742,16 @@ impl HireSettleContract {
         let payment = full_share - milestone.replacement_paid_out;
         if payment > 0 {
             let platform_fee = Self::get_platform_fee_internal(&env);
-            let base_bps =
-                Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
-            let effective_bps = Self::apply_referral_discount(&env, base_bps, &engagement.referrer);
+            let effective_bps = if Self::is_fee_waived_internal(&env, &engagement_id) {
+                0
+            } else {
+                let base_bps = Self::resolve_platform_fee_bps(
+                    &env,
+                    platform_fee.bps,
+                    engagement.total_amount,
+                );
+                Self::apply_referral_discount(&env, base_bps, &engagement.referrer)
+            };
             let fee_amount = (payment * effective_bps as i128) / 10_000;
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
@@ -6988,8 +7040,12 @@ impl HireSettleContract {
         }
 
         let platform_fee = Self::get_platform_fee_internal(&env);
-        let effective_bps =
-            Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
+        let effective_bps = Self::effective_platform_fee_bps(
+            &env,
+            &engagement_id,
+            platform_fee.bps,
+            engagement.total_amount,
+        );
         let token_client = token::Client::new(&env, &engagement.token);
 
         for i in 0..milestone_indices.len() {
@@ -7192,8 +7248,12 @@ impl HireSettleContract {
         // Release payment identically to confirm_milestone.
         let payment = (engagement.total_amount * milestone.payment_percent as i128) / 100;
         let platform_fee = Self::get_platform_fee_internal(&env);
-        let effective_bps =
-            Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
+        let effective_bps = Self::effective_platform_fee_bps(
+            &env,
+            &engagement_id,
+            platform_fee.bps,
+            engagement.total_amount,
+        );
         let fee_amount = (payment * effective_bps as i128) / 10_000;
         let net_payment = payment - fee_amount;
         engagement.released_amount += payment;
@@ -7794,6 +7854,30 @@ impl HireSettleContract {
             }
         }
         base_bps
+    }
+
+    /// Whether the admin has waived the platform fee for this engagement
+    /// (issue #335).
+    fn is_fee_waived_internal(env: &Env, engagement_id: &String) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::FeeWaived(engagement_id.clone()))
+            .unwrap_or(false)
+    }
+
+    /// Resolve the effective platform-fee bps for a milestone payout,
+    /// collapsing to 0 when the engagement has an active fee waiver
+    /// (issue #335). Otherwise defers to `resolve_platform_fee_bps`.
+    fn effective_platform_fee_bps(
+        env: &Env,
+        engagement_id: &String,
+        base_bps: u32,
+        total_amount: i128,
+    ) -> u32 {
+        if Self::is_fee_waived_internal(env, engagement_id) {
+            return 0;
+        }
+        Self::resolve_platform_fee_bps(env, base_bps, total_amount)
     }
 
     /// Credit `fee_amount` of `token` into the running platform treasury

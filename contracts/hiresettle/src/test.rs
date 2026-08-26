@@ -9151,3 +9151,147 @@ fn test_platform_treasury_balance_unused_token_is_zero() {
     assert_eq!(client.get_platform_treasury_balance(&other_token), 0);
 }
 
+
+// ============================================================
+// ISSUE #335 — fee waiver
+// ============================================================
+
+#[test]
+fn test_waive_platform_fee_skips_fee_collection() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+
+    client.set_platform_fee(&company, &250, &treasury); // 2.5%
+
+    let eng_id = String::from_str(&env, "ENG-WAIVED");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-WAIVED",
+    );
+
+    assert!(!client.is_fee_waived(&eng_id));
+    client.waive_platform_fee(&company, &eng_id);
+    assert!(client.is_fee_waived(&eng_id));
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    let gross = 300_000_000i128;
+    assert_eq!(token_client.balance(&treasury), 0);
+    assert_eq!(token_client.balance(&recruiter), gross);
+    assert_eq!(client.get_platform_treasury_balance(&token_id), 0);
+    assert_eq!(client.get_recruiter_total_earnings(&recruiter), gross);
+    assert!(!has_event(&env, "platform_fee_collected"));
+}
+
+#[test]
+fn test_waive_platform_fee_only_affects_waived_engagement() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+
+    client.set_platform_fee(&company, &250, &treasury); // 2.5%
+
+    let waived_id = String::from_str(&env, "ENG-WAIVED-2");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-WAIVED-2",
+    );
+    client.waive_platform_fee(&company, &waived_id);
+
+    let normal_id = String::from_str(&env, "ENG-NORMAL-2");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-NORMAL-2",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &waived_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer"),
+    );
+    client.confirm_milestone(&company, &waived_id, &0);
+
+    client.submit_proof(
+        &recruiter,
+        &normal_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer"),
+    );
+    client.confirm_milestone(&company, &normal_id, &0);
+
+    let gross = 300_000_000i128;
+    let expected_fee = gross * 250 / 10_000;
+    // Only the non-waived engagement contributed a fee to the treasury.
+    assert_eq!(token_client.balance(&treasury), expected_fee);
+    assert_eq!(
+        client.get_recruiter_total_earnings(&recruiter),
+        gross + (gross - expected_fee)
+    );
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_waive_platform_fee_requires_admin() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-WAIVE-UNAUTH");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-WAIVE-UNAUTH",
+    );
+
+    client.waive_platform_fee(&recruiter, &eng_id);
+}
+
+#[test]
+fn test_waive_platform_fee_idempotent() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-WAIVE-IDEMPOTENT");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-WAIVE-IDEMPOTENT",
+    );
+
+    client.waive_platform_fee(&company, &eng_id);
+    client.waive_platform_fee(&company, &eng_id);
+    assert!(client.is_fee_waived(&eng_id));
+}
+
