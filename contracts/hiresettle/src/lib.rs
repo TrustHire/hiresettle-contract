@@ -805,6 +805,7 @@ const DEFAULT_DUE_SOON_WINDOW_LEDGERS: u32 = 17_280;
 const DEFAULT_SUPER_ARBITER_RESPONSE_WINDOW_LEDGERS: u32 = 51_840;
 /// Maximum number of tags stored on an engagement (issue #248).
 const MAX_TAGS: u32 = 10;
+const MAX_MILESTONE_ATTACHMENTS: u32 = 10;
 /// Maximum length, in characters, of a single engagement tag (issue #248).
 const MAX_TAG_LENGTH: u32 = 32;
 /// Default maximum number of milestone extensions allowed per milestone
@@ -1019,6 +1020,41 @@ impl HireSettleContract {
             .persistent()
             .get(&DataKey::Referrers)
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Admin blacklists an address, e.g. a company or recruiter flagged for
+    /// abuse (issue #360). Blacklisting is a standalone flag — it does not by
+    /// itself block any existing lifecycle call; integrators are expected to
+    /// check `get_blacklist_status` off-chain or at their own call sites.
+    pub fn add_to_blacklist(env: Env, admin: Address, address: Address) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Blacklisted(address.clone()), &true);
+        env.events()
+            .publish((Symbol::new(&env, "address_blacklisted"),), address);
+    }
+
+    /// Admin removes an address from the blacklist (issue #360).
+    pub fn remove_from_blacklist(env: Env, admin: Address, address: Address) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Blacklisted(address.clone()));
+        env.events()
+            .publish((Symbol::new(&env, "address_unblacklisted"),), address);
+    }
+
+    /// Return whether `address` is currently blacklisted (issue #360).
+    /// Returns `false` for any address never blacklisted. Read-only and
+    /// permissionless.
+    pub fn get_blacklist_status(env: Env, address: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Blacklisted(address))
+            .unwrap_or(false)
     }
 
     /// Admin sets the referral discount in basis points (issue #251).
@@ -2423,6 +2459,97 @@ impl HireSettleContract {
     }
 
     // ----------------------------------------------------------
+    // MILESTONE ATTACHMENTS (issue #361)
+    // ----------------------------------------------------------
+
+    /// Attach an additional proof hash to a milestone, alongside its primary
+    /// `proof_hash` set by `submit_proof` (issue #361). Lets the recruiter
+    /// supply multiple pieces of evidence (e.g. an offer letter CID plus a
+    /// signed start-date confirmation) instead of being limited to one hash.
+    ///
+    /// # Caller
+    /// `recruiter` — must match the engagement's recruiter and sign the transaction.
+    ///
+    /// # Panics
+    /// - `"InvalidProofHash"` — empty string passed as `hash`.
+    /// - `"ProofHashTooLong"` — `hash` exceeds the configured max proof hash length.
+    /// - `"TooManyAttachments"` — milestone already has `MAX_MILESTONE_ATTACHMENTS` entries.
+    /// - `"unauthorized"` — caller is not the engagement's recruiter.
+    /// - `"invalid milestone index"` — `milestone_index` is out of range.
+    ///
+    /// # Events
+    /// Emits `("milestone_attachment_added", engagement_id)` with `(milestone_index, hash)`.
+    pub fn add_milestone_attachment(
+        env: Env,
+        recruiter: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        hash: String,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+
+        if hash.len() == 0 {
+            panic!("InvalidProofHash");
+        }
+        if hash.len() > Self::get_max_proof_hash_length_internal(&env) {
+            panic!("ProofHashTooLong");
+        }
+
+        recruiter.require_auth();
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        if !Self::is_authorized_recruiter(&env, &recruiter, &engagement.recruiter) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+        // Validates the milestone index exists; the milestone value itself is unused.
+        Self::get_milestone_or_panic(&engagement, milestone_index);
+
+        let key = DataKey::MilestoneAttachments(engagement_id.clone(), milestone_index);
+        let mut attachments: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if attachments.len() >= MAX_MILESTONE_ATTACHMENTS {
+            panic!("TooManyAttachments");
+        }
+
+        attachments.push_back(hash.clone());
+        env.storage().persistent().set(&key, &attachments);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "milestone_attachment_added"),
+                engagement_id,
+            ),
+            (milestone_index, hash),
+        );
+    }
+
+    /// Return all attachment hashes recorded for a milestone via
+    /// `add_milestone_attachment` (issue #361). Does not include the
+    /// milestone's primary `proof_hash` — read that from `get_milestone`.
+    /// Returns an empty vec if none were ever added. Read-only and permissionless.
+    pub fn get_milestone_attachments(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MilestoneAttachments(
+                engagement_id,
+                milestone_index,
+            ))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    // ----------------------------------------------------------
     // CONFIRM MILESTONE
     // ----------------------------------------------------------
 
@@ -2973,6 +3100,82 @@ impl HireSettleContract {
             (Symbol::new(&env, "dispute_raised"), engagement_id.clone()),
             (milestone_index, reason),
         );
+    }
+
+    // ----------------------------------------------------------
+    // DISPUTE EVIDENCE (issue #362)
+    // ----------------------------------------------------------
+
+    /// Attach an evidence hash to a disputed milestone (issue #362). Either
+    /// party may call this when raising or responding to a dispute, letting
+    /// arbiters review off-chain evidence (e.g. a screenshot or document CID)
+    /// alongside the dispute reason text.
+    ///
+    /// # Caller
+    /// The engagement's `company` or `recruiter` (or either's registered co-signer).
+    ///
+    /// # Panics
+    /// - `"InvalidProofHash"` — empty string passed as `evidence_hash`.
+    /// - `"ProofHashTooLong"` — `evidence_hash` exceeds the configured max proof hash length.
+    /// - `"unauthorized"` — caller is neither the engagement's company nor recruiter.
+    /// - `"milestone is not disputed"` — the target milestone is not currently `Disputed`.
+    ///
+    /// # Events
+    /// Emits `("dispute_evidence_added", engagement_id)` with `(milestone_index, evidence_hash)`.
+    pub fn add_dispute_evidence(
+        env: Env,
+        caller: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        evidence_hash: String,
+    ) {
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+
+        if evidence_hash.len() == 0 {
+            panic!("InvalidProofHash");
+        }
+        if evidence_hash.len() > Self::get_max_proof_hash_length_internal(&env) {
+            panic!("ProofHashTooLong");
+        }
+
+        caller.require_auth();
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        if !Self::is_authorized_company(&env, &caller, &engagement.company)
+            && !Self::is_authorized_recruiter(&env, &caller, &engagement.recruiter)
+        {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.status != MilestoneStatus::Disputed {
+            panic!("milestone is not disputed");
+        }
+
+        env.storage().persistent().set(
+            &DataKey::DisputeEvidence(engagement_id.clone(), milestone_index),
+            &evidence_hash.clone(),
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "dispute_evidence_added"),
+                engagement_id,
+            ),
+            (milestone_index, evidence_hash),
+        );
+    }
+
+    /// Return the evidence hash attached to a disputed milestone via
+    /// `add_dispute_evidence`, if any (issue #362). Read-only and permissionless.
+    pub fn get_dispute_evidence(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeEvidence(engagement_id, milestone_index))
     }
 
     // ----------------------------------------------------------
@@ -6612,6 +6815,60 @@ impl HireSettleContract {
             .get(&DataKey::TagEngagements(tag))
             .unwrap_or_else(|| Vec::new(&env));
         ids.len()
+    }
+
+    // ----------------------------------------------------------
+    // ENGAGEMENT VISIBILITY (issue #364)
+    // ----------------------------------------------------------
+
+    /// Mark an engagement public or private for off-chain analytics indexing
+    /// (issue #364). Purely informational — it does not affect escrow,
+    /// payments, or any lifecycle call; indexers are expected to honour it
+    /// when deciding what to surface.
+    ///
+    /// # Caller
+    /// The engagement's `company` (or its registered co-signer).
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — caller is not the engagement's company.
+    /// - `"engagement not found"` — `engagement_id` does not exist.
+    ///
+    /// # Events
+    /// Emits `("engagement_visibility_set", engagement_id)` with `is_public`.
+    pub fn set_engagement_visibility(
+        env: Env,
+        company: Address,
+        engagement_id: String,
+        is_public: bool,
+    ) {
+        company.require_auth();
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        if !Self::is_authorized_company(&env, &company, &engagement.company) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        env.storage().persistent().set(
+            &DataKey::EngagementVisibility(engagement_id.clone()),
+            &is_public,
+        );
+        env.events().publish(
+            (
+                Symbol::new(&env, "engagement_visibility_set"),
+                engagement_id,
+            ),
+            is_public,
+        );
+    }
+
+    /// Return whether an engagement is flagged public (issue #364). Defaults
+    /// to `true` for an engagement whose visibility was never explicitly set,
+    /// so existing engagements remain indexable without a migration.
+    /// Read-only and permissionless.
+    pub fn get_engagement_visibility(env: Env, engagement_id: String) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::EngagementVisibility(engagement_id))
+            .unwrap_or(true)
     }
 
     /// Return a paginated slice of engagement IDs matching across a list of
