@@ -312,6 +312,49 @@ net_payment = gross_share − fee_amount // this is what the recruiter actually 
 
 `fee_amount` is transferred to `treasury`; a `platform_fee_collected` event `(milestone_index, fee_amount, treasury)` is emitted whenever `fee_amount > 0` (no event when the fee is 0). Disputes resolved via `cast_arbiter_vote` do **not** deduct the platform fee — they deduct a separate, arbiter-only fee instead (see `set_arbiter_fee`).
 
+When fee tiers are configured, `platform_fee_bps` in the formula above is the **resolved** rate for that engagement's `total_amount` (see [Fee tiers](#fee-tiers)), not necessarily the base `PlatformFee.bps` returned by `get_platform_fee()`.
+
+### Fee tiers
+
+Admin can scale the platform fee down for larger engagements instead of charging every size the same flat `bps`. Each bracket is a `FeeTier`. Tiers are optional: an empty list means the base `PlatformFee.bps` applies to every engagement.
+
+#### Configuration
+- **Set Tiers**: `set_fee_tiers(admin, tiers)` — admin only. Replaces the entire list. Pass an empty vector to clear all tiers (back to a flat fee). Emits `fee_tiers_set` with payload `tiers.len()`.
+- **Read Tiers**: `get_fee_tiers()` — returns `Vec<FeeTier>`. Permissionless. Empty vector = no tiering.
+- **Default**: no tiers stored. `get_platform_fee()` still returns the base `(bps, treasury)` even when tiers are set; it does not return the resolved rate for a given amount.
+
+```rust
+pub struct FeeTier {
+    pub threshold: i128,             // inclusive min engagement.total_amount
+    pub bps: u32,                    // platform fee for this bracket (basis points)
+}
+```
+
+#### How a tier is selected
+
+At fee-calculation time the contract walks the stored list from **highest `threshold` to lowest** and uses the first tier whose `threshold` is `<= engagement.total_amount`. If no tier matches, the base `PlatformFee.bps` applies.
+
+Example with base fee `200` bps and two tiers `(10_000_000, 150)` then `(100_000_000, 100)`:
+
+| `total_amount` | Rate used |
+|---|---|
+| `5_000_000` | `200` (below every threshold → base) |
+| `10_000_000` | `150` |
+| `100_000_000` | `100` (highest matching threshold wins) |
+
+#### Validation
+
+`set_fee_tiers` panics unless all of the following hold:
+
+| Rule | Panic |
+|---|---|
+| At most 10 tiers | `too many fee tiers` |
+| Each `bps` ≤ current base `PlatformFee.bps` | `tier bps exceeds base platform fee` |
+| Each `threshold` > 0 | `tier threshold must be positive` |
+| Thresholds strictly ascending | `tiers must be sorted by ascending threshold` |
+
+The 500 bps `FeeTooHigh` cap is enforced on `set_platform_fee`, not here. A tier cannot charge **more** than the current base fee (tiers are discounts for larger size, not surcharges). Caller must also be admin and the contract must not be paused (`ContractPaused`, `NoAdmin`, `unauthorized`).
+
 ### Referral discount
 
 Engagements may carry an optional `referrer` address (set at creation via
@@ -363,6 +406,7 @@ pub enum DataKey {
     Admin,                           // current admin address (instance)
     PendingArbiter(String),          // pending arbiter succession nomination
     PlatformFee,                     // bps + treasury config (persistent)
+    FeeTiers,                        // Vec<FeeTier> size brackets (persistent)
     Paused,                          // pause-guard bool (persistent)
     PendingAdmin,                    // nominated admin successor (persistent)
     ProofCooldown,                   // min ledgers between resubmissions (instance)
@@ -560,7 +604,9 @@ Functions that manage contract-wide settings, admin succession, and operational 
 | Function | Caller | Purpose | Panics |
 |---|---|---|---|
 | `set_platform_fee(admin, bps, treasury)` | Admin | Set platform fee in basis points (max 500 = 5%) and recipient treasury. | `ContractPaused`, `NoAdmin`, `unauthorized`, `FeeTooHigh` |
-| `get_platform_fee()` → `(u32, Address)` | Anyone | Return current `(bps, treasury)`; defaults to `(0, admin)`. | — |
+| `get_platform_fee()` → `(u32, Address)` | Anyone | Return current **base** `(bps, treasury)`; defaults to `(0, admin)`. Does not resolve fee tiers. | — |
+| `set_fee_tiers(admin, tiers)` | Admin | Replace the fee-tier list (max 10, strictly ascending `threshold`, each `bps` ≤ base platform fee). Empty vec clears tiers. | `ContractPaused`, `NoAdmin`, `unauthorized`, `too many fee tiers`, `tier bps exceeds base platform fee`, `tier threshold must be positive`, `tiers must be sorted by ascending threshold` |
+| `get_fee_tiers()` → `Vec<FeeTier>` | Anyone | Return configured tiers; empty vec means flat base fee. | — |
 | `set_version(admin, version)` | Admin | Set contract version string (max 32 chars). | `NoAdmin`, `unauthorized`, `VersionTooLong` |
 | `set_min_amount(admin, amount)` | Admin | Set minimum engagement amount in raw token units. | `NoAdmin`, `unauthorized` |
 | `pause(admin)` | Admin | Pause all state-changing operations. | `NoAdmin`, `unauthorized` |
@@ -938,6 +984,7 @@ means "no ratings yet", not "rated zero".
 | `get_version` | — | `String` |
 | `get_min_amount` | — | `i128` |
 | `get_platform_fee` | — | `(u32, Address)` |
+| `get_fee_tiers` | — | `Vec<FeeTier>` |
 | `get_ledgers_per_day` | — | `u32` |
 | `get_max_retention_days` | — | `u32` |
 | `get_max_milestones` | — | `u32` |
@@ -1097,6 +1144,7 @@ The contract emits Soroban events for all state transitions. Events are grouped 
 | Event | Topics | Payload | Trigger |
 |---|---|---|---|
 | `platform_fee_set` | — | `(bps, treasury)` | `set_platform_fee` |
+| `fee_tiers_set` | — | `tiers.len()` | `set_fee_tiers` |
 | `version_set` | — | `version` | `set_version` |
 | `min_amount_set` | — | `amount` | `set_min_amount` |
 | `paused` | — | `admin` | `pause` |
