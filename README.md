@@ -1,4 +1,4 @@
-# HireSettle — Recruitment Fee Settlement Contract
+h# HireSettle — Recruitment Fee Settlement Contract
 
 A [Soroban](https://soroban.stellar.org/) smart contract deployed on Stellar for managing recruitment fee settlements through milestone-based escrow payments. Built with `#![no_std]` Rust and the Soroban SDK.
 
@@ -1089,8 +1089,3 @@ stellar contract invoke \
 MIT
 
 ---
-
-## Function: `confirm_milestone`
-
-Called by the hiring **company** to confirm a `ProofSubmitted` milestone. Releases the milestone payment from escrow, splits off the platform fee, and re-checks retention timing. Panics on unauthorized caller or invalid milestone state. Emits `milestone_confirmed`, `platform_fee_collected`, and (on final milestone) `engagement_completed`.
-
