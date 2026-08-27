@@ -406,6 +406,24 @@ Either the company or the recruiter may propose a change to a milestone's `payme
 
 ### TTL and Expiry
 
+The contract exposes several admin-configurable time-based constants (TTLs, windows, and durations). The table below lists every such constant, its default value, and the setter/getter pair used to manage it. All values are denominated in **ledgers** (≈ 5 s each) unless otherwise noted.
+
+| Constant | Default (ledgers) | Approx. Duration | Setter | Getter |
+|---|---|---|---|---|
+| `storage_ttl_extend_to` | 1,036,800 | ~60 days | `set_storage_ttl_extend_to(admin, ledgers)` | `get_storage_ttl_extend_to()` |
+| `confirm_window` | 86,400 | ~5 days | `set_confirm_window(admin, ledgers)` | `get_confirm_window()` |
+| `dispute_window` | 51,840 | ~3 days | `set_dispute_window(admin, ledgers)` | `get_dispute_window()` |
+| `amendment_ttl` | 17,280 | ~1 day | `set_amendment_ttl(admin, ledgers)` | `get_amendment_ttl()` |
+| `extension_ttl` | 17,280 | ~1 day | `set_extension_ttl(admin, ledgers)` | `get_extension_ttl()` |
+| `upgrade_lock_duration` | 17,280 | ~1 day | `set_upgrade_lock_duration(admin, ledgers)` | `get_upgrade_lock_duration()` |
+| `inactivity_timeout` | 1,036,800 | ~60 days | `set_inactivity_timeout_ledgers(admin, ledgers)` | `get_inactivity_timeout_ledgers()` |
+| `due_soon_window` | 17,280 | ~1 day | `set_due_soon_window(admin, ledgers)` | `get_due_soon_window()` |
+| `proof_cooldown` | 2,880 | ~4 hours | `set_proof_cooldown(admin, ledgers)` | `get_config_snapshot().proof_cooldown_ledgers` |
+| `super_arbiter_response_window` | 51,840 | ~3 days | `set_super_arbiter_deadline(admin, ledgers)` | `get_super_arbiter_deadline()` |
+| `ledgers_per_day` | 17,280 | 1 day | `set_ledgers_per_day(admin, value)` | `get_ledgers_per_day()` |
+
+> **Tip:** `get_config_snapshot()` returns **all** of the above values in a single read-only call, so off-chain indexers do not need ~11 separate round-trips to reconstruct the current configuration.
+
 Every proposal carries an expiry ledger computed as `proposed_at_ledger + amendment_ttl` (see [`AmendmentProposal.expires_at_ledger`](#amendmentproposal)).
 
 - The default TTL is **17,280 ledgers** (≈ 1 day at 5 s/ledger).
