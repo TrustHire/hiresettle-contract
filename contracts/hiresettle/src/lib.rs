@@ -556,12 +556,28 @@ pub struct ConfigSnapshot {
 #[derive(Clone)]
 pub enum EscrowLifecycleAction {
     /// Escrow balance increased when an engagement was initially funded.
+    ///
+    /// Reserved / forward-looking extension point for yield-strategy
+    /// integrations; emitted only when the admin has enabled callback
+    /// checkpoints and set a callback target address.
     Funded,
     /// Escrow balance increased from a later top-up.
+    ///
+    /// Reserved / forward-looking extension point for yield-strategy
+    /// integrations; emitted only when the admin has enabled callback
+    /// checkpoints and set a callback target address.
     ToppedUp,
     /// Escrow balance decreased to pay milestone proceeds.
+    ///
+    /// Reserved / forward-looking extension point for yield-strategy
+    /// integrations; emitted only when the admin has enabled callback
+    /// checkpoints and set a callback target address.
     PayoutReleased,
     /// Escrow balance decreased due to a refund back to company.
+    ///
+    /// Reserved / forward-looking extension point for yield-strategy
+    /// integrations; emitted only when the admin has enabled callback
+    /// checkpoints and set a callback target address.
     Refunded,
 }
 
