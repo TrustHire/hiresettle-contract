@@ -423,8 +423,15 @@ out the TTL. `withdraw_amendment_proposal(proposer, engagement_id,
 milestone_index)` lets the **original proposer** clear their own pending proposal
 immediately.
 
-Only the address recorded on the proposal may withdraw it — being the
-engagement's company or recruiter is not sufficient. Afterwards
+Before the proposal is removed, the function requires `proposer` to authorize
+the transaction, confirms that a proposal exists for the specified
+`engagement_id` and `milestone_index`, and checks that `proposer` matches the
+proposal's recorded proposer. It does not require a separate engagement lookup:
+being the engagement's company or recruiter is not sufficient on its own.
+Missing proposals panic with `no pending amendment proposal`; a proposer
+mismatch panics with `unauthorized`.
+
+Afterwards
 `get_pending_amendment` reports `None` and a fresh proposal can be made for the
 same milestone. The amendment log is untouched: a withdrawn proposal was never
 applied, so it is not part of the milestone's amendment history. An
