@@ -142,6 +142,7 @@ fn default_config() -> EngagementConfig {
         contract_pdf_hash: None,
         referrer: None,
         tags: None,
+        is_public: false,
     }
 }
 
@@ -1347,6 +1348,7 @@ fn test_metadata_hash_present() {
             contract_pdf_hash: None,
             referrer: None,
             tags: None,
+            is_public: false,
         },
     );
 
@@ -1399,6 +1401,7 @@ fn test_metadata_hash_empty_string_rejected() {
             contract_pdf_hash: None,
             referrer: None,
             tags: None,
+            is_public: false,
         },
     );
 }
@@ -1421,6 +1424,7 @@ fn test_co_recruiter_60_40_split() {
         contract_pdf_hash: None,
         referrer: None,
         tags: None,
+        is_public: false,
     };
 
     client.create_engagement(
@@ -1507,6 +1511,7 @@ fn test_split_bps_over_10000_rejected() {
         contract_pdf_hash: None,
         referrer: None,
         tags: None,
+        is_public: false,
     };
 
     client.create_engagement(
@@ -1541,6 +1546,7 @@ fn test_co_recruiter_gets_remainder() {
         contract_pdf_hash: None,
         referrer: None,
         tags: None,
+        is_public: false,
     };
 
     client.create_engagement(
@@ -1590,6 +1596,7 @@ fn test_co_recruiter_summary_fields() {
         contract_pdf_hash: None,
         referrer: None,
         tags: None,
+        is_public: false,
     };
 
     client.create_engagement(
@@ -1628,6 +1635,7 @@ fn test_split_bps_10000_accepted() {
         contract_pdf_hash: None,
         referrer: None,
         tags: None,
+        is_public: false,
     };
 
     client.create_engagement(
@@ -8830,6 +8838,7 @@ fn test_co_recruiter_split_with_platform_fee() {
         contract_pdf_hash: None,
         referrer: None,
         tags: None,
+        is_public: false,
     };
 
     client.create_engagement(
@@ -9385,6 +9394,7 @@ fn test_co_recruiter_split_with_odd_percentage_remainder() {
         contract_pdf_hash: None,
         referrer: None,
         tags: None,
+        is_public: false,
     };
 
     client.create_engagement(
