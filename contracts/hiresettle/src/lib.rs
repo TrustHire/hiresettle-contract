@@ -21,6 +21,11 @@
 //! - `Admin & Configuration`: Protocol parameter updates, fee withdrawals, and arbiter management.
 
 #![no_std]
+// `#[contractimpl]` expands `create_engagement`'s many required fields into a
+// flat parameter list on the generated contract, client, and args types;
+// bundling them into a struct would break the deployed ABI, so the lint is
+// disabled crate-wide for the macro-generated bindings it triggers on.
+#![allow(clippy::too_many_arguments)]
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, token, Address, BytesN, Env, String, Symbol, Vec,
@@ -33,6 +38,16 @@ const FULL_SPLIT_BPS: u32 = 10_000;
 // ============================================================
 // DATA TYPES
 // ============================================================
+
+/// Distinguishes which role an address is blocked from acting as, so both
+/// blacklists (issues #358, #359) can share a single `DataKey` variant
+/// instead of doubling the enum's discriminant count.
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum BlacklistRole {
+    Company,
+    Recruiter,
+}
 
 /// Lifecycle state of a single milestone.
 #[contracttype]
@@ -477,6 +492,23 @@ pub struct RatingSummary {
     pub total_score: u32,
 }
 
+/// A single entry in the admin action audit log (issue #357). Recorded for
+/// every admin-gated mutation so off-chain tooling can reconstruct a history
+/// of privileged actions without re-deriving it from raw contract events.
+#[contracttype]
+#[derive(Clone)]
+pub struct AdminActionEntry {
+    /// Short identifier for the action taken, e.g. `"blacklist_company"`.
+    pub action: String,
+    /// The admin address that performed the action.
+    pub admin: Address,
+    /// The address the action targeted, if any (e.g. the blacklisted
+    /// company/recruiter). Absent for actions with no single target address.
+    pub target: Option<Address>,
+    /// Ledger sequence at which the action was recorded.
+    pub ledger: u32,
+}
+
 /// Full point-in-time snapshot of every admin-configurable parameter,
 /// returned by `get_config_snapshot` (issue #240) so off-chain callers don't
 /// need to call each individual getter (`get_platform_fee`, `get_arbiter_fee`,
@@ -633,6 +665,9 @@ pub enum ConfigKey {
     /// resolve an escalated dispute before it auto-resolves in the
     /// recruiter's favor (issue #318, default `DEFAULT_SUPER_ARBITER_RESPONSE_WINDOW_LEDGERS`).
     SuperArbiterResponseWindow,
+    /// Admin-configurable maximum number of extensions grantable per milestone
+    /// (issue #323, default `DEFAULT_MAX_MILESTONE_EXTENSIONS`).
+    MaxMilestoneExtensions,
 }
 
 /// Contract storage key space. Instance keys reset between transactions;
@@ -799,6 +834,9 @@ const DEFAULT_EXTENSION_TTL: u32 = 17_280;
 /// milestone becomes "due soon" once it is within this many ledgers of its
 /// `valid_after_ledger`. ~1 day at 5 s/ledger.
 const DEFAULT_DUE_SOON_WINDOW_LEDGERS: u32 = 17_280;
+/// Maximum number of engagement configs accepted by a single
+/// `batch_create_engagements` call (issue #34 batch variant).
+const MAX_BATCH_CREATE_ENGAGEMENTS: u32 = 20;
 /// Default deadline, in ledgers, for the super-arbiter to resolve an
 /// escalated dispute before `resolve_escalation_timeout` can auto-favor the
 /// recruiter (issue #318). Mirrors the default dispute window (~3 days).
@@ -1499,25 +1537,22 @@ impl HireSettleContract {
         config: EngagementConfig,
     ) -> String {
         // Validate engagement_id format: non-empty, ≤ 64 chars, [A-Za-z0-9-] only.
-        if engagement_id.len() == 0 || engagement_id.len() > MAX_ENGAGEMENT_ID_LENGTH {
+        if engagement_id.is_empty() || engagement_id.len() > MAX_ENGAGEMENT_ID_LENGTH {
             panic!("InvalidEngagementId");
         }
         let id_len = engagement_id.len() as usize;
         let mut id_buf = [0u8; MAX_ENGAGEMENT_ID_LENGTH as usize];
         engagement_id.copy_into_slice(&mut id_buf[..id_len]);
-        for i in 0..id_len {
-            let b = id_buf[i];
-            let valid = (b >= b'A' && b <= b'Z')
-                || (b >= b'a' && b <= b'z')
-                || (b >= b'0' && b <= b'9')
-                || b == b'-';
+        for &b in &id_buf[..id_len] {
+            let valid =
+                b.is_ascii_uppercase() || b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-';
             if !valid {
                 panic!("InvalidEngagementId");
             }
         }
 
         // Issue #24: Job title validation
-        if job_title.len() == 0 {
+        if job_title.is_empty() {
             panic!("JobTitleEmpty");
         }
         if job_title.len() > 64 {
@@ -1525,7 +1560,7 @@ impl HireSettleContract {
         }
 
         // Issue #21: Max milestone count cap validation
-        if milestones.len() == 0 {
+        if milestones.is_empty() {
             panic!("ZeroMilestones");
         }
         let max_milestones = Self::get_max_milestones(env.clone());
@@ -1536,7 +1571,7 @@ impl HireSettleContract {
         // Issue #22: Milestone name max length validation
         for i in 0..milestones.len() {
             let m = milestones.get(i).unwrap();
-            if m.name.len() == 0 {
+            if m.name.is_empty() {
                 panic!("MilestoneNameEmpty: index {}", i);
             }
             if m.name.len() > 64 {
@@ -1567,7 +1602,7 @@ impl HireSettleContract {
             }
             for i in 0..tags.len() {
                 let tag = tags.get(i).unwrap();
-                if tag.len() == 0 {
+                if tag.is_empty() {
                     panic!("TagEmpty: index {}", i);
                 }
                 if tag.len() > MAX_TAG_LENGTH {
@@ -1604,6 +1639,15 @@ impl HireSettleContract {
             }
         }
 
+        // Issues #358, #359: reject blacklisted company/recruiter addresses
+        // before any state is written.
+        if Self::is_company_blacklisted(env.clone(), company.clone()) {
+            panic!("CompanyBlacklisted");
+        }
+        if Self::is_recruiter_blacklisted(env.clone(), recruiter.clone()) {
+            panic!("RecruiterBlacklisted");
+        }
+
         let arbiters = arbiter_setup.arbiters;
         let quorum = arbiter_setup.quorum;
 
@@ -1633,14 +1677,14 @@ impl HireSettleContract {
 
         // Reject empty metadata hash — caller must either omit or provide a real CID.
         if let Some(ref hash) = config.metadata_hash {
-            if hash.len() == 0 {
+            if hash.is_empty() {
                 panic!("InvalidMetadataHash");
             }
         }
 
         // Reject empty contract_pdf_hash — caller must either omit or provide a real hash.
         if let Some(ref hash) = config.contract_pdf_hash {
-            if hash.len() == 0 {
+            if hash.is_empty() {
                 panic!("InvalidContractPdfHash");
             }
         }
@@ -2098,7 +2142,7 @@ impl HireSettleContract {
             if old_idx >= len {
                 panic!("{}", ERR_INVALID_MILESTONE_INDEX);
             }
-            if seen.contains(&old_idx) {
+            if seen.contains(old_idx) {
                 panic!("DuplicateReorderIndex");
             }
             seen.push_back(old_idx);
@@ -2356,7 +2400,7 @@ impl HireSettleContract {
         Self::assert_engagement_not_paused(&env, &engagement_id);
 
         // Issue #20: Proof hash format validation (before require_auth for fail-fast)
-        if proof_hash.len() == 0 {
+        if proof_hash.is_empty() {
             panic!("InvalidProofHash");
         }
 
@@ -2400,7 +2444,7 @@ impl HireSettleContract {
         for i in 0..engagement.milestones.len() {
             if i != milestone_index {
                 let existing_milestone = engagement.milestones.get(i).unwrap();
-                if existing_milestone.proof_hash.len() > 0
+                if !existing_milestone.proof_hash.is_empty()
                     && existing_milestone.proof_hash == proof_hash
                 {
                     panic!("DuplicateProofHash");
@@ -2414,7 +2458,7 @@ impl HireSettleContract {
             .persistent()
             .extend_ttl(&last_key, 100_000, 6_300_000);
 
-        let is_resubmission = milestone.proof_hash.len() > 0;
+        let is_resubmission = !milestone.proof_hash.is_empty();
         let old_hash = milestone.proof_hash.clone();
 
         milestone.proof_hash = proof_hash.clone();
@@ -2766,13 +2810,12 @@ impl HireSettleContract {
 
         let key = DataKey::ScheduledAutoConfirm(engagement_id.clone(), milestone_index);
         env.storage().persistent().set(&key, &target_ledger);
-        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
 
         env.events().publish(
-            (
-                Symbol::new(&env, "auto_confirm_scheduled"),
-                engagement_id,
-            ),
+            (Symbol::new(&env, "auto_confirm_scheduled"), engagement_id),
             (milestone_index, target_ledger),
         );
     }
@@ -2803,10 +2846,7 @@ impl HireSettleContract {
         if env.storage().persistent().has(&key) {
             env.storage().persistent().remove(&key);
             env.events().publish(
-                (
-                    Symbol::new(&env, "auto_confirm_cancelled"),
-                    engagement_id,
-                ),
+                (Symbol::new(&env, "auto_confirm_cancelled"), engagement_id),
                 milestone_index,
             );
         }
@@ -2822,7 +2862,10 @@ impl HireSettleContract {
     ) -> Option<u32> {
         env.storage()
             .persistent()
-            .get(&DataKey::ScheduledAutoConfirm(engagement_id, milestone_index))
+            .get(&DataKey::ScheduledAutoConfirm(
+                engagement_id,
+                milestone_index,
+            ))
     }
 
     /// Execute a milestone's scheduled auto-confirm once `target_ledger` has
@@ -4693,11 +4736,7 @@ impl HireSettleContract {
         let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
 
         let current = env.ledger().sequence();
-        if current >= milestone.valid_after_ledger {
-            0
-        } else {
-            milestone.valid_after_ledger - current
-        }
+        milestone.valid_after_ledger.saturating_sub(current)
     }
 
     /// Returns approximate seconds until a Locked retention milestone unlocks.
@@ -5642,6 +5681,150 @@ impl HireSettleContract {
             .unwrap_or(false)
     }
 
+    /// Return a company's mean feedback rating across every engagement it has
+    /// been rated on (issue #337). Thin named wrapper over
+    /// [`Self::get_company_rating`] — same zeroed-summary and
+    /// `count`-before-`average_x100` notes apply — kept as a distinct entry
+    /// point so callers can query the average by its more specific name
+    /// without depending on the general rating-summary shape.
+    ///
+    /// Read-only and permissionless.
+    pub fn get_average_company_rating(env: Env, company: Address) -> RatingSummary {
+        Self::get_company_rating(env, company)
+    }
+
+    // ----------------------------------------------------------
+    // ISSUES #358, #359 — COMPANY / RECRUITER BLACKLIST
+    // ----------------------------------------------------------
+
+    /// Admin blocks `company` from being used as a company in any new
+    /// engagement (issue #358). Does not affect engagements already created
+    /// with this address as company.
+    pub fn blacklist_company(env: Env, admin: Address, company: Address) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        env.storage().persistent().set(
+            &DataKey::Blacklisted(BlacklistRole::Company, company.clone()),
+            &true,
+        );
+        Self::record_admin_action(&env, "blacklist_company", &admin, Some(company.clone()));
+        env.events()
+            .publish((Symbol::new(&env, "company_blacklisted"),), company);
+    }
+
+    /// Admin lifts a company blacklist entry (issue #358). No-op if `company`
+    /// was not blacklisted.
+    pub fn unblacklist_company(env: Env, admin: Address, company: Address) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        env.storage().persistent().remove(&DataKey::Blacklisted(
+            BlacklistRole::Company,
+            company.clone(),
+        ));
+        Self::record_admin_action(&env, "unblacklist_company", &admin, Some(company.clone()));
+        env.events()
+            .publish((Symbol::new(&env, "company_unblacklisted"),), company);
+    }
+
+    /// Return whether `company` is currently blocked from being used as a
+    /// company (issue #358). Read-only and permissionless.
+    pub fn is_company_blacklisted(env: Env, company: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Blacklisted(BlacklistRole::Company, company))
+            .unwrap_or(false)
+    }
+
+    /// Admin blocks `recruiter` from being used as a recruiter in any new
+    /// engagement (issue #359). Does not affect engagements already created
+    /// with this address as recruiter.
+    pub fn blacklist_recruiter(env: Env, admin: Address, recruiter: Address) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        env.storage().persistent().set(
+            &DataKey::Blacklisted(BlacklistRole::Recruiter, recruiter.clone()),
+            &true,
+        );
+        Self::record_admin_action(&env, "blacklist_recruiter", &admin, Some(recruiter.clone()));
+        env.events()
+            .publish((Symbol::new(&env, "recruiter_blacklisted"),), recruiter);
+    }
+
+    /// Admin lifts a recruiter blacklist entry (issue #359). No-op if
+    /// `recruiter` was not blacklisted.
+    pub fn unblacklist_recruiter(env: Env, admin: Address, recruiter: Address) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        env.storage().persistent().remove(&DataKey::Blacklisted(
+            BlacklistRole::Recruiter,
+            recruiter.clone(),
+        ));
+        Self::record_admin_action(
+            &env,
+            "unblacklist_recruiter",
+            &admin,
+            Some(recruiter.clone()),
+        );
+        env.events()
+            .publish((Symbol::new(&env, "recruiter_unblacklisted"),), recruiter);
+    }
+
+    /// Return whether `recruiter` is currently blocked from being used as a
+    /// recruiter (issue #359). Read-only and permissionless.
+    pub fn is_recruiter_blacklisted(env: Env, recruiter: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Blacklisted(BlacklistRole::Recruiter, recruiter))
+            .unwrap_or(false)
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #357 — ADMIN ACTION AUDIT LOG
+    // ----------------------------------------------------------
+
+    /// Return a paginated slice of the admin action audit log, most recent
+    /// first (issue #357). `page` is 0-indexed; an out-of-range page returns
+    /// an empty vec.
+    pub fn get_admin_audit_log(env: Env, page: u32, page_size: u32) -> Vec<AdminActionEntry> {
+        let mut result = Vec::new(&env);
+        if page_size == 0 {
+            return result;
+        }
+
+        let log: Vec<AdminActionEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AdminAuditLog)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let total = log.len();
+        let start = page.saturating_mul(page_size);
+        if start >= total {
+            return result;
+        }
+        let end = start.saturating_add(page_size).min(total);
+
+        // Most-recent-first: index from the end of the append-only log.
+        let mut i = total - start;
+        while i > total - end {
+            result.push_back(log.get(i - 1).unwrap());
+            i -= 1;
+        }
+
+        result
+    }
+
+    /// Return the total number of entries in the admin action audit log
+    /// (issue #357). Companion to `get_admin_audit_log` for sizing pagination.
+    pub fn get_admin_audit_log_count(env: Env) -> u32 {
+        let log: Vec<AdminActionEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AdminAuditLog)
+            .unwrap_or_else(|| Vec::new(&env));
+        log.len()
+    }
+
     // ----------------------------------------------------------
     // AMENDMENT LOG QUERIES
     // ----------------------------------------------------------
@@ -6439,7 +6622,7 @@ impl HireSettleContract {
         }
         // Issue #321: this is the tag's first engagement, so it just became
         // "in use" — track it in the global distinct-tag registry.
-        if ids.len() == 0 {
+        if ids.is_empty() {
             Self::track_tag_used(&env, &tag);
         }
         ids.push_back(engagement_id.clone());
@@ -6480,7 +6663,7 @@ impl HireSettleContract {
             env.storage().persistent().set(&key, &new_ids);
             // Issue #321: no engagements left under this tag — it's no
             // longer "in use", so drop it from the global tag registry.
-            if new_ids.len() == 0 {
+            if new_ids.is_empty() {
                 Self::untrack_tag_used(&env, &tag);
             }
             env.events().publish(
@@ -6517,7 +6700,7 @@ impl HireSettleContract {
         Self::assert_not_paused(&env);
         caller.require_auth();
 
-        if new_tag.len() == 0 {
+        if new_tag.is_empty() {
             panic!("TagEmpty");
         }
         if new_tag.len() > MAX_TAG_LENGTH {
@@ -6534,7 +6717,7 @@ impl HireSettleContract {
             .get(&old_key)
             .unwrap_or_else(|| Vec::new(&env));
 
-        if ids.len() == 0 {
+        if ids.is_empty() {
             panic!("TagNotFound");
         }
 
@@ -6752,11 +6935,7 @@ impl HireSettleContract {
     ///
     /// # Panics
     /// - `"InvalidAmountRange"` — `min_amount > max_amount`.
-    pub fn get_engagement_count_by_amount(
-        env: Env,
-        min_amount: i128,
-        max_amount: i128,
-    ) -> u32 {
+    pub fn get_engagement_count_by_amount(env: Env, min_amount: i128, max_amount: i128) -> u32 {
         if min_amount > max_amount {
             panic!("InvalidAmountRange");
         }
@@ -6893,7 +7072,7 @@ impl HireSettleContract {
         page: u32,
         page_size: u32,
     ) -> Vec<String> {
-        if page_size == 0 || tags.len() == 0 {
+        if page_size == 0 || tags.is_empty() {
             return Vec::new(&env);
         }
         if tags.len() > MAX_TAGS {
@@ -6968,7 +7147,7 @@ impl HireSettleContract {
     /// Admin sets how many ledgers constitute one day (min 1, max 25_920).
     pub fn set_ledgers_per_day(env: Env, admin: Address, value: u32) {
         Self::assert_admin(&env, &admin);
-        if value < 1 || value > 25_920 {
+        if !(1..=25_920).contains(&value) {
             panic!("InvalidLedgersPerDay");
         }
         env.storage()
@@ -7749,7 +7928,7 @@ impl HireSettleContract {
     /// `len` must be in the range 1–500. Panics with `"InvalidMaxProofHashLength"` otherwise.
     pub fn set_max_proof_hash_length(env: Env, admin: Address, len: u32) {
         Self::assert_admin(&env, &admin);
-        if len < 1 || len > 500 {
+        if !(1..=500).contains(&len) {
             panic!("InvalidMaxProofHashLength");
         }
         env.storage()
@@ -8061,10 +8240,33 @@ impl HireSettleContract {
         )
     }
 
+    /// Append one entry to the admin action audit log (issue #357). Shared by
+    /// every admin-gated mutator that wants its action recorded, so the log's
+    /// shape and storage key stay consistent across call sites.
+    fn record_admin_action(env: &Env, action: &str, admin: &Address, target: Option<Address>) {
+        let mut log: Vec<AdminActionEntry> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AdminAuditLog)
+            .unwrap_or_else(|| Vec::new(env));
+        log.push_back(AdminActionEntry {
+            action: String::from_str(env, action),
+            admin: admin.clone(),
+            target,
+            ledger: env.ledger().sequence(),
+        });
+        env.storage()
+            .persistent()
+            .set(&DataKey::AdminAuditLog, &log);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::AdminAuditLog, 100_000, 6_300_000);
+    }
+
     /// Shared 1–5 bounds check for both feedback-rating entry points
     /// (issues #242, #243).
     fn assert_valid_rating(rating: u32) {
-        if rating < 1 || rating > 5 {
+        if !(1..=5).contains(&rating) {
             panic!("InvalidRating");
         }
     }
@@ -8223,7 +8425,7 @@ impl HireSettleContract {
                     .persistent()
                     .get(&DataKey::Config(ConfigKey::ReferralDiscountBps))
                     .unwrap_or(0u32);
-                return if discount >= bps { 0 } else { bps - discount };
+                return bps.saturating_sub(discount);
             }
         }
         bps
@@ -8296,9 +8498,7 @@ impl HireSettleContract {
             }
         }
         if changed {
-            env.storage()
-                .persistent()
-                .set(&DataKey::AllTags, &new_tags);
+            env.storage().persistent().set(&DataKey::AllTags, &new_tags);
         }
     }
 
