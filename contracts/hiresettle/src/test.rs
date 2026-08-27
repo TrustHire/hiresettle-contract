@@ -8763,6 +8763,198 @@ fn test_multiple_companies_independent_active_counts() {
     assert_eq!(client.get_engagement_count(), 3);
 }
 
+// ============================================================
+// NEW FEATURE TESTS — get_fee_tier_for_amount, referral_allowlist, contract_health_history
+// ============================================================
+
+/// Test get_fee_tier_for_amount returns correct tier for small engagement
+#[test]
+fn test_get_fee_tier_for_amount_returns_tier_for_small_engagement() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Query for a small amount (1 million = 0.1 tokens at 7 decimals)
+    let amount = 1_000_000i128;
+    let tier = client.get_fee_tier_for_amount(&amount);
+
+    // Verify tier structure is populated (exact values depend on implementation)
+    assert!(tier.min_amount <= amount);
+    assert!(tier.platform_fee_bps <= 10_000);
+}
+
+/// Test referral allowlist admin can add and remove referrers
+#[test]
+fn test_referral_allowlist_admin_can_manage_referrers() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let referrer1 = Address::generate(&env);
+    let referrer2 = Address::generate(&env);
+
+    // Initially not in allowlist
+    assert!(!client.is_referrer_allowed(&referrer1));
+
+    // Admin adds referrer to allowlist
+    client.add_allowed_referrer(&company, &referrer1);
+    assert!(client.is_referrer_allowed(&referrer1));
+
+    // Add second referrer
+    client.add_allowed_referrer(&company, &referrer2);
+    assert!(client.is_referrer_allowed(&referrer2));
+
+    // Remove first referrer
+    client.remove_allowed_referrer(&company, &referrer1);
+    assert!(!client.is_referrer_allowed(&referrer1));
+    assert!(client.is_referrer_allowed(&referrer2));
+}
+
+/// Test get_contract_health_history returns recent snapshots in order
+#[test]
+fn test_get_contract_health_history_returns_ordered_snapshots() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Trigger first snapshot by calling get_contract_health
+    let health1 = client.get_contract_health();
+    assert_eq!(health1.total_engagement_count, 0);
+
+    // Create an engagement to change state
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-HIST-1",
+    );
+
+    // Trigger second snapshot
+    let health2 = client.get_contract_health();
+    assert_eq!(health2.total_engagement_count, 1);
+
+    // Retrieve history (most recent first)
+    let history = client.get_contract_health_history(&0, &10);
+    assert!(history.len() >= 2);
+
+    // Most recent should be first (engagement count = 1)
+    assert_eq!(history.get(0).unwrap().total_engagement_count, 1);
+    // Previous snapshot should be second (engagement count = 0)
+    assert_eq!(history.get(1).unwrap().total_engagement_count, 0);
+}
+
+/// Test referral allowlist blocks non-allowlisted referrer in create_engagement
+#[test]
+fn test_referral_allowlist_blocks_non_allowlisted_referrer() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let allowed_referrer = Address::generate(&env);
+    let blocked_referrer = Address::generate(&env);
+
+    // Add only one referrer to allowlist
+    client.add_allowed_referrer(&company, &allowed_referrer);
+
+    // Enable referral allowlist enforcement
+    client.set_referral_allowlist_enabled(&company, &true);
+
+    // Engagement with allowed referrer should succeed
+    let config_allowed = EngagementConfig {
+        metadata_hash: None,
+        co_recruiter: None,
+        recruiter_split_bps: 10_000,
+        contract_pdf_hash: None,
+        referrer: Some(allowed_referrer.clone()),
+        tags: None,
+    };
+
+    client.create_engagement(
+        &String::from_str(&env, "ENG-REF-ALLOWED"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &config_allowed,
+    );
+
+    // Engagement with blocked referrer should fail
+    let config_blocked = EngagementConfig {
+        metadata_hash: None,
+        co_recruiter: None,
+        recruiter_split_bps: 10_000,
+        contract_pdf_hash: None,
+        referrer: Some(blocked_referrer.clone()),
+        tags: None,
+    };
+
+    let result = client.try_create_engagement(
+        &String::from_str(&env, "ENG-REF-BLOCKED"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &config_blocked,
+    );
+
+    assert!(result.is_err());
+}
+
+/// Test get_contract_health_history pagination works correctly
+#[test]
+fn test_get_contract_health_history_pagination_boundary() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Generate 10 snapshots by creating engagements and calling get_contract_health
+    for i in 0..10 {
+        let id = match i {
+            0 => "ENG-HIST-00",
+            1 => "ENG-HIST-01",
+            2 => "ENG-HIST-02",
+            3 => "ENG-HIST-03",
+            4 => "ENG-HIST-04",
+            5 => "ENG-HIST-05",
+            6 => "ENG-HIST-06",
+            7 => "ENG-HIST-07",
+            8 => "ENG-HIST-08",
+            9 => "ENG-HIST-09",
+            _ => "ENG-HIST-XX",
+        };
+        create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, id);
+        let _ = client.get_contract_health(); // Trigger snapshot
+    }
+
+    // Page 0, size 5: should get 5 most recent snapshots
+    let page0 = client.get_contract_health_history(&0, &5);
+    assert_eq!(page0.len(), 5);
+    assert_eq!(page0.get(0).unwrap().total_engagement_count, 10);
+    assert_eq!(page0.get(4).unwrap().total_engagement_count, 6);
+
+    // Page 1, size 5: should get next 5 snapshots
+    let page1 = client.get_contract_health_history(&1, &5);
+    assert_eq!(page1.len(), 5);
+    assert_eq!(page1.get(0).unwrap().total_engagement_count, 5);
+    assert_eq!(page1.get(4).unwrap().total_engagement_count, 1);
+
+    // Page 2, size 5: should return empty (no more snapshots)
+    let page2 = client.get_contract_health_history(&2, &5);
+    assert_eq!(page2.len(), 0);
+}
+
 /// Test that force_confirm_milestone emits the correct event with all data
 #[test]
 fn test_force_confirm_milestone_event_contains_correct_data() {
