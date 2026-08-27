@@ -1327,7 +1327,7 @@ stellar contract invoke \
 - [x] Replacement clause with clock reset (`request_replacement`: company-only, requires confirmed Placement; resets the Placement milestone, restarts retention clocks, panics on bad preconditions, and emits the `replacement_requested` event)
 - [x] Dispute resolution via arbiter
 - [x] Flexible milestone structure (2-milestone 50/50, 3-milestone, custom)
-- [x] 11 unit tests
+- [x] Unit tests — 282 `#[test]` functions (see `cargo test` output for current count)
 - [ ] Multi-candidate engagements (multiple positions, one company-recruiter pair)
 - [ ] Partial payout on replacement (configurable replacement fee)
 - [x] Contract upgrade mechanism
