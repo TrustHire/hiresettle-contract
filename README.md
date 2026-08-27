@@ -787,6 +787,9 @@ On rejection, the engagement returns to `Active` and the recruiter must continue
 
 ### Read-Only Queries
 
+- **`get_config_snapshot()`**: Fetches all active contract configuration tunables and parameters in a single read-only call, eliminating the need for indexers to make multiple round-trips.
+
+
 All read-only functions are permissionless and require no authentication.
 
 #### Which query do I call?
