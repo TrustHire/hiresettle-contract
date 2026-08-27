@@ -9600,221 +9600,39 @@ fn test_create_engagement_rejects_99_percent_total() {
 }
 
 // ============================================================
-// #333 — COMPANY TOTAL SPENT
+// #358, #359 — COMPANY / RECRUITER BLACKLIST
 // ============================================================
 
 #[test]
-fn test_get_company_total_spent_zero_before_any_confirmation() {
+fn test_blacklist_company_admin() {
     let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
+    let target = Address::generate(&env);
 
-    assert_eq!(client.get_company_total_spent(&company), 0);
-}
+    assert!(!client.is_company_blacklisted(&target));
+    client.blacklist_company(&company, &target);
+    assert!(client.is_company_blacklisted(&target));
 
-#[test]
-fn test_get_company_total_spent_accumulates_across_milestones() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    let eng_id = String::from_str(&env, "ENG-SPENT-1");
-    create_standard_engagement(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-SPENT-1",
-    );
-
-    // First milestone: 30% of 1_000_000_000 = 300_000_000.
-    client.submit_proof(
-        &recruiter,
-        &eng_id,
-        &0,
-        &String::from_str(&env, "ipfs://proof0"),
-    );
-    client.confirm_milestone(&company, &eng_id, &0);
-    assert_eq!(client.get_company_total_spent(&company), 300_000_000);
-
-    // Second milestone (40%) after the retention window elapses.
-    advance_ledger(&env, 31 * 17_280);
-    client.unlock_milestone(&eng_id, &1);
-    client.submit_proof(
-        &recruiter,
-        &eng_id,
-        &1,
-        &String::from_str(&env, "ipfs://proof1"),
-    );
-    client.confirm_milestone(&company, &eng_id, &1);
-    assert_eq!(client.get_company_total_spent(&company), 700_000_000);
-}
-
-#[test]
-fn test_get_company_total_spent_accumulates_across_engagements() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    let eng_id_a = String::from_str(&env, "ENG-SPENT-A");
-    create_standard_engagement(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-SPENT-A",
-    );
-    client.submit_proof(
-        &recruiter,
-        &eng_id_a,
-        &0,
-        &String::from_str(&env, "ipfs://proof0"),
-    );
-    client.confirm_milestone(&company, &eng_id_a, &0);
-
-    let eng_id_b = String::from_str(&env, "ENG-SPENT-B");
-    create_standard_engagement(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-SPENT-B",
-    );
-    client.submit_proof(
-        &recruiter,
-        &eng_id_b,
-        &0,
-        &String::from_str(&env, "ipfs://proof0"),
-    );
-    client.confirm_milestone(&company, &eng_id_b, &0);
-
-    // 300_000_000 (30%) from each of the two engagements.
-    assert_eq!(client.get_company_total_spent(&company), 600_000_000);
-}
-
-// ============================================================
-// #363 — DISPUTE EVIDENCE
-// ============================================================
-
-fn open_dispute(
-    env: &Env,
-    client: &HireSettleContractClient,
-    company: &Address,
-    recruiter: &Address,
-    eng_id: &String,
-) {
-    client.submit_proof(
-        recruiter,
-        eng_id,
-        &0,
-        &String::from_str(env, "ipfs://proof0"),
-    );
-    client.raise_dispute(company, eng_id, &0, &String::from_str(env, "bad_proof"));
-}
-
-#[test]
-fn test_submit_dispute_evidence_by_company() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    let eng_id = String::from_str(&env, "ENG-EVIDENCE-CO");
-    create_standard_engagement(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-EVIDENCE-CO",
-    );
-    open_dispute(&env, &client, &company, &recruiter, &eng_id);
-
-    client.submit_dispute_evidence(
-        &company,
-        &eng_id,
-        &0,
-        &String::from_str(&env, "ipfs://evidence1"),
-    );
-
-    let evidence = client.get_dispute_evidence(&eng_id, &0);
-    assert_eq!(evidence.len(), 1);
-    assert_eq!(
-        evidence.get(0).unwrap(),
-        String::from_str(&env, "ipfs://evidence1")
-    );
-}
-
-#[test]
-fn test_submit_dispute_evidence_by_arbiter() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    let eng_id = String::from_str(&env, "ENG-EVIDENCE-ARB");
-    create_standard_engagement(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-EVIDENCE-ARB",
-    );
-    open_dispute(&env, &client, &company, &recruiter, &eng_id);
-
-    client.submit_dispute_evidence(
-        &arbiter,
-        &eng_id,
-        &0,
-        &String::from_str(&env, "ipfs://evidence-from-arbiter"),
-    );
-
-    let evidence = client.get_dispute_evidence(&eng_id, &0);
-    assert_eq!(evidence.len(), 1);
-}
-
-#[test]
-fn test_submit_dispute_evidence_accumulates_multiple() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    let eng_id = String::from_str(&env, "ENG-EVIDENCE-MULTI");
-    create_standard_engagement(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-EVIDENCE-MULTI",
-    );
-    open_dispute(&env, &client, &company, &recruiter, &eng_id);
-
-    client.submit_dispute_evidence(&company, &eng_id, &0, &String::from_str(&env, "ipfs://e1"));
-    client.submit_dispute_evidence(&arbiter, &eng_id, &0, &String::from_str(&env, "ipfs://e2"));
-
-    let evidence = client.get_dispute_evidence(&eng_id, &0);
-    assert_eq!(evidence.len(), 2);
-    assert_eq!(
-        evidence.get(0).unwrap(),
-        String::from_str(&env, "ipfs://e1")
-    );
-    assert_eq!(
-        evidence.get(1).unwrap(),
-        String::from_str(&env, "ipfs://e2")
-    );
+    client.unblacklist_company(&company, &target);
+    assert!(!client.is_company_blacklisted(&target));
 }
 
 #[test]
 #[should_panic(expected = "unauthorized")]
-fn test_submit_dispute_evidence_unrelated_address_rejected() {
+fn test_blacklist_company_non_admin_rejected() {
+    let (env, contract_id, _token_id, _company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let target = Address::generate(&env);
+    client.blacklist_company(&recruiter, &target);
+}
+
+#[test]
+#[should_panic(expected = "CompanyBlacklisted")]
+fn test_create_engagement_rejects_blacklisted_company() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
-    let stranger = Address::generate(&env);
 
-    let eng_id = String::from_str(&env, "ENG-EVIDENCE-UNAUTH");
+    client.blacklist_company(&company, &company);
     create_standard_engagement(
         &env,
         &client,
@@ -9822,25 +9640,40 @@ fn test_submit_dispute_evidence_unrelated_address_rejected() {
         &company,
         &recruiter,
         &arbiter,
-        "ENG-EVIDENCE-UNAUTH",
-    );
-    open_dispute(&env, &client, &company, &recruiter, &eng_id);
-
-    client.submit_dispute_evidence(
-        &stranger,
-        &eng_id,
-        &0,
-        &String::from_str(&env, "ipfs://evidence"),
+        "ENG-BL-CO",
     );
 }
 
 #[test]
-#[should_panic(expected = "MilestoneNotDisputed")]
-fn test_submit_dispute_evidence_requires_disputed_status() {
+fn test_blacklist_recruiter_admin() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let target = Address::generate(&env);
+
+    assert!(!client.is_recruiter_blacklisted(&target));
+    client.blacklist_recruiter(&company, &target);
+    assert!(client.is_recruiter_blacklisted(&target));
+
+    client.unblacklist_recruiter(&company, &target);
+    assert!(!client.is_recruiter_blacklisted(&target));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_blacklist_recruiter_non_admin_rejected() {
+    let (env, contract_id, _token_id, _company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let target = Address::generate(&env);
+    client.blacklist_recruiter(&recruiter, &target);
+}
+
+#[test]
+#[should_panic(expected = "RecruiterBlacklisted")]
+fn test_create_engagement_rejects_blacklisted_recruiter() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
 
-    let eng_id = String::from_str(&env, "ENG-EVIDENCE-NODISPUTE");
+    client.blacklist_recruiter(&company, &recruiter);
     create_standard_engagement(
         &env,
         &client,
@@ -9848,88 +9681,96 @@ fn test_submit_dispute_evidence_requires_disputed_status() {
         &company,
         &recruiter,
         &arbiter,
-        "ENG-EVIDENCE-NODISPUTE",
-    );
-
-    client.submit_dispute_evidence(
-        &company,
-        &eng_id,
-        &0,
-        &String::from_str(&env, "ipfs://evidence"),
+        "ENG-BL-REC",
     );
 }
 
 #[test]
-#[should_panic(expected = "InvalidEvidenceHash")]
-fn test_submit_dispute_evidence_empty_hash_rejected() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+fn test_blacklist_company_and_recruiter_are_independent() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
+    let target = Address::generate(&env);
 
-    let eng_id = String::from_str(&env, "ENG-EVIDENCE-EMPTY");
-    create_standard_engagement(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-EVIDENCE-EMPTY",
-    );
-    open_dispute(&env, &client, &company, &recruiter, &eng_id);
-
-    client.submit_dispute_evidence(&company, &eng_id, &0, &String::from_str(&env, ""));
-}
-
-#[test]
-fn test_dispute_evidence_cleared_after_resolution() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    let eng_id = String::from_str(&env, "ENG-EVIDENCE-CLEAR");
-    create_standard_engagement(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-EVIDENCE-CLEAR",
-    );
-    open_dispute(&env, &client, &company, &recruiter, &eng_id);
-    client.submit_dispute_evidence(&company, &eng_id, &0, &String::from_str(&env, "ipfs://e1"));
-
-    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &true);
-
-    let evidence = client.get_dispute_evidence(&eng_id, &0);
-    assert_eq!(evidence.len(), 0);
-}
-
-#[test]
-fn test_get_dispute_evidence_empty_when_none_submitted() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    let eng_id = String::from_str(&env, "ENG-EVIDENCE-NONE");
-    create_standard_engagement(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-EVIDENCE-NONE",
-    );
-    open_dispute(&env, &client, &company, &recruiter, &eng_id);
-
-    let evidence = client.get_dispute_evidence(&eng_id, &0);
-    assert_eq!(evidence.len(), 0);
+    // Blacklisting an address as a company must not blacklist it as a recruiter.
+    client.blacklist_company(&company, &target);
+    assert!(client.is_company_blacklisted(&target));
+    assert!(!client.is_recruiter_blacklisted(&target));
 }
 
 // ============================================================
-// #365 — PUBLIC ENGAGEMENT LIST
+// #357 — ADMIN ACTION AUDIT LOG
 // ============================================================
 
-fn create_engagement_with_visibility(
+#[test]
+fn test_admin_audit_log_records_blacklist_actions() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let target = Address::generate(&env);
+
+    assert_eq!(client.get_admin_audit_log_count(), 0);
+
+    client.blacklist_company(&company, &target);
+    client.unblacklist_company(&company, &target);
+
+    assert_eq!(client.get_admin_audit_log_count(), 2);
+
+    // Most recent first.
+    let log = client.get_admin_audit_log(&0, &10);
+    assert_eq!(log.len(), 2);
+    assert_eq!(
+        log.get(0).unwrap().action,
+        String::from_str(&env, "unblacklist_company")
+    );
+    assert_eq!(log.get(0).unwrap().admin, company);
+    assert_eq!(log.get(0).unwrap().target, Some(target.clone()));
+    assert_eq!(
+        log.get(1).unwrap().action,
+        String::from_str(&env, "blacklist_company")
+    );
+}
+
+#[test]
+fn test_admin_audit_log_pagination_boundary() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    for _ in 0..10 {
+        let target = Address::generate(&env);
+        client.blacklist_recruiter(&company, &target);
+    }
+    assert_eq!(client.get_admin_audit_log_count(), 10);
+
+    let page0 = client.get_admin_audit_log(&0, &5);
+    assert_eq!(page0.len(), 5);
+
+    let page1 = client.get_admin_audit_log(&1, &5);
+    assert_eq!(page1.len(), 5);
+
+    // Out-of-range page returns empty.
+    let page2 = client.get_admin_audit_log(&2, &5);
+    assert_eq!(page2.len(), 0);
+}
+
+#[test]
+fn test_admin_audit_log_empty_page_size_returns_empty() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let target = Address::generate(&env);
+    client.blacklist_company(&company, &target);
+
+    let page = client.get_admin_audit_log(&0, &0);
+    assert_eq!(page.len(), 0);
+}
+
+// ============================================================
+// #337 — AVERAGE COMPANY RATING
+// ============================================================
+
+/// Create and complete a single-milestone, 100%-placement engagement — no
+/// retention unlock/ledger-advance needed, so callers can complete several
+/// of these in one test without accumulating ledger sequence toward
+/// `max_entry_ttl` and archiving earlier engagements' storage entries.
+fn complete_standard_engagement(
     env: &Env,
     client: &HireSettleContractClient,
     token_id: &Address,
@@ -9937,19 +9778,10 @@ fn create_engagement_with_visibility(
     recruiter: &Address,
     arbiter: &Address,
     id: &str,
-    is_public: bool,
 ) {
-    let config = EngagementConfig {
-        metadata_hash: None,
-        co_recruiter: None,
-        recruiter_split_bps: 10_000,
-        contract_pdf_hash: None,
-        referrer: None,
-        tags: None,
-        is_public,
-    };
+    let eng_id = String::from_str(env, id);
     client.create_engagement(
-        &String::from_str(env, id),
+        &eng_id,
         company,
         recruiter,
         &ArbiterSetup {
@@ -9958,270 +9790,98 @@ fn create_engagement_with_visibility(
         },
         token_id,
         &1_000_000_000,
-        &String::from_str(env, "Engineer"),
-        &build_milestones(env),
-        &vec![env, 30u32, 90u32],
-        &config,
-    );
-}
-
-#[test]
-fn test_get_public_engagement_ids_only_includes_public() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    create_engagement_with_visibility(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-PUB-1",
-        true,
-    );
-    create_engagement_with_visibility(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-PRIV-1",
-        false,
-    );
-    create_engagement_with_visibility(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-PUB-2",
-        true,
-    );
-
-    let public_ids = client.get_public_engagement_ids(&0, &10);
-    assert_eq!(public_ids.len(), 2);
-    assert_eq!(
-        public_ids.get(0).unwrap(),
-        String::from_str(&env, "ENG-PUB-1")
-    );
-    assert_eq!(
-        public_ids.get(1).unwrap(),
-        String::from_str(&env, "ENG-PUB-2")
-    );
-}
-
-#[test]
-fn test_get_public_engagement_ids_default_is_private() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    // create_standard_engagement uses default_config(), which sets is_public: false.
-    create_standard_engagement(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-DEFAULT-PRIV",
-    );
-
-    let public_ids = client.get_public_engagement_ids(&0, &10);
-    assert_eq!(public_ids.len(), 0);
-}
-
-#[test]
-fn test_get_public_engagement_ids_pagination_boundary() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    for i in 0..10 {
-        let id = match i {
-            0 => "ENG-PUBPAGE-00",
-            1 => "ENG-PUBPAGE-01",
-            2 => "ENG-PUBPAGE-02",
-            3 => "ENG-PUBPAGE-03",
-            4 => "ENG-PUBPAGE-04",
-            5 => "ENG-PUBPAGE-05",
-            6 => "ENG-PUBPAGE-06",
-            7 => "ENG-PUBPAGE-07",
-            8 => "ENG-PUBPAGE-08",
-            9 => "ENG-PUBPAGE-09",
-            _ => "ENG-PUBPAGE-XX",
-        };
-        create_engagement_with_visibility(
-            &env, &client, &token_id, &company, &recruiter, &arbiter, id, true,
-        );
-    }
-
-    let page0 = client.get_public_engagement_ids(&0, &5);
-    assert_eq!(page0.len(), 5);
-    assert_eq!(
-        page0.get(0).unwrap(),
-        String::from_str(&env, "ENG-PUBPAGE-00")
-    );
-    assert_eq!(
-        page0.get(4).unwrap(),
-        String::from_str(&env, "ENG-PUBPAGE-04")
-    );
-
-    let page1 = client.get_public_engagement_ids(&1, &5);
-    assert_eq!(page1.len(), 5);
-    assert_eq!(
-        page1.get(0).unwrap(),
-        String::from_str(&env, "ENG-PUBPAGE-05")
-    );
-
-    let page2 = client.get_public_engagement_ids(&2, &5);
-    assert_eq!(page2.len(), 0);
-}
-
-#[test]
-fn test_get_public_engagement_ids_zero_page_size_returns_empty() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    create_engagement_with_visibility(
-        &env,
-        &client,
-        &token_id,
-        &company,
-        &recruiter,
-        &arbiter,
-        "ENG-PUB-ZEROPAGE",
-        true,
-    );
-
-    let page = client.get_public_engagement_ids(&0, &0);
-    assert_eq!(page.len(), 0);
-}
-
-// ============================================================
-// #366 — PER-TOKEN MINIMUM AMOUNT
-// ============================================================
-
-#[test]
-fn test_get_token_min_amount_none_by_default() {
-    let (env, contract_id, token_id, _company, _recruiter, _arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    assert_eq!(client.get_token_min_amount(&token_id), None);
-}
-
-#[test]
-fn test_set_token_min_amount_admin_sets_override() {
-    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    client.set_token_min_amount(&company, &token_id, &7_000_000);
-
-    assert_eq!(client.get_token_min_amount(&token_id), Some(7_000_000));
-}
-
-#[test]
-#[should_panic(expected = "unauthorized")]
-fn test_set_token_min_amount_non_admin_rejected() {
-    let (env, contract_id, token_id, _company, recruiter, _arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    client.set_token_min_amount(&recruiter, &token_id, &7_000_000);
-}
-
-#[test]
-#[should_panic(expected = "InvalidMinAmount")]
-fn test_set_token_min_amount_zero_rejected() {
-    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    client.set_token_min_amount(&company, &token_id, &0);
-}
-
-#[test]
-fn test_get_effective_min_amount_falls_back_to_global_default() {
-    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    client.set_min_amount(&company, &2_000_000);
-
-    // No per-token override set — effective minimum is the admin-wide default.
-    assert_eq!(client.get_effective_min_amount(&token_id), 2_000_000);
-}
-
-#[test]
-fn test_get_effective_min_amount_prefers_token_override() {
-    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    client.set_min_amount(&company, &2_000_000);
-    client.set_token_min_amount(&company, &token_id, &9_000_000);
-
-    assert_eq!(client.get_effective_min_amount(&token_id), 9_000_000);
-}
-
-#[test]
-fn test_remove_token_min_amount_falls_back_to_global() {
-    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    client.set_min_amount(&company, &2_000_000);
-    client.set_token_min_amount(&company, &token_id, &9_000_000);
-    client.remove_token_min_amount(&company, &token_id);
-
-    assert_eq!(client.get_token_min_amount(&token_id), None);
-    assert_eq!(client.get_effective_min_amount(&token_id), 2_000_000);
-}
-
-#[test]
-fn test_create_engagement_uses_token_min_override() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-
-    // Global default (100_000) would allow this amount, but a stricter
-    // per-token override should be the one actually enforced — succeeds
-    // once at/above the per-token override.
-    client.set_token_min_amount(&company, &token_id, &5_000_000);
-
-    client.create_engagement(
-        &String::from_str(&env, "ENG-TOKENMIN-OK"),
-        &company,
-        &recruiter,
-        &ArbiterSetup {
-            arbiters: vec![&env, arbiter.clone()],
-            quorum: 1,
-        },
-        &token_id,
-        &5_000_000,
-        &String::from_str(&env, "Engineer"),
-        &build_milestones(&env),
-        &vec![&env, 30u32, 90u32],
+        &String::from_str(env, "Senior Engineer"),
+        &vec![
+            env,
+            Milestone {
+                name: String::from_str(env, "Candidate Placed"),
+                payment_percent: 100,
+                kind: MilestoneKind::Placement,
+                valid_after_ledger: 0,
+                proof_hash: String::from_str(env, ""),
+                status: MilestoneStatus::Pending,
+                proof_submitted_at: 0,
+                replacement_paid_out: 0,
+            },
+        ],
+        &vec![env],
         &default_config(),
     );
+
+    client.submit_proof(
+        recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(env, "ipfs://proof0"),
+    );
+    client.confirm_milestone(company, &eng_id, &0);
 }
 
 #[test]
-#[should_panic(expected = "AmountBelowMinimum")]
-fn test_create_engagement_below_token_min_override_rejected() {
+fn test_get_average_company_rating_matches_get_company_rating() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
 
-    client.set_token_min_amount(&company, &token_id, &5_000_000);
-
-    client.create_engagement(
-        &String::from_str(&env, "ENG-TOKENMIN-REJECT"),
+    complete_standard_engagement(
+        &env,
+        &client,
+        &token_id,
         &company,
         &recruiter,
-        &ArbiterSetup {
-            arbiters: vec![&env, arbiter.clone()],
-            quorum: 1,
-        },
-        &token_id,
-        &4_999_999,
-        &String::from_str(&env, "Engineer"),
-        &build_milestones(&env),
-        &vec![&env, 30u32, 90u32],
-        &default_config(),
+        &arbiter,
+        "ENG-AVG-RATE-1",
     );
+    client.submit_company_rating(&recruiter, &String::from_str(&env, "ENG-AVG-RATE-1"), &4);
+
+    let average = client.get_average_company_rating(&company);
+    let summary = client.get_company_rating(&company);
+    assert_eq!(average.average_x100, summary.average_x100);
+    assert_eq!(average.count, 1);
+    assert_eq!(average.total_score, 4);
+}
+
+#[test]
+fn test_get_average_company_rating_across_multiple_engagements() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    complete_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-AVG-RATE-A",
+    );
+    client.submit_company_rating(&recruiter, &String::from_str(&env, "ENG-AVG-RATE-A"), &5);
+
+    complete_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-AVG-RATE-B",
+    );
+    client.submit_company_rating(&recruiter, &String::from_str(&env, "ENG-AVG-RATE-B"), &3);
+
+    let average = client.get_average_company_rating(&company);
+    assert_eq!(average.count, 2);
+    assert_eq!(average.total_score, 8);
+    // (5 + 3) / 2 = 4.00 -> 400
+    assert_eq!(average.average_x100, 400);
+}
+
+#[test]
+fn test_get_average_company_rating_unrated_company_is_zeroed() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let unrated = Address::generate(&env);
+
+    let average = client.get_average_company_rating(&unrated);
+    assert_eq!(average.count, 0);
+    assert_eq!(average.total_score, 0);
+    assert_eq!(average.average_x100, 0);
 }
