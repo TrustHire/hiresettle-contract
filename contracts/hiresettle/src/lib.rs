@@ -1201,6 +1201,41 @@ impl HireSettleContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
+    /// Admin removes a single fee tier by its `threshold` without replacing
+    /// the whole list. Panics if no tier with the given threshold exists.
+    /// Remaining tiers keep their relative order; the invariant that thresholds
+    /// are strictly ascending is preserved automatically.
+    pub fn remove_fee_tier(env: Env, admin: Address, threshold: i128) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+
+        let tiers: Vec<FeeTier> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeeTiers)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let pos = tiers.iter().position(|t| t.threshold == threshold);
+        match pos {
+            Some(index) => {
+                let mut new_tiers = Vec::new(&env);
+                for (i, tier) in tiers.iter().enumerate() {
+                    if i != index {
+                        new_tiers.push_back(tier.clone());
+                    }
+                }
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::FeeTiers, &new_tiers);
+                env.events().publish(
+                    (Symbol::new(&env, "fee_tier_removed"),),
+                    threshold,
+                );
+            }
+            None => panic!("fee tier not found"),
+        }
+    }
+
     /// Admin sets the contract version string (issue #16).
     /// `version` must be ≤ 32 characters.
     /// Panics with "VersionTooLong" if version exceeds 32 chars.
