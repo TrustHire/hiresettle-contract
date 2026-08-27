@@ -10077,3 +10077,121 @@ fn test_get_average_company_rating_unrated_company_is_zeroed() {
     assert_eq!(average.total_score, 0);
     assert_eq!(average.average_x100, 0);
 }
+
+// ============================================================
+// remove_fee_tier — admin can delete a single fee tier
+// ============================================================
+
+/// Admin can remove a single fee tier by threshold without replacing the whole list.
+#[test]
+fn test_remove_fee_tier_deletes_single_tier() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Set up three tiers
+    let tiers = vec![
+        &env,
+        FeeTier {
+            threshold: 1_000_000,
+            bps: 400,
+        },
+        FeeTier {
+            threshold: 10_000_000,
+            bps: 300,
+        },
+        FeeTier {
+            threshold: 100_000_000,
+            bps: 200,
+        },
+    ];
+    client.set_fee_tiers(&company, &tiers);
+    assert_eq!(client.get_fee_tiers().len(), 3);
+
+    // Remove the middle tier
+    client.remove_fee_tier(&company, &10_000_000);
+
+    // Should have 2 tiers left
+    let remaining = client.get_fee_tiers();
+    assert_eq!(remaining.len(), 2);
+    assert_eq!(remaining.get(0).unwrap().threshold, 1_000_000);
+    assert_eq!(remaining.get(0).unwrap().bps, 400);
+    assert_eq!(remaining.get(1).unwrap().threshold, 100_000_000);
+    assert_eq!(remaining.get(1).unwrap().bps, 200);
+}
+
+/// Removing a non-existent tier should panic.
+#[test]
+#[should_panic(expected = "fee tier not found")]
+fn test_remove_fee_tier_nonexistent_panics() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Set up one tier
+    let tiers = vec![
+        &env,
+        FeeTier {
+            threshold: 1_000_000,
+            bps: 400,
+        },
+    ];
+    client.set_fee_tiers(&company, &tiers);
+
+    // Try to remove a tier that doesn't exist
+    client.remove_fee_tier(&company, &5_000_000);
+}
+
+/// Removing the only tier should result in an empty list (flat fee).
+#[test]
+fn test_remove_fee_tier_last_tier_empties_list() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Set up one tier
+    let tiers = vec![
+        &env,
+        FeeTier {
+            threshold: 1_000_000,
+            bps: 400,
+        },
+    ];
+    client.set_fee_tiers(&company, &tiers);
+    assert_eq!(client.get_fee_tiers().len(), 1);
+
+    // Remove it
+    client.remove_fee_tier(&company, &1_000_000);
+
+    // Should be empty now
+    assert_eq!(client.get_fee_tiers().len(), 0);
+}
+
+/// Non-admin cannot remove a fee tier.
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_remove_fee_tier_non_admin_rejected() {
+    let (env, contract_id, _token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Set up one tier as admin
+    let tiers = vec![
+        &env,
+        FeeTier {
+            threshold: 1_000_000,
+            bps: 400,
+        },
+    ];
+    client.set_fee_tiers(&company, &tiers);
+
+    // Non-admin tries to remove
+    client.remove_fee_tier(&recruiter, &1_000_000);
+}
+
+/// Removing a tier from an empty list should panic.
+#[test]
+#[should_panic(expected = "fee tier not found")]
+fn test_remove_fee_tier_from_empty_list_panics() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // No tiers set - try to remove one
+    client.remove_fee_tier(&company, &1_000_000);
+}
