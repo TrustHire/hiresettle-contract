@@ -556,12 +556,28 @@ pub struct ConfigSnapshot {
 #[derive(Clone)]
 pub enum EscrowLifecycleAction {
     /// Escrow balance increased when an engagement was initially funded.
+    ///
+    /// Reserved / forward-looking extension point for yield-strategy
+    /// integrations; emitted only when the admin has enabled callback
+    /// checkpoints and set a callback target address.
     Funded,
     /// Escrow balance increased from a later top-up.
+    ///
+    /// Reserved / forward-looking extension point for yield-strategy
+    /// integrations; emitted only when the admin has enabled callback
+    /// checkpoints and set a callback target address.
     ToppedUp,
     /// Escrow balance decreased to pay milestone proceeds.
+    ///
+    /// Reserved / forward-looking extension point for yield-strategy
+    /// integrations; emitted only when the admin has enabled callback
+    /// checkpoints and set a callback target address.
     PayoutReleased,
     /// Escrow balance decreased due to a refund back to company.
+    ///
+    /// Reserved / forward-looking extension point for yield-strategy
+    /// integrations; emitted only when the admin has enabled callback
+    /// checkpoints and set a callback target address.
     Refunded,
 }
 
@@ -733,18 +749,20 @@ pub enum DataKey {
     /// path — either by an explicit `super_arbiter_resolve` call or by
     /// `resolve_escalation_timeout` (issue #317).
     SuperArbiterResolutionCount,
-    /// Whether an address is currently blacklisted from participating in new
-    /// engagements (issue #360). Admin-gated; persistent.
-    Blacklisted(Address),
-    /// Additional proof attachment hashes for (engagement_id, milestone_index),
-    /// appended alongside the milestone's primary `proof_hash` (issue #361).
-    MilestoneAttachments(String, u32),
-    /// Whether an engagement is flagged public for off-chain analytics
-    /// indexing (issue #364). Defaults to `true` (public) when unset.
-    EngagementVisibility(String),
-    /// Evidence hash attached by a party to a disputed (engagement_id,
-    /// milestone_index) (issue #362).
-    DisputeEvidence(String, u32),
+    /// Running total of net milestone payouts ever paid to a recruiter
+    /// address (issue #332), across every engagement. Credited wherever
+    /// `distribute_recruiter_payout` releases funds, so it reflects the
+    /// after-fee amount actually received, not the gross milestone payment.
+    RecruiterTotalEarnings(Address),
+    /// Running total of platform-fee amounts ever collected into the
+    /// treasury for a given token (issue #334). Credited alongside every
+    /// `platform_fee_collected` event; distinct tokens accumulate
+    /// independently since fees are paid in the engagement's escrow token.
+    PlatformTreasuryBalance(Address),
+    /// Whether the platform fee has been waived (zeroed) for a specific
+    /// engagement by the admin (issue #335). When `true`, every milestone
+    /// payout on this engagement skips platform-fee collection entirely.
+    FeeWaived(String),
 }
 
 // ============================================================
@@ -885,6 +903,61 @@ impl HireSettleContract {
     pub fn get_platform_fee(env: Env) -> (u32, Address) {
         let fee = Self::get_platform_fee_internal(&env);
         (fee.bps, fee.treasury)
+    }
+
+    /// Return the accumulated platform-fee balance ever collected into the
+    /// treasury for `token` (issue #334).
+    ///
+    /// Sums every `platform_fee_collected` transfer made in that token across
+    /// all engagements, from `confirm_milestone`, `execute_scheduled_auto_confirm`,
+    /// `batch_confirm_milestones`, and `force_confirm_milestone`. Arbiter fees
+    /// (paid to arbiters, not the treasury) are not included. A token that has
+    /// never generated fees returns `0` rather than panicking.
+    ///
+    /// Read-only and permissionless.
+    pub fn get_platform_treasury_balance(env: Env, token: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PlatformTreasuryBalance(token))
+            .unwrap_or(0)
+    }
+
+    /// Admin waives the platform fee for a single engagement (issue #335),
+    /// zeroing it for every future milestone payout on that engagement
+    /// regardless of the contract-wide fee, fee tiers, or referral discount.
+    /// Idempotent — waiving an already-waived engagement is a no-op.
+    ///
+    /// Does not retroactively refund fees already collected before the
+    /// waiver was granted.
+    ///
+    /// # Panics
+    /// - `"NoAdmin"` — the admin role has been permanently renounced.
+    /// - `"unauthorized"` — caller is not the current admin.
+    /// - `"engagement not found"` — no engagement with this ID.
+    ///
+    /// # Events
+    /// Emits `("platform_fee_waived", engagement_id)` with `(admin,)`.
+    pub fn waive_platform_fee(env: Env, admin: Address, engagement_id: String) {
+        Self::assert_admin(&env, &admin);
+        // Confirms the engagement exists before recording the waiver.
+        Self::get_engagement_internal(&env, &engagement_id);
+
+        let key = DataKey::FeeWaived(engagement_id.clone());
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (Symbol::new(&env, "platform_fee_waived"), engagement_id),
+            (admin,),
+        );
+    }
+
+    /// Return whether the platform fee has been waived for `engagement_id`
+    /// (issue #335).
+    pub fn is_fee_waived(env: Env, engagement_id: String) -> bool {
+        Self::is_fee_waived_internal(&env, &engagement_id)
     }
 
     /// Admin adds a referrer address to the recognised referral list (issue #251).
@@ -2531,8 +2604,11 @@ impl HireSettleContract {
         let payment = full_share - milestone.replacement_paid_out;
         if payment > 0 {
             let platform_fee = Self::get_platform_fee_internal(&env);
-            let effective_bps =
-                Self::apply_referral_discount(&env, platform_fee.bps, &engagement.referrer);
+            let effective_bps = if Self::is_fee_waived_internal(&env, &engagement_id) {
+                0
+            } else {
+                Self::apply_referral_discount(&env, platform_fee.bps, &engagement.referrer)
+            };
             Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
             let fee_amount = (payment * effective_bps as i128) / 10_000;
             let net_payment = payment - fee_amount;
@@ -2545,6 +2621,7 @@ impl HireSettleContract {
                     &platform_fee.treasury,
                     &fee_amount,
                 );
+                Self::credit_treasury_balance(&env, &engagement.token, fee_amount);
                 env.events().publish(
                     (
                         Symbol::new(&env, "platform_fee_collected"),
@@ -2808,9 +2885,13 @@ impl HireSettleContract {
         let payment = full_share - milestone.replacement_paid_out;
         if payment > 0 {
             let platform_fee = Self::get_platform_fee_internal(&env);
-            let base_bps =
-                Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
-            let effective_bps = Self::apply_referral_discount(&env, base_bps, &engagement.referrer);
+            let effective_bps = if Self::is_fee_waived_internal(&env, &engagement_id) {
+                0
+            } else {
+                let base_bps =
+                    Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
+                Self::apply_referral_discount(&env, base_bps, &engagement.referrer)
+            };
             let fee_amount = (payment * effective_bps as i128) / 10_000;
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
@@ -2822,6 +2903,7 @@ impl HireSettleContract {
                     &platform_fee.treasury,
                     &fee_amount,
                 );
+                Self::credit_treasury_balance(&env, &engagement.token, fee_amount);
                 env.events().publish(
                     (
                         Symbol::new(&env, "platform_fee_collected"),
@@ -5512,6 +5594,21 @@ impl HireSettleContract {
         Self::rating_summary(&env, &DataKey::RecruiterRating(recruiter))
     }
 
+    /// Return a recruiter's mean feedback rating across every engagement
+    /// that has rated them (issue #336).
+    ///
+    /// A thin convenience wrapper around [`Self::get_recruiter_rating`] that
+    /// returns just the scaled average instead of the full `RatingSummary`.
+    /// Scaled by 100 to keep two decimal places without floating point
+    /// (e.g. `425` means 4.25 stars). Returns `0` for a recruiter that has
+    /// never been rated — check `get_recruiter_rating(..).count` first if you
+    /// need to distinguish "no ratings yet" from "rated zero".
+    ///
+    /// Read-only and permissionless.
+    pub fn get_average_recruiter_rating(env: Env, recruiter: Address) -> u32 {
+        Self::rating_summary(&env, &DataKey::RecruiterRating(recruiter)).average_x100
+    }
+
     /// Return a company's aggregate feedback rating (issue #244).
     /// Mirror of [`Self::get_recruiter_rating`]; the same zeroed-summary and
     /// `count`-before-`average_x100` notes apply.
@@ -6287,6 +6384,27 @@ impl HireSettleContract {
             .get(&DataKey::RecruiterEngagements(recruiter))
             .unwrap_or_else(|| Vec::new(&env));
         ids.len()
+    }
+
+    /// Return the sum of every confirmed milestone payout ever paid to
+    /// `recruiter` across all engagements (issue #332).
+    ///
+    /// Reflects the net amount actually received — after platform fees,
+    /// arbiter fees, and (when `recruiter` is a co-recruiter) its split
+    /// share — credited from `confirm_milestone`, `execute_scheduled_auto_confirm`,
+    /// `batch_confirm_milestones`, `force_confirm_milestone`, `cast_arbiter_vote`,
+    /// `super_arbiter_resolve`, and `resolve_escalation_timeout`. Mixes
+    /// amounts across engagements paid in different tokens, so callers with
+    /// multi-token deployments should track earnings per token off-chain if
+    /// that distinction matters. An address that has never been paid returns
+    /// `0` rather than panicking.
+    ///
+    /// Read-only and permissionless.
+    pub fn get_recruiter_total_earnings(env: Env, recruiter: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::RecruiterTotalEarnings(recruiter))
+            .unwrap_or(0)
     }
 
     // ----------------------------------------------------------
@@ -7207,8 +7325,12 @@ impl HireSettleContract {
         }
 
         let platform_fee = Self::get_platform_fee_internal(&env);
-        let effective_bps =
-            Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
+        let effective_bps = Self::effective_platform_fee_bps(
+            &env,
+            &engagement_id,
+            platform_fee.bps,
+            engagement.total_amount,
+        );
         let token_client = token::Client::new(&env, &engagement.token);
 
         for i in 0..milestone_indices.len() {
@@ -7226,6 +7348,7 @@ impl HireSettleContract {
                     &platform_fee.treasury,
                     &fee_amount,
                 );
+                Self::credit_treasury_balance(&env, &engagement.token, fee_amount);
                 env.events().publish(
                     (
                         Symbol::new(&env, "platform_fee_collected"),
@@ -7410,8 +7533,12 @@ impl HireSettleContract {
         // Release payment identically to confirm_milestone.
         let payment = (engagement.total_amount * milestone.payment_percent as i128) / 100;
         let platform_fee = Self::get_platform_fee_internal(&env);
-        let effective_bps =
-            Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
+        let effective_bps = Self::effective_platform_fee_bps(
+            &env,
+            &engagement_id,
+            platform_fee.bps,
+            engagement.total_amount,
+        );
         let fee_amount = (payment * effective_bps as i128) / 10_000;
         let net_payment = payment - fee_amount;
         engagement.released_amount += payment;
@@ -7423,6 +7550,7 @@ impl HireSettleContract {
                 &platform_fee.treasury,
                 &fee_amount,
             );
+            Self::credit_treasury_balance(&env, &engagement.token, fee_amount);
             env.events().publish(
                 (
                     Symbol::new(&env, "platform_fee_collected"),
@@ -8013,6 +8141,60 @@ impl HireSettleContract {
         base_bps
     }
 
+    /// Whether the admin has waived the platform fee for this engagement
+    /// (issue #335).
+    fn is_fee_waived_internal(env: &Env, engagement_id: &String) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::FeeWaived(engagement_id.clone()))
+            .unwrap_or(false)
+    }
+
+    /// Resolve the effective platform-fee bps for a milestone payout,
+    /// collapsing to 0 when the engagement has an active fee waiver
+    /// (issue #335). Otherwise defers to `resolve_platform_fee_bps`.
+    fn effective_platform_fee_bps(
+        env: &Env,
+        engagement_id: &String,
+        base_bps: u32,
+        total_amount: i128,
+    ) -> u32 {
+        if Self::is_fee_waived_internal(env, engagement_id) {
+            return 0;
+        }
+        Self::resolve_platform_fee_bps(env, base_bps, total_amount)
+    }
+
+    /// Credit `fee_amount` of `token` into the running platform treasury
+    /// balance (issue #334). Called wherever a `platform_fee_collected`
+    /// event is emitted so the accumulator always matches fees actually
+    /// transferred to the treasury.
+    fn credit_treasury_balance(env: &Env, token: &Address, fee_amount: i128) {
+        let key = DataKey::PlatformTreasuryBalance(token.clone());
+        let balance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&key, &(balance + fee_amount));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+    }
+
+    /// Credit `amount` to the recruiter's running lifetime earnings total
+    /// (issue #332). `amount` is the net amount that address actually
+    /// receives (after platform/arbiter fees and any co-recruiter split).
+    fn credit_recruiter_earnings(env: &Env, recruiter: &Address, amount: i128) {
+        if amount <= 0 {
+            return;
+        }
+        let key = DataKey::RecruiterTotalEarnings(recruiter.clone());
+        let total: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage().persistent().set(&key, &(total + amount));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+    }
+
     /// Whether `referrer` is on the admin-configured recognised referral list.
     fn is_recognised_referrer(env: &Env, referrer: &Address) -> bool {
         let referrers: Option<Vec<Address>> = env.storage().persistent().get(&DataKey::Referrers);
@@ -8157,6 +8339,8 @@ impl HireSettleContract {
                     &primary_payment,
                 );
                 token_client.transfer(&env.current_contract_address(), co_recruiter, &co_payment);
+                Self::credit_recruiter_earnings(env, &engagement.recruiter, primary_payment);
+                Self::credit_recruiter_earnings(env, co_recruiter, co_payment);
             }
             None => {
                 token_client.transfer(
@@ -8164,6 +8348,7 @@ impl HireSettleContract {
                     &engagement.recruiter,
                     &net_payment,
                 );
+                Self::credit_recruiter_earnings(env, &engagement.recruiter, net_payment);
             }
         }
     }
