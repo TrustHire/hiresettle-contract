@@ -28,7 +28,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, token, Address, BytesN, Env, String, Symbol, Vec,
+    contract, contractimpl, contracttype, token, Address, BytesN, Env, Map, String, Symbol, Vec,
 };
 
 const MAX_PLATFORM_FEE_BPS: u32 = 500;
@@ -255,6 +255,9 @@ pub struct Engagement {
     pub referrer: Option<Address>,
     /// Optional list of short string tags for categorization (issue #248, #249).
     pub tags: Option<Vec<String>>,
+    /// Whether this engagement is listed by `get_public_engagement_ids`
+    /// (issue #365). Set at creation time from `EngagementConfig::is_public`.
+    pub is_public: bool,
 }
 
 /// A lightweight read-only view of an engagement, suitable for list/dashboard APIs.
@@ -409,6 +412,9 @@ pub struct EngagementConfig {
     pub referrer: Option<Address>,
     /// Optional list of short string tags for off-chain categorization (issue #248, #249).
     pub tags: Option<Vec<String>>,
+    /// Whether this engagement should be listed by `get_public_engagement_ids`
+    /// (issue #365). Most engagements are private; set `true` to opt in.
+    pub is_public: bool,
 }
 
 /// A single engagement configuration inside a `batch_create_engagements` call.
@@ -668,6 +674,12 @@ pub enum ConfigKey {
     /// Admin-configurable maximum number of extensions grantable per milestone
     /// (issue #323, default `DEFAULT_MAX_MILESTONE_EXTENSIONS`).
     MaxMilestoneExtensions,
+    /// Per-token minimum engagement amount overrides (issue #366), stored as a
+    /// single `Map<Address, i128>` blob keyed by token SAC address. A token
+    /// with no entry here falls back to the admin-wide `MinEngagementAmount`.
+    /// Addresses this decimals-agnostic gap without a new `DataKey` variant
+    /// per token (see the note on `add_allowed_token`, issue #175).
+    TokenMinAmounts,
 }
 
 /// Contract storage key space. Instance keys reset between transactions;
@@ -849,6 +861,11 @@ const MAX_TAG_LENGTH: u32 = 32;
 /// Default maximum number of milestone extensions allowed per milestone
 /// (issue #323).
 const DEFAULT_MAX_MILESTONE_EXTENSIONS: u32 = 3;
+/// Maximum number of evidence hashes stored per disputed milestone (issue #363).
+const MAX_DISPUTE_EVIDENCE_ITEMS: u32 = 10;
+/// Maximum length, in characters, of a single evidence hash/CID (issue #363).
+/// Mirrors `MAX_PROOF_HASH_LENGTH`.
+const MAX_DISPUTE_EVIDENCE_HASH_LENGTH: u32 = 200;
 
 /// Shared panic message constants for the most-repeated error strings
 /// (issue #171). Keeping these as constants means a typo can't silently
@@ -1217,6 +1234,53 @@ impl HireSettleContract {
             .set(&DataKey::Config(ConfigKey::MinEngagementAmount), &amount);
         env.events()
             .publish((Symbol::new(&env, "min_amount_set"),), amount);
+    }
+
+    /// Admin sets a per-token minimum engagement amount override, in that
+    /// token's own smallest unit (issue #366). Takes precedence over the
+    /// admin-wide `MinEngagementAmount` for `token` specifically, so an
+    /// allowlist mixing tokens of different `decimals()` can give each one a
+    /// sane floor instead of sharing one global value (see the gap noted on
+    /// `add_allowed_token`, issue #175). Panics with "unauthorized" if caller
+    /// is not admin, or `"InvalidMinAmount"` if `amount` is not positive.
+    pub fn set_token_min_amount(env: Env, admin: Address, token: Address, amount: i128) {
+        Self::assert_admin(&env, &admin);
+        if amount <= 0 {
+            panic!("InvalidMinAmount");
+        }
+
+        let mut overrides: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenMinAmounts))
+            .unwrap_or_else(|| Map::new(&env));
+        overrides.set(token.clone(), amount);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Config(ConfigKey::TokenMinAmounts), &overrides);
+        env.events().publish(
+            (Symbol::new(&env, "token_min_amount_set"),),
+            (token, amount),
+        );
+    }
+
+    /// Admin removes a token's minimum-amount override (issue #366), so it
+    /// falls back to the admin-wide `MinEngagementAmount`. No-op if `token`
+    /// had no override set.
+    pub fn remove_token_min_amount(env: Env, admin: Address, token: Address) {
+        Self::assert_admin(&env, &admin);
+
+        let mut overrides: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenMinAmounts))
+            .unwrap_or_else(|| Map::new(&env));
+        overrides.remove(token.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::Config(ConfigKey::TokenMinAmounts), &overrides);
+        env.events()
+            .publish((Symbol::new(&env, "token_min_amount_removed"),), token);
     }
 
     /// Pause state-changing contract operations.
@@ -1615,8 +1679,10 @@ impl HireSettleContract {
             panic!("amount must be greater than zero");
         }
 
-        // Issue #17: Minimum amount validation
-        let min_amount = Self::get_min_amount(env.clone());
+        // Issue #17 / #366: minimum amount validation, using token's
+        // per-token override if the admin has set one, else the
+        // admin-wide default.
+        let min_amount = Self::get_effective_min_amount(env.clone(), token.clone());
         if total_amount < min_amount {
             panic!("AmountBelowMinimum");
         }
@@ -1789,6 +1855,7 @@ impl HireSettleContract {
             contract_pdf_hash: config.contract_pdf_hash,
             referrer: config.referrer,
             tags: config.tags.clone(),
+            is_public: config.is_public,
         };
 
         env.storage()
@@ -2662,6 +2729,7 @@ impl HireSettleContract {
             let fee_amount = (payment * effective_bps as i128) / 10_000;
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
+            Self::record_company_spend(&env, &engagement.company, payment);
 
             let token_client = token::Client::new(&env, &engagement.token);
             if fee_amount > 0 {
@@ -2943,6 +3011,7 @@ impl HireSettleContract {
             let fee_amount = (payment * effective_bps as i128) / 10_000;
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
+            Self::record_company_spend(&env, &engagement.company, payment);
 
             let token_client = token::Client::new(&env, &engagement.token);
             if fee_amount > 0 {
@@ -3301,6 +3370,7 @@ impl HireSettleContract {
         if record.approve_votes >= quorum {
             let payment = (engagement.total_amount * milestone.payment_percent as i128) / 100;
             engagement.released_amount += payment;
+            Self::record_company_spend(&env, &engagement.company, payment);
 
             let arbiter_fee_bps: u32 = env
                 .storage()
@@ -3352,6 +3422,10 @@ impl HireSettleContract {
                 engagement_id.clone(),
                 milestone_index,
             ));
+            env.storage().persistent().remove(&DataKey::DisputeEvidence(
+                engagement_id.clone(),
+                milestone_index,
+            ));
             env.storage()
                 .persistent()
                 .remove(&DataKey::EscalatedDispute(
@@ -3395,6 +3469,10 @@ impl HireSettleContract {
                 milestone_index,
             ));
             env.storage().persistent().remove(&DataKey::DisputeRaisedAt(
+                engagement_id.clone(),
+                milestone_index,
+            ));
+            env.storage().persistent().remove(&DataKey::DisputeEvidence(
                 engagement_id.clone(),
                 milestone_index,
             ));
@@ -3627,6 +3705,7 @@ impl HireSettleContract {
         if approve {
             let payment = (engagement.total_amount * milestone.payment_percent as i128) / 100;
             engagement.released_amount += payment;
+            Self::record_company_spend(&env, &engagement.company, payment);
 
             let arbiter_fee_bps: u32 = env
                 .storage()
@@ -3678,6 +3757,10 @@ impl HireSettleContract {
                 engagement_id.clone(),
                 milestone_index,
             ));
+            env.storage().persistent().remove(&DataKey::DisputeEvidence(
+                engagement_id.clone(),
+                milestone_index,
+            ));
             env.storage().persistent().remove(&escalated_key);
             env.storage().persistent().remove(&escalated_at_key);
 
@@ -3722,6 +3805,10 @@ impl HireSettleContract {
                 milestone_index,
             ));
             env.storage().persistent().remove(&DataKey::DisputeRaisedAt(
+                engagement_id.clone(),
+                milestone_index,
+            ));
+            env.storage().persistent().remove(&DataKey::DisputeEvidence(
                 engagement_id.clone(),
                 milestone_index,
             ));
@@ -3839,6 +3926,7 @@ impl HireSettleContract {
 
         let payment = (engagement.total_amount * milestone.payment_percent as i128) / 100;
         engagement.released_amount += payment;
+        Self::record_company_spend(&env, &engagement.company, payment);
 
         let token_client = token::Client::new(&env, &engagement.token);
         Self::distribute_recruiter_payout(&env, &engagement, payment, &token_client);
@@ -3872,6 +3960,10 @@ impl HireSettleContract {
             milestone_index,
         ));
         env.storage().persistent().remove(&DataKey::DisputeRaisedAt(
+            engagement_id.clone(),
+            milestone_index,
+        ));
+        env.storage().persistent().remove(&DataKey::DisputeEvidence(
             engagement_id.clone(),
             milestone_index,
         ));
@@ -4059,6 +4151,9 @@ impl HireSettleContract {
                             env.storage()
                                 .persistent()
                                 .remove(&DataKey::DisputeRaisedAt(engagement_id.clone(), i));
+                            env.storage()
+                                .persistent()
+                                .remove(&DataKey::DisputeEvidence(engagement_id.clone(), i));
                             env.storage()
                                 .persistent()
                                 .remove(&DataKey::EscalatedDispute(engagement_id.clone(), i));
@@ -4664,6 +4759,27 @@ impl HireSettleContract {
             .persistent()
             .get(&DataKey::Config(ConfigKey::MinEngagementAmount))
             .unwrap_or(DEFAULT_MIN_ENGAGEMENT_AMOUNT)
+    }
+
+    /// Return `token`'s minimum-amount override, if the admin has set one
+    /// (issue #366). `None` means `token` uses the admin-wide
+    /// `MinEngagementAmount` instead — see `get_effective_min_amount` for the
+    /// resolved value `create_engagement` actually enforces.
+    pub fn get_token_min_amount(env: Env, token: Address) -> Option<i128> {
+        let overrides: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenMinAmounts))
+            .unwrap_or_else(|| Map::new(&env));
+        overrides.get(token)
+    }
+
+    /// Return the minimum engagement amount actually enforced for `token`
+    /// (issue #366): its per-token override if one is set, otherwise the
+    /// admin-wide `MinEngagementAmount`. This is what `create_engagement`
+    /// validates `total_amount` against.
+    pub fn get_effective_min_amount(env: Env, token: Address) -> i128 {
+        Self::get_token_min_amount(env.clone(), token).unwrap_or(Self::get_min_amount(env))
     }
 
     /// Returns the full engagement record for a given engagement ID.
@@ -6863,6 +6979,55 @@ impl HireSettleContract {
     }
 
     // ----------------------------------------------------------
+    // ISSUE #365 — PUBLIC ENGAGEMENT LIST
+    // ----------------------------------------------------------
+
+    /// Return a paginated slice of IDs for engagements marked public at
+    /// creation time (issue #365), i.e. `EngagementConfig::is_public == true`.
+    /// `page` is 0-indexed; out-of-range pages return an empty vec. Carries
+    /// the same scan cost and index-coverage caveats as
+    /// `get_engagement_ids_by_status`.
+    pub fn get_public_engagement_ids(env: Env, page: u32, page_size: u32) -> Vec<String> {
+        let mut result = Vec::new(&env);
+        if page_size == 0 {
+            return result;
+        }
+
+        let ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::AllEngagements)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let start = page.saturating_mul(page_size);
+        let end = start.saturating_add(page_size);
+
+        let mut matched: u32 = 0;
+        for i in 0..ids.len() {
+            if matched >= end {
+                break;
+            }
+            let id = ids.get(i).unwrap();
+            let engagement: Engagement = match env
+                .storage()
+                .persistent()
+                .get(&DataKey::Engagement(id.clone()))
+            {
+                Some(e) => e,
+                None => continue,
+            };
+            if engagement.is_public {
+                if matched >= start {
+                    result.push_back(id);
+                }
+                matched += 1;
+            }
+        }
+
+        result
+    }
+
+    // ----------------------------------------------------------
     // ISSUE #351 — ENGAGEMENT LIST BY AMOUNT RANGE
     // ----------------------------------------------------------
 
@@ -7257,6 +7422,20 @@ impl HireSettleContract {
             .unwrap_or(0u32)
     }
 
+    /// Return the total confirmed milestone payouts released on behalf of a
+    /// company (issue #333), summed across every engagement it has funded.
+    /// This is the gross amount before platform-fee deduction, mirroring how
+    /// each engagement's own `released_amount` is tracked. Returns `0` for a
+    /// company that has never had a milestone confirmed or resolved.
+    ///
+    /// Read-only and permissionless.
+    pub fn get_company_total_spent(env: Env, company: Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::CompanyTotalSpent(company))
+            .unwrap_or(0)
+    }
+
     // ----------------------------------------------------------
     // ISSUE #38 — INACTIVITY TIMEOUT
     // ----------------------------------------------------------
@@ -7525,6 +7704,7 @@ impl HireSettleContract {
             let fee_amount = (payment * effective_bps as i128) / 10_000;
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
+            Self::record_company_spend(&env, &engagement.company, payment);
 
             if fee_amount > 0 {
                 token_client.transfer(
@@ -7627,6 +7807,97 @@ impl HireSettleContract {
     }
 
     // ----------------------------------------------------------
+    // ISSUE #363 — DISPUTE EVIDENCE
+    // ----------------------------------------------------------
+
+    /// Attach an evidence hash (e.g. an IPFS CID) to a disputed milestone, so
+    /// arbiters have supporting material beyond the free-text `reason` string
+    /// stored by `raise_dispute` (issue #363). Kept as its own entry point,
+    /// separate from `raise_dispute`, so evidence can be submitted at any
+    /// point while the dispute is open and `raise_dispute`'s signature stays
+    /// stable.
+    ///
+    /// # Caller
+    /// The engagement's company (or its co-signer) or any address on the
+    /// engagement's arbiter panel.
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — caller is neither the company/co-signer nor an arbiter.
+    /// - `"MilestoneNotDisputed"` — the milestone is not currently `Disputed`.
+    /// - `"InvalidEvidenceHash"` — `evidence_hash` is empty or exceeds
+    ///   `MAX_DISPUTE_EVIDENCE_HASH_LENGTH` (200) characters.
+    /// - `"TooManyEvidenceItems"` — the milestone already has
+    ///   `MAX_DISPUTE_EVIDENCE_ITEMS` (10) evidence hashes stored.
+    pub fn submit_dispute_evidence(
+        env: Env,
+        caller: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        evidence_hash: String,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        caller.require_auth();
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        let is_arbiter =
+            (0..engagement.arbiters.len()).any(|i| engagement.arbiters.get(i).unwrap() == caller);
+        if !Self::is_authorized_company(&env, &caller, &engagement.company) && !is_arbiter {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.status != MilestoneStatus::Disputed {
+            panic!("MilestoneNotDisputed");
+        }
+
+        if evidence_hash.is_empty() || evidence_hash.len() > MAX_DISPUTE_EVIDENCE_HASH_LENGTH {
+            panic!("InvalidEvidenceHash");
+        }
+
+        let key = DataKey::DisputeEvidence(engagement_id.clone(), milestone_index);
+        let mut evidence: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(&env));
+
+        if evidence.len() >= MAX_DISPUTE_EVIDENCE_ITEMS {
+            panic!("TooManyEvidenceItems");
+        }
+
+        evidence.push_back(evidence_hash.clone());
+        env.storage().persistent().set(&key, &evidence);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "dispute_evidence_submitted"),
+                engagement_id,
+            ),
+            (milestone_index, evidence_hash),
+        );
+    }
+
+    /// Return the stored evidence hashes for a disputed milestone (issue #363),
+    /// in submission order. Returns an empty vec if none have been submitted.
+    ///
+    /// Read-only and permissionless.
+    pub fn get_dispute_evidence(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeEvidence(engagement_id, milestone_index))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    // ----------------------------------------------------------
     // CONFIRM WINDOW — AUTO-CONFIRM AFTER INACTION
     // ----------------------------------------------------------
 
@@ -7726,6 +7997,7 @@ impl HireSettleContract {
         let fee_amount = (payment * effective_bps as i128) / 10_000;
         let net_payment = payment - fee_amount;
         engagement.released_amount += payment;
+        Self::record_company_spend(&env, &engagement.company, payment);
 
         let token_client = token::Client::new(&env, &engagement.token);
         if fee_amount > 0 {
@@ -8515,6 +8787,23 @@ impl HireSettleContract {
             &DataKey::CompanyActiveCount(company.clone()),
             &active_count.saturating_sub(1),
         );
+    }
+
+    /// Add `payment` (the gross, pre-fee milestone payout) to `company`'s
+    /// running total-spent tally (issue #333). Called from every payout-release
+    /// path alongside its `engagement.released_amount += payment` update, so
+    /// the two figures always move together.
+    fn record_company_spend(env: &Env, company: &Address, payment: i128) {
+        let total: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CompanyTotalSpent(company.clone()))
+            .unwrap_or(0);
+        let key = DataKey::CompanyTotalSpent(company.clone());
+        env.storage().persistent().set(&key, &(total + payment));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
     }
 
     // ----------------------------------------------------------
