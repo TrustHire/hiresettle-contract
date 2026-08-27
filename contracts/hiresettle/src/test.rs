@@ -8763,6 +8763,469 @@ fn test_multiple_companies_independent_active_counts() {
     assert_eq!(client.get_engagement_count(), 3);
 }
 
+// ============================================================
+// ADDITIONAL 10 COMPREHENSIVE TESTS
+// ============================================================
+
+/// Test that duplicate arbiter addresses in arbiters list are rejected
+#[test]
+#[should_panic(expected = "DuplicateArbiter")]
+fn test_create_engagement_rejects_duplicate_arbiter() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.create_engagement(
+        &String::from_str(&env, "ENG-DUP-ARB"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone(), arbiter.clone()],
+            quorum: 1,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+}
+
+/// Test that quorum must be at least 1 and not exceed arbiter count
+#[test]
+#[should_panic(expected = "InvalidQuorum")]
+fn test_create_engagement_rejects_zero_quorum() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.create_engagement(
+        &String::from_str(&env, "ENG-ZERO-Q"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 0,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+}
+
+/// Test that quorum cannot exceed number of arbiters
+#[test]
+#[should_panic(expected = "InvalidQuorum")]
+fn test_create_engagement_rejects_quorum_exceeding_arbiters() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+
+    client.create_engagement(
+        &String::from_str(&env, "ENG-HIGH-Q"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, a1, a2, arbiter.clone()],
+            quorum: 4, // More than 3 arbiters
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+}
+
+/// Test that milestone unlock correctly handles multiple sequential retention windows
+#[test]
+fn test_sequential_retention_milestones_unlock_in_order() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-SEQ-UNLOCK");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-SEQ-UNLOCK",
+    );
+
+    // Initially, only placement is pending, retentions are locked
+    let m0 = client.get_milestone(&eng_id, &0);
+    let m1 = client.get_milestone(&eng_id, &1);
+    let m2 = client.get_milestone(&eng_id, &2);
+    assert_eq!(m0.status, MilestoneStatus::Pending);
+    assert_eq!(m1.status, MilestoneStatus::Locked);
+    assert_eq!(m2.status, MilestoneStatus::Locked);
+
+    // Advance to 30-day window
+    advance_ledger(&env, 30 * 17_280 + 1);
+    assert!(client.is_milestone_unlockable(&eng_id, &1));
+    assert!(!client.is_milestone_unlockable(&eng_id, &2));
+
+    client.unlock_milestone(&eng_id, &1);
+    let m1 = client.get_milestone(&eng_id, &1);
+    assert_eq!(m1.status, MilestoneStatus::Pending);
+
+    // Advance to 90-day window (60 more days)
+    advance_ledger(&env, 60 * 17_280);
+    assert!(client.is_milestone_unlockable(&eng_id, &2));
+
+    client.unlock_milestone(&eng_id, &2);
+    let m2 = client.get_milestone(&eng_id, &2);
+    assert_eq!(m2.status, MilestoneStatus::Pending);
+}
+
+/// Test that amendment log correctly handles cap of 20 entries with FIFO eviction
+#[test]
+fn test_amendment_log_fifo_eviction_at_cap() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-AMEND-FIFO");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-AMEND-FIFO",
+    );
+
+    // Make 25 amendments to exceed the 20-entry cap
+    for i in 0..25 {
+        let percent = 30u32 + (i % 20);
+        if i % 2 == 0 {
+            client.propose_amendment(&company, &eng_id, &0, &percent);
+            client.accept_amendment(&recruiter, &eng_id, &0);
+        } else {
+            client.propose_amendment(&recruiter, &eng_id, &0, &percent);
+            client.accept_amendment(&company, &eng_id, &0);
+        }
+    }
+
+    let log = client.get_amendment_log(&eng_id, &0);
+    assert_eq!(log.len(), 20);
+
+    // First 5 entries should be evicted, so oldest visible should be from amendment #5
+    // Most recent is amendment #24
+    let newest = log.get(0).unwrap();
+    let oldest = log.get(19).unwrap();
+
+    // Amendment #24: 30 + (24 % 20) = 30 + 4 = 34
+    assert_eq!(newest.new_payment_percent, 34);
+
+    // Amendment #5: 30 + (5 % 20) = 30 + 5 = 35
+    assert_eq!(oldest.new_payment_percent, 35);
+}
+
+/// Test that arbiter fee deduction works correctly with unanimous quorum (all must approve)
+#[test]
+fn test_arbiter_fee_with_unanimous_quorum() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+
+    client.set_arbiter_fee(&company, &100u32); // 1%
+
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let a3 = Address::generate(&env);
+
+    let eng_id = String::from_str(&env, "ENG-ARB-FEE-UNAN");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
+            quorum: 3, // Unanimous
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof"),
+    );
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "dispute"));
+
+    // Two arbiters approve (not enough yet)
+    client.cast_arbiter_vote(&a1, &eng_id, &0, &true);
+    client.cast_arbiter_vote(&a2, &eng_id, &0, &true);
+
+    // Third arbiter approves - reaches unanimous quorum, a3 gets fee
+    client.cast_arbiter_vote(&a3, &eng_id, &0, &true);
+
+    // Payment: 300_000_000, fee: 3_000_000, net: 297_000_000
+    assert_eq!(token_client.balance(&recruiter), 297_000_000);
+    assert_eq!(token_client.balance(&a1), 0);
+    assert_eq!(token_client.balance(&a2), 0);
+    assert_eq!(token_client.balance(&a3), 3_000_000);
+}
+
+/// Test that replacement request correctly tracks replacement_paid_out across multiple cycles
+#[test]
+fn test_replacement_tracks_paid_out_across_multiple_cycles() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+
+    let eng_id = String::from_str(&env, "ENG-REPL-TRACK");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-REPL-TRACK",
+    );
+
+    // First placement cycle
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer-1"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+    assert_eq!(token_client.balance(&recruiter), 300_000_000);
+
+    // First replacement
+    client.request_replacement(&company, &eng_id, &String::from_str(&env, "reason-1"));
+    let m0_after_repl1 = client.get_milestone(&eng_id, &0);
+    assert_eq!(m0_after_repl1.replacement_paid_out, 300_000_000);
+
+    // Second placement cycle
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://offer-2"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+    assert_eq!(token_client.balance(&recruiter), 600_000_000);
+
+    // Second replacement
+    client.request_replacement(&company, &eng_id, &String::from_str(&env, "reason-2"));
+    let m0_after_repl2 = client.get_milestone(&eng_id, &0);
+    assert_eq!(m0_after_repl2.replacement_paid_out, 600_000_000);
+}
+
+/// Test that get_engagements_by_recruiter correctly filters by recruiter across multiple companies
+#[test]
+fn test_get_engagements_by_recruiter_filters_across_companies() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Setup second company
+    let token_admin2 = Address::generate(&env);
+    let token_id2 = env
+        .register_stellar_asset_contract_v2(token_admin2.clone())
+        .address();
+    let token_client2 = token::StellarAssetClient::new(&env, &token_id2);
+    let company2 = Address::generate(&env);
+    token_client2.mint(&company2, &500_000_000_000);
+
+    // Setup second recruiter
+    let recruiter2 = Address::generate(&env);
+
+    // Create engagements with different combinations
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-C1-R1-A",
+    );
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-C1-R1-B",
+    );
+
+    client.create_engagement(
+        &String::from_str(&env, "ENG-C1-R2"),
+        &company,
+        &recruiter2,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+
+    client.create_engagement(
+        &String::from_str(&env, "ENG-C2-R1"),
+        &company2,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+        },
+        &token_id2,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+
+    // Recruiter 1 should have 3 engagements across both companies
+    assert_eq!(client.get_recruiter_engagement_count(&recruiter), 3);
+    let r1_engagements = client.get_engagements_by_recruiter(&recruiter, &0, &10);
+    assert_eq!(r1_engagements.len(), 3);
+
+    // Recruiter 2 should have 1 engagement
+    assert_eq!(client.get_recruiter_engagement_count(&recruiter2), 1);
+    let r2_engagements = client.get_engagements_by_recruiter(&recruiter2, &0, &10);
+    assert_eq!(r2_engagements.len(), 1);
+    assert_eq!(
+        r2_engagements.get(0).unwrap(),
+        String::from_str(&env, "ENG-C1-R2")
+    );
+}
+
+/// Test that expired engagement correctly decrements company active count
+#[test]
+fn test_expire_engagement_decrements_active_count() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-EXPIRE-COUNT");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-EXPIRE-COUNT",
+    );
+
+    assert_eq!(client.get_company_active_count(&company), 1);
+
+    client.set_inactivity_timeout_ledgers(&company, &1_000u32);
+    advance_ledger(&env, 1_001);
+
+    client.expire_engagement(&eng_id);
+
+    // Active count should decrement after expiry
+    assert_eq!(client.get_company_active_count(&company), 0);
+}
+
+/// Test that proof hash validation correctly rejects empty string
+#[test]
+#[should_panic(expected = "ProofHashEmpty")]
+fn test_submit_proof_rejects_empty_hash() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-EMPTY-PROOF");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-EMPTY-PROOF",
+    );
+
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, ""));
+}
+
+/// Test that co-recruiter split with platform fee and arbiter fee all stack correctly
+#[test]
+fn test_co_recruiter_with_platform_and_arbiter_fees_disputed() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+    let co_recruiter = Address::generate(&env);
+
+    // Set all fees: 2% platform (200 bps), 1% arbiter (100 bps)
+    client.set_platform_fee(&company, &200, &treasury);
+    client.set_arbiter_fee(&company, &100);
+
+    let config = EngagementConfig {
+        metadata_hash: None,
+        co_recruiter: Some(co_recruiter.clone()),
+        recruiter_split_bps: 6_000, // 60/40 split
+        contract_pdf_hash: None,
+        referrer: None,
+        tags: None,
+    };
+
+    let eng_id = String::from_str(&env, "ENG-ALL-FEES");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &config,
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof"),
+    );
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "dispute"));
+    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &true);
+
+    // Milestone payment: 300_000_000
+    // Platform fee: 300_000_000 * 200 / 10_000 = 6_000_000
+    // After platform: 300_000_000 - 6_000_000 = 294_000_000
+    // Arbiter fee: 294_000_000 * 100 / 10_000 = 2_940_000
+    // After arbiter: 294_000_000 - 2_940_000 = 291_060_000
+    // Primary (60%): 291_060_000 * 6000 / 10000 = 174_636_000
+    // Co (40%): 291_060_000 - 174_636_000 = 116_424_000
+
+    assert_eq!(token_client.balance(&treasury), 6_000_000);
+    assert_eq!(token_client.balance(&arbiter), 2_940_000);
+    assert_eq!(token_client.balance(&recruiter), 174_636_000);
+    assert_eq!(token_client.balance(&co_recruiter), 116_424_000);
+}
+
 /// Test that force_confirm_milestone emits the correct event with all data
 #[test]
 fn test_force_confirm_milestone_event_contains_correct_data() {
