@@ -1401,6 +1401,222 @@ stellar contract invoke \
 
 ---
 
+---
+
+## Errors
+
+The contract uses panic messages (strings) to signal errors instead of a formal error enum. This reference table documents the most frequently encountered error messages, their triggering conditions, and which function(s) raise them. Off-chain integrators can match on these message strings to classify and handle errors appropriately.
+
+### Contract Lifecycle Errors
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `ContractPaused` | Any state-changing function | The admin has called `pause()` and not yet called `unpause()`. Check `is_paused()` before retrying. |
+| `EngagementPaused` | Any engagement-scoped state-changing function | The admin has quarantined this specific engagement via `pause_engagement()`. Check `is_engagement_paused(engagement_id)` before retrying. |
+| `NoAdmin` | Any admin-gated function | The admin has called `renounce_admin()`, permanently disabling all admin operations. This is irreversible. |
+| `unauthorized` | Any function with role-based authorization | Caller does not match the required role (e.g. called `confirm_milestone` as recruiter instead of company) or is not a registered co-signer. Check authorization helpers: `is_authorized_company()`, `is_authorized_recruiter()`, `get_admin()`. |
+
+### Engagement Creation & Management
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `AlreadyInitialized` | `init` (repeated call) | The contract has already been initialized. `init` is idempotent by re-write but not by guard. |
+| `InvalidEngagementId` | `create_engagement` | `engagement_id` is empty, exceeds 64 characters, or contains non-alphanumeric + hyphen characters. |
+| `JobTitleEmpty` | `create_engagement` | `job_title` is empty. Provide a non-empty short job title (max 64 chars). |
+| `JobTitleTooLong` | `create_engagement` | `job_title` exceeds 64 characters. Truncate and retry. |
+| `ZeroMilestones` | `create_engagement` | Engagement created with an empty milestone list. At least one milestone is required. |
+| `TooManyMilestones` | `create_engagement` | Milestone count exceeds the admin-configured max (default 10). Check `get_max_milestones()` and request higher limit from admin or split into multiple engagements. |
+| `MilestoneNameEmpty: index {i}` | `create_engagement` | Milestone `i` has an empty `name` field. All milestones must have a non-empty name. |
+| `MilestoneNameTooLong: index {i}` | `create_engagement` | Milestone `i`'s `name` exceeds 64 characters. Truncate milestone names and retry. |
+| `DuplicateMilestoneName: {name}` | `create_engagement` | Two or more milestones share the same `name`. Each milestone must have a unique name. |
+| `TooManyTags` | `create_engagement` or `get_engagements_by_multiple_tags` | More than 10 tags provided. Reduce tag count to ≤ 10. |
+| `TagEmpty: index {i}` | `create_engagement` | Tag `i` in `config.tags` is an empty string. All tags must be non-empty. |
+| `TagTooLong: index {i}` | `create_engagement` | Tag `i` exceeds 32 characters. Shorten all tags to ≤ 32 chars. |
+| `amount must be greater than zero` | `create_engagement` | `total_amount ≤ 0`. The escrow fee must be a positive amount. |
+| `AmountBelowMinimum` | `create_engagement` | `total_amount` is below the admin-configured minimum (default 100,000 stroops). Check `get_effective_min_amount(token)` for the resolved minimum and retry with higher amount. |
+| `CompanyRecruiterCollision` | `create_engagement` | `company == recruiter`. The company and recruiter must be different addresses. |
+| `CompanyArbiterCollision` | `create_engagement` | `company` appears in the arbiter list. The company cannot be an arbiter on its own engagements (conflict of interest). |
+| `RecruiterArbiterCollision` | `create_engagement` | `recruiter` appears in the arbiter list. The recruiter cannot be an arbiter on its own engagements (conflict of interest). |
+| `at least one arbiter required` | `create_engagement` | The arbiter list is empty. Provide at least one arbiter address. |
+| `invalid quorum` | `create_engagement` | `quorum` is 0, greater than the number of arbiters, or otherwise invalid. Set `quorum` to 1 ≤ quorum ≤ arbiters.len(). |
+| `TokenNotAllowed` | `create_engagement` | The token allowlist is enabled and `token` is not in it. Check `get_allowed_tokens()` or request the admin to allowlist your token with `add_allowed_token()`. |
+| `CompanyBlacklisted` | `create_engagement` | The `company` address is on the admin's blacklist (issue #358). Contact the admin to be removed. |
+| `RecruiterBlacklisted` | `create_engagement` | The `recruiter` address is on the admin's blacklist (issue #359). Contact the admin to be removed. |
+| `engagement already exists` | `create_engagement` | An engagement with this `engagement_id` has already been created. Use a unique engagement ID. |
+| `milestone percentages must sum to 100` | `create_engagement` | The `payment_percent` fields across all milestones do not sum to exactly 100. Adjust percentages so they total 100. |
+| `CompanyActiveLimitReached` | `create_engagement` | The company has reached the admin-configured limit of simultaneously active engagements (default 50). Cancel or complete an existing engagement before creating a new one. Check `get_company_active_count()` and `get_max_active_per_company()`. |
+| `engagement not found` | Any query or state-changing function | The engagement ID does not exist. Check the ID spelling and ensure `create_engagement` has been successfully called. |
+| `RetentionDaysZero` | `create_engagement` | A retention milestone has `days = 0` in the `retention_days` vector. Retention windows must be positive. Set all retention days ≥ 1. |
+| `RetentionDaysTooLarge` | `create_engagement` | A retention milestone exceeds the admin-configured max (default 365 days). Either request a higher limit from the admin or split multi-year retentions into shorter windows. |
+| `InvalidMetadataHash` | `create_engagement` | `config.metadata_hash` is an empty string. Omit the field entirely or provide a real IPFS CID. |
+| `InvalidContractPdfHash` | `create_engagement` | `config.contract_pdf_hash` is an empty string. Omit the field entirely or provide a real attestation hash. |
+| `InvalidSplitBps` | `create_engagement` | `config.recruiter_split_bps > 10_000`. The split percentage must be ≤ 100% (≤ 10,000 basis points). |
+
+### Milestone Operations
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `engagement is not active` | Various | The engagement status is not `Active` (e.g. it is `Completed`, `Cancelled`, or `ReplacementRequested` when only `Active` is valid). Check engagement status and only perform this operation on active engagements. |
+| `invalid milestone index` | Any function taking `milestone_index` | The index is out of bounds for the engagement's milestone list. Ensure `milestone_index < milestone_count`. |
+| `milestone is not locked` | `unlock_milestone` | The target milestone's status is not `Locked`. Call `is_milestone_unlockable()` first to check preconditions. |
+| `only retention milestones can be unlocked this way` | `unlock_milestone` | A `Placement` milestone (which starts `Pending`) cannot be unlocked. Only `Retention` milestones have a `Locked` state. |
+| `retention window has not elapsed yet` | `unlock_milestone` or `confirm_milestone` | `current_ledger < valid_after_ledger`. Wait additional ledgers for the retention period to elapse before retrying. Call `ledgers_until_unlock()` to check how many ledgers remain. |
+| `InvalidProofHash` | `submit_proof` or `add_milestone_attachment` | The proof hash is empty. Provide a non-empty IPFS CID or proof URI. |
+| `ProofHashTooLong` | `submit_proof` or `add_milestone_attachment` | The proof hash exceeds the admin-configured max length (default 200 chars). Provide a shorter proof identifier or request the admin to increase the limit with `set_max_proof_hash_length()`. |
+| `milestone is not pending` | `submit_proof` | The milestone status is not `Pending` (e.g. already `ProofSubmitted` or further along). Reset the milestone or check the status before resubmitting. |
+| `ResubmitTooSoon` | `submit_proof` | A proof was previously submitted on this milestone and rejected. The admin-configured proof cooldown (default ~4 hours) has not elapsed. Wait before resubmitting. |
+| `DuplicateProofHash` | `submit_proof` | The same proof hash is already used by another milestone in this engagement. Use a unique proof hash per milestone or per resubmission. |
+| `milestone proof not yet submitted` | `confirm_milestone` or similar | The milestone status is not `ProofSubmitted`. The recruiter must call `submit_proof()` first. |
+| `PreviousMilestoneNotComplete` | `confirm_milestone`, `batch_confirm_milestones`, or `execute_scheduled_auto_confirm` | An earlier milestone (lower index) has not yet been confirmed or resolved (issue #67: sequential confirmation rule). Complete earlier milestones first. |
+| `only retention milestones can be due soon` | `notify_milestone_due_soon` | Attempted to check due-soon status on a `Placement` milestone. Only `Retention` milestones have time-gate-based due-soon windows. |
+| `milestone is already unlockable` | `notify_milestone_due_soon` | The deadline has already passed; the milestone can be unlocked immediately. Call `unlock_milestone()` instead. |
+| `DueSoonWindowNotReached` | `notify_milestone_due_soon` | The milestone is still further out than the due-soon window. Wait for it to approach its deadline. |
+| `DueSoonAlreadyNotified` | `notify_milestone_due_soon` | The due-soon notification has already been emitted for this deadline. Check `is_milestone_due_soon_notified()` before retrying. |
+| `milestone is not in disputed status` | `cast_arbiter_vote` or similar | The milestone is not in `Disputed` status (e.g. `ProofSubmitted` or already resolved). The company must raise a dispute first via `raise_dispute()`. |
+| `can only dispute a submitted proof` | `raise_dispute` | The milestone status is not `ProofSubmitted`. The recruiter must submit proof before the company can dispute it. |
+| `DisputeWindowClosed` | `raise_dispute` | The dispute window has elapsed since the proof was submitted. Disputes must be raised within the admin-configured window (default ~3 days). Check `get_dispute_window()` for the current limit. |
+
+### Dispute Resolution
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `duplicate vote` | `cast_arbiter_vote` | This arbiter has already voted on this dispute. Each arbiter may vote once per dispute. |
+| `DisputeWindowNotElapsed` | `escalate_dispute` | The dispute window has not yet elapsed since the dispute was raised. Wait for the window to pass before escalating to the super arbiter. |
+| `dispute already resolvable without escalation` | `escalate_dispute` | The dispute has already reached quorum (or rejection threshold) and can be resolved via normal arbiter voting. Escalation is only for tied disputes past the window. |
+| `no super arbiter configured` | `escalate_dispute` or `super_arbiter_resolve` | The admin has not set a super arbiter via `set_super_arbiter()`. Either the admin must configure one, or the dispute must be resolved through normal arbiter voting. |
+| `no dispute in progress` | `escalate_dispute` | Attempted to escalate a dispute that was not found in the vote tally. The dispute may have already resolved. |
+| `dispute has not been escalated` | `super_arbiter_resolve` or `resolve_escalation_timeout` | Attempted a super-arbiter resolution on a dispute that is not escalated. Call `escalate_dispute()` first. |
+| `SuperArbiterResponseWindowNotElapsed` | `resolve_escalation_timeout` | The super arbiter still has time to respond. Wait for the admin-configured response deadline to elapse before auto-resolving in the recruiter's favor. Check `get_super_arbiter_deadline()`. |
+| `ReasonTooLong` | `raise_dispute` | The dispute reason string exceeds 128 bytes. Provide a shorter reason. |
+
+### Amendments
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `payment percent must be 0-100` | `propose_amendment` | The new payment percent is outside 0–100 inclusive. |
+| `no pending amendment proposal` | `accept_amendment`, `reject_amendment`, or `get_pending_amendment` | No amendment proposal exists for this milestone. Either the proposal expired, was withdrawn, or was never proposed. |
+| `proposer cannot accept their own proposal` | `accept_amendment` | The acceptor is the same as the original proposer. The counterparty must accept or reject. |
+| `amendment_expired` | `accept_amendment` | The proposal's TTL has elapsed (current ledger > `expires_at_ledger`). The proposal is cleared. |
+| `proposer cannot reject their own proposal` | `reject_amendment` | The rejector is the same as the original proposer. The counterparty must accept or reject. |
+| `unauthorized` | `withdraw_amendment_proposal` | Caller is not the original proposer. Only the proposer may withdraw their own proposal. |
+
+### Milestone Extensions
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `only retention milestones can be extended` | `propose_milestone_extension` | Attempted to extend a `Placement` milestone. Only `Retention` milestones have extendable deadlines. |
+| `milestone is not locked` | `propose_milestone_extension` or `accept_milestone_extension` | The milestone has progressed beyond `Locked` (e.g. to `Pending` or `ProofSubmitted`). Only locked milestones with pending deadlines can be extended. |
+| `additional ledgers must be greater than zero` | `propose_milestone_extension` | The extension request is for 0 ledgers. Provide a positive number of ledgers to extend. |
+| `MilestoneExtensionLimitReached` | `propose_milestone_extension` | This milestone has already been granted the admin-configured maximum number of extensions (default 3). No further extensions are allowed. |
+| `no pending milestone extension proposal` | `accept_milestone_extension` or `reject_milestone_extension` | No extension proposal exists for this milestone. |
+| `milestone_extension_expired` | `accept_milestone_extension` | The extension proposal's TTL has elapsed. The proposal is cleared and an event is emitted. |
+
+### Replacement
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `placement not yet confirmed — use cancel_engagement instead` | `request_replacement` | The placement milestone has not been confirmed yet. Early-stage cancellations use `cancel_engagement()` instead. |
+| `ReplacementLimitReached` | `request_replacement` | The company has already requested the admin-configured maximum number of replacements (default 3). No further replacements are allowed. |
+| `replacement reason too long` | `request_replacement` | The reason string exceeds 128 bytes. Provide a shorter reason. |
+
+### Early Exit
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `no exit request pending` | `accept_early_exit` or `reject_early_exit` | The engagement status is not `ExitRequested`. The recruiter must call `request_early_exit()` first. |
+| `engagement is in a terminal state` | `nominate_arbiter_successor` or `claim_arbiter` | The engagement is `Completed`, `Cancelled`, or `Expired`. Arbiter succession has no purpose on terminal engagements. |
+
+### Expiry & Cancellation
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `Cannot expire completed engagement` | `expire_engagement` | The engagement is already `Completed` and cannot expire. Expiry only applies to non-terminal states. |
+| `Inactivity timeout not reached` | `expire_engagement` | The inactivity threshold has not been met yet. Wait for `get_inactivity_timeout_ledgers()` ledgers since `last_activity_ledger` before expiring. |
+
+### Configuration & Arbiter
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `FeeTooHigh` | `set_platform_fee` | Platform fee `bps > 500` (5%). The fee is capped at 5% for safety. |
+| `discount too high` | `set_referral_discount_bps` | Referral discount `bps > 500`. The discount cannot exceed the maximum platform fee. |
+| `too many fee tiers` | `set_fee_tiers` | More than 10 fee tiers provided. Limit to ≤ 10 tiers. |
+| `tier bps exceeds base platform fee` | `set_fee_tiers` | A tier's `bps` is higher than the current base platform fee. Tiers must be discounts (lower bps), not surcharges. |
+| `tier threshold must be positive` | `set_fee_tiers` | A tier's `threshold ≤ 0`. All tier thresholds must be positive integers. |
+| `tiers must be sorted by ascending threshold` | `set_fee_tiers` | Fee tiers are not in strictly ascending `threshold` order. Sort tiers before retrying. |
+| `VersionTooLong` | `set_version` | Version string exceeds 32 characters. Provide a shorter version identifier (e.g. "0.2.0"). |
+| `InvalidDueSoonWindow` | `set_due_soon_window` | Due-soon window is 0 ledgers. The window must be ≥ 1 ledger. |
+| `InvalidLedgersPerDay` | `set_ledgers_per_day` | Value is outside the range 1–25,920 ledgers. Pick a value in that range. |
+| `InvalidMaxActivePerCompany` | `set_max_active_per_company` | Count is 0. At least 1 active engagement per company must be allowed. |
+| `ArbiterFeeTooHigh` | `set_arbiter_fee` | Arbiter fee `bps > 200` (2%). The fee is capped at 2% for fairness. |
+| `InvalidMaxProofHashLength` | `set_max_proof_hash_length` | Length is outside 1–500 characters. |
+| `InvalidSuperArbiterResponseWindow` | `set_super_arbiter_deadline` | Response window is 0 ledgers. Must be ≥ 1. |
+| `InvalidMinAmount` | `set_token_min_amount` | Minimum amount ≤ 0. Must be positive. |
+| `ArbiterNotFound` | `admin_replace_arbiter` | The old arbiter is not in the engagement's arbiter list. |
+| `CompanyArbiterCollision` | `admin_replace_arbiter` | The new arbiter is the engagement's company (conflict of interest). |
+| `RecruiterArbiterCollision` | `admin_replace_arbiter` | The new arbiter is the engagement's recruiter (conflict of interest). |
+| `DuplicateArbiter` | `admin_replace_arbiter` | The new arbiter is already in the arbiter list. |
+
+### Role Transfer & Cosigner
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `no pending recruiter transfer` | `accept_recruiter_transfer` | No recruiter transfer has been proposed. The current recruiter must call `propose_recruiter_transfer()` first. |
+| `referrer already exists` | `add_referrer` | This referrer address is already in the recognized list. |
+| `referrer not found` | `remove_referrer` | This referrer address is not in the recognized list. |
+
+### Batch Operations
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `EmptyIndices` | `batch_confirm_milestones` | The `milestone_indices` vector is empty. Provide at least one milestone index. |
+| `too many IDs` | `batch_get_engagement_summary` | More than 20 engagement IDs requested in a single batch. Paginate or reduce the batch size. |
+| `EmptyConfigs` | `batch_create_engagements` | The `configs` vector is empty. Provide at least one engagement configuration. |
+| `TooManyEngagements` | `batch_create_engagements` | More than 20 engagements in a single batch (issue #260 limit). Split into multiple batches or create individually. |
+
+### Confirm Window & Force Confirm
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `ConfirmWindowNotElapsed` | `force_confirm_milestone` | The confirm window has not elapsed since the proof was submitted. Wait for the admin-configured window (default ~5 days) before force-confirming. |
+| `milestone is not in ProofSubmitted status` | `force_confirm_milestone` | The milestone has already transitioned (e.g. to `Confirmed` or `Disputed`). Can only force-confirm from `ProofSubmitted`. |
+
+### Scheduled Auto-Confirm
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `ScheduledLedgerInPast` | `schedule_auto_confirm` | The target ledger is not in the future. Schedule for a future ledger. |
+| `NoScheduledAutoConfirm` | `execute_scheduled_auto_confirm` or `cancel_scheduled_auto_confirm` | No scheduled auto-confirm exists for this milestone. Check with `get_scheduled_auto_confirm()` before executing or canceling. |
+| `ScheduledLedgerNotReached` | `execute_scheduled_auto_confirm` | The current ledger has not yet reached the scheduled target ledger. Wait or check `get_scheduled_auto_confirm()`. |
+
+### Upgrade
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `no pending upgrade` | `execute_upgrade` | No upgrade proposal is pending. The admin must call `propose_upgrade()` first. |
+| `UpgradeLockNotElapsed` | `execute_upgrade` | The time-lock period has not elapsed since the proposal. Wait for the admin-configured lock duration (default ~1 day). |
+
+### Rating & Visibility
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `EngagementNotCompleted` | `submit_recruiter_rating` or `submit_company_rating` | The engagement is not yet in `Completed` status. Ratings can only be submitted after an engagement completes. |
+| `InvalidRating` | `submit_recruiter_rating` or `submit_company_rating` | Rating is not in the range 1–5. Provide a rating between 1 (worst) and 5 (best). |
+| `AlreadyRated` | `submit_recruiter_rating` or `submit_company_rating` | A rating for this engagement has already been submitted by this party. Each side may rate once per engagement. Check `is_recruiter_rated()` / `is_company_rated()` first. |
+| `NewTagSameAsOld` | `rename_engagement_tag` | The new tag name is identical to the old tag name. Provide a different tag name. |
+| `TagNotFound` | `rename_engagement_tag` | The old tag has no engagements indexed under it. |
+| `TagEmpty` | `rename_engagement_tag` or `add_engagement_tag` | The tag string is empty. Provide a non-empty tag. |
+| `TagTooLong` | `rename_engagement_tag` or `add_engagement_tag` | The tag exceeds 32 characters. Shorten the tag. |
+
+### Reorder Milestones
+
+| Message | Triggered by | Condition |
+|---|---|---|
+| `InvalidReorderLength` | `reorder_milestones` | The `new_order` vector length does not match the number of milestones. |
+| `DuplicateReorderIndex` | `reorder_milestones` | The `new_order` is not a valid permutation (an index appears more than once). |
+| `CannotReorderProgressedMilestone` | `reorder_milestones` | Attempted to move a milestone that is `ProofSubmitted`, `Confirmed`, `Disputed`, or `Resolved`. Only `Locked`/`Pending` milestones (pre-activation) can be reordered. |
+
+---
+
 ## License
 
 MIT
