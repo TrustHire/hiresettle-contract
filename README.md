@@ -479,19 +479,29 @@ Every proposal carries an expiry ledger computed as `proposed_at_ledger + amendm
 
 ### Withdrawing a Proposal
 
-`accept_amendment` and `reject_amendment` are both restricted to the
-counterparty, so before issue #238 a proposer who changed their mind had to wait
-out the TTL. `withdraw_amendment_proposal(proposer, engagement_id,
-milestone_index)` lets the **original proposer** clear their own pending proposal
-immediately.
+`accept_amendment` and `reject_amendment` are restricted to the counterparty.
+The original proposer can instead clear their own pending proposal immediately:
 
-Only the address recorded on the proposal may withdraw it — being the
-engagement's company or recruiter is not sufficient. Afterwards
-`get_pending_amendment` reports `None` and a fresh proposal can be made for the
-same milestone. The amendment log is untouched: a withdrawn proposal was never
-applied, so it is not part of the milestone's amendment history. An
-expired-but-uncleared proposal can still be withdrawn, since that is exactly the
-storage cleanup the caller intends.
+```rust
+withdraw_amendment_proposal(proposer, engagement_id, milestone_index)
+```
+
+The function applies these checks in order:
+
+1. `proposer` must authorize the transaction.
+2. A proposal must exist for the specified `engagement_id` and
+   `milestone_index`; otherwise it panics with `no pending amendment proposal`.
+3. `proposer` must match the proposal's recorded proposer; otherwise it panics
+   with `unauthorized`.
+
+It does not perform a separate engagement lookup, so merely being the
+engagement's company or recruiter is not sufficient. On success, the proposal
+is removed and an `amendment_withdrawn` event is emitted with
+`(milestone_index, proposer, new_payment_percent)`. The milestone's amendment
+log is unchanged because the proposal was never applied. An
+expired-but-uncleared proposal can also be withdrawn to remove its stored entry.
+After withdrawal, `get_pending_amendment` returns `None` and a fresh proposal can
+be made for the same milestone.
 
 ### What an Amendment Can Change
 
