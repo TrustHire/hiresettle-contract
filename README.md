@@ -129,6 +129,7 @@ Each milestone transitions through the following states. For `Retention` milesto
 | **Contract PDF attestation** | Optional `contract_pdf_hash` (e.g. SHA-256 of the signed PDF) stored at creation for audit trail. |
 | **Engagement listing** | Per-company paginated engagement ID list (issue #35) and global engagement counter (issue #34). |
 | **Unlock progress query** | `get_unlock_progress()` returns `(unlocked_count, total)` — how many milestones are past `Locked` status. |
+| **Cosigners** | A company or recruiter can register a secondary [cosigner](#cosigners) address equally authorized to act on its behalf, without sharing the primary key. |
 
 ---
 
@@ -523,6 +524,58 @@ Each time an amendment is accepted, an [`AmendmentEntry`](#amendmententry) is ap
 
 ---
 
+## Milestone Extension Requests
+
+A retention milestone unlocks automatically once `valid_after_ledger` passes. A **milestone extension request** lets the recruiter ask the company for more time before that deadline arrives, without touching `payment_percent` the way an [amendment](#amendments) does.
+
+### Extension Propose → Accept / Reject Flow
+
+1. **Propose** — `propose_milestone_extension(recruiter, engagement_id, milestone_index, additional_ledgers)`
+   - Caller must be the engagement's `recruiter` (or its registered [cosigner](#cosigners)); must sign the transaction. Unlike amendments, this is **one-directional** — only the recruiter may propose.
+   - The engagement must be `Active`, and the target milestone must be a `Retention` milestone currently `Locked`. Placement milestones, and milestones that have progressed past `Locked`, cannot be extended.
+   - `additional_ledgers` must be greater than zero.
+   - Panics with `MilestoneExtensionLimitReached` once the milestone has already been granted the admin-configured maximum number of extensions (default 3, via `get_max_milestone_extensions()`).
+   - A new proposal overwrites any existing pending proposal for the same milestone (only one pending per milestone at a time).
+   - Emits a `milestone_extension_proposed` event.
+   - The pending state is stored as a `MilestoneExtensionProposal` struct under `DataKey::MilestoneExtensionProposal(engagement_id, milestone_index)`.
+
+2. **Accept** — `accept_milestone_extension(company, engagement_id, milestone_index)`
+   - Caller must be the engagement's `company` (or its cosigner).
+   - `additional_ledgers` is added to the milestone's `valid_after_ledger` immediately, pushing its unlock deadline further out.
+   - Clears any `milestone_due_soon` notification flag for the milestone, since the deadline it referred to has moved — the new deadline can be announced again in its own right.
+   - Increments the per-milestone granted-extension count used by the cap above and by `get_milestone_extension_count`.
+   - Emits a `milestone_extension_accepted` event.
+
+3. **Reject** — `reject_milestone_extension(company, engagement_id, milestone_index)`
+   - Caller must be the engagement's `company` (or its cosigner).
+   - The pending proposal is cleared from storage without any change to the milestone.
+   - Emits a `milestone_extension_rejected` event with reason `declined`.
+
+Use `get_pending_milestone_extension(engagement_id, milestone_index)` → `Option<MilestoneExtensionProposal>` to inspect a live proposal — mirrors `get_pending_amendment`.
+
+### Extension TTL and Expiry
+
+Each proposal carries an expiry ledger computed as `proposed_at_ledger + extension_ttl` (see the `extension_ttl` row in the [Amendments TTL table](#ttl-and-expiry) — default **17,280 ledgers**, ≈ 1 day).
+
+- Admin can change the default globally via `set_extension_ttl(admin, ledgers)`; the current value is queried with `get_extension_ttl()`.
+- If the current ledger exceeds `expires_at_ledger`, the proposal is considered *expired*:
+  - Calling `accept_milestone_extension` on an expired proposal clears it, emits a `milestone_extension_rejected` event with reason `expired`, and panics with `milestone_extension_expired`.
+  - `get_pending_milestone_extension` automatically treats expired proposals as non-existent and returns `None`.
+- Expired proposals are lazily cleared — either by a later `accept_milestone_extension` call on them, or overwritten by the next `propose_milestone_extension` for the same milestone.
+
+### How This Differs From a Milestone Amendment
+
+| | Amendment | Milestone Extension |
+|---|---|---|
+| Changes | `payment_percent` | `valid_after_ledger` (unlock deadline) |
+| Applies to | Any milestone | `Retention` milestones only, while `Locked` |
+| Who may propose | Company **or** recruiter | Recruiter only |
+| Who accepts/rejects | The other party | Company only |
+| Repeat limit | None (20-entry history log, no proposal cap) | Capped at `get_max_milestone_extensions()` grants per milestone (default 3) |
+| TTL constant | `amendment_ttl` | `extension_ttl` |
+
+---
+
 ## Feedback Ratings
 
 Once an engagement reaches `Completed`, each side may rate the other once:
@@ -573,6 +626,11 @@ cosigner:
 
 - `set_company_cosigner(company, cosigner)` — delegates company-side actions.
 - `set_recruiter_cosigner(recruiter, cosigner)` — delegates recruiter-side actions.
+
+The registered cosigner (or `None` if none was set) can be read back with:
+
+- `get_company_cosigner(company)` → `Option<Address>`
+- `get_recruiter_cosigner(recruiter)` → `Option<Address>`
 
 Once registered, the contract's `is_authorized_company` / `is_authorized_recruiter`
 checks accept **either** the primary signer **or** the cosigner. A cosigned action
@@ -763,6 +821,11 @@ sizing pagination: pass the same `tag` to both to know how many pages to fetch.
 
 ### Amendments
 `propose_amendment`, `accept_amendment`, `reject_amendment`, `withdraw_amendment_proposal`
+
+### Cosigners
+`set_company_cosigner`, `get_company_cosigner`, `set_recruiter_cosigner`, `get_recruiter_cosigner`
+
+See [Cosigners](#cosigners) for the full authorization-delegation flow.
 
 ### Arbiter Succession
 `nominate_arbiter_successor`, `claim_arbiter`
@@ -961,6 +1024,21 @@ argument and return-type details.
 | `get_contract_pdf_hash` | `engagement_id: String` | `Option<String>` |
 | `get_total_released` | `engagement_id: String` | `i128` |
 | `get_escrow_balance` | `engagement_id: String` | `i128` |
+| `batch_get_engagement_summary` | `engagement_ids: Vec<String>` | `Vec<EngagementSummary>` |
+
+`batch_get_engagement_summary(engagement_ids: Vec<String>) -> Vec<EngagementSummary>`
+returns the same [`EngagementSummary`](#engagementsummary) shape as
+`get_engagement_summary`, but for many engagements in one call — letting a
+dashboard render a list view without one round-trip per row.
+
+- **Max batch size**: 20 IDs per call; passing more than 20 panics with
+  `"too many IDs"`.
+- **Unknown IDs**: silently skipped rather than causing a panic — the
+  returned vector may be shorter than `engagement_ids` when some entries
+  don't exist. Unlike `get_engagement_summary`, which panics with
+  `EngagementNotFound` for a single missing ID, the batch variant never
+  panics on missing entries; check the length (or missing `id` values) of
+  the result if you need to detect which IDs were skipped.
 
 #### Milestone Queries
 
@@ -1078,6 +1156,22 @@ admin transaction to land between two reads and yield a torn view.
 | `is_engagement_paused` | `engagement_id: String` | `bool` |
 | `get_admin` | — | `Address` |
 | `get_pending_admin` | — | `Option<Address>` |
+| `get_contract_health` | — | `ContractHealth` |
+
+`get_contract_health()` bundles the most commonly polled diagnostic fields
+into a single read-only call, so an off-chain keeper or status page doesn't
+need four separate round-trips:
+
+| Field | Type | Description |
+|---|---|---|
+| `paused` | `bool` | Whether the global pause switch is engaged. `false` if never set. |
+| `admin` | `Address` | The current contract admin. |
+| `version` | `String` | Contract version string set via `set_version`; falls back to the default version string if never set. |
+| `total_engagement_count` | `u64` | Total number of engagements ever created — monotonic, so cancelled/completed engagements stay counted and the value never decreases. |
+
+Each call also emits a `contract_health_snapshot` event carrying the same
+`ContractHealth` value, so keepers polling this view show up on-chain rather
+than only in RPC access logs.
 
 ### Milestone Confirmation Functions
 
