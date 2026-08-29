@@ -803,6 +803,57 @@ claim_arbiter()
 
 Only the nominated address can complete the claim. Once claimed, the successor assumes the arbiter's position for future dispute voting while preserving the integrity of the arbitration panel.
 
+#### Dispute Escalation to Super Arbiter
+
+If a dispute's arbiter votes remain split — neither the approval quorum nor the
+rejection threshold reached — past the dispute window, it can be escalated to a
+single configured Super Arbiter for a tie-breaking resolution.
+
+| Function | Access | Purpose |
+|---|---|---|
+| `set_super_arbiter(admin, super_arbiter)` | Admin | Configure (or replace) the Super Arbiter address used to resolve escalated disputes. |
+| `get_super_arbiter()` → `Option<Address>` | Public | Return the currently configured Super Arbiter, or `None` if none has been set. |
+| `is_dispute_escalated(engagement_id, milestone_index)` → `bool` | Public | Return whether the dispute on that milestone is currently escalated. |
+| `escalate_dispute(engagement_id, milestone_index)` | Permissionless | Escalate an eligible, still-hung dispute to the configured Super Arbiter. |
+| `super_arbiter_resolve(super_arbiter, engagement_id, milestone_index, approve)` | Super Arbiter | Directly approve or reject an escalated dispute, bypassing the normal M-of-N vote. |
+
+**Escalation eligibility.** A dispute becomes eligible for `escalate_dispute`
+only when **all** of the following hold:
+
+1. The contract and the engagement are not paused.
+2. The engagement is `Active`.
+3. The milestone is `Disputed`.
+4. The dispute window has elapsed (measured from when `raise_dispute` was called).
+5. Neither approval nor rejection has reached its quorum (the vote is still hung).
+6. A Super Arbiter has been configured.
+
+**Anyone can call `escalate_dispute` once those conditions are satisfied.** No
+client, freelancer, arbiter, or admin authorization is required — escalation
+follows the same permissionless-keeper pattern as `unlock_milestone`.
+
+**Normal arbiter voting vs. Super Arbiter resolution.** The Super Arbiter
+resolves an escalated dispute directly, without the M-of-N threshold that normal
+arbiter voting requires:
+
+| | Normal arbiter voting | Super Arbiter resolution |
+|---|---|---|
+| Trigger | `cast_arbiter_vote` | `super_arbiter_resolve` |
+| Decision makers | Multiple arbiters | Configured Super Arbiter |
+| Threshold | M-of-N quorum | No vote threshold |
+| Authorization | Individual arbiter | Configured Super Arbiter |
+| Approval | Quorum resolves dispute | Direct approval resolves dispute |
+| Rejection | Quorum rejection returns dispute to `Pending` | Direct rejection returns dispute to `Pending` |
+| Arbiter fee | Deciding arbiter | Super Arbiter |
+
+**Timeout.** If the Super Arbiter does not call `super_arbiter_resolve` within
+the configured response window (default `super_arbiter_response_window`, ~3
+days) after escalation, the permissionless `resolve_escalation_timeout` may be
+invoked to auto-resolve the escalated dispute in the recruiter's favor — no
+arbiter fee is deducted since the Super Arbiter did not act. The admin can tune
+the window via `set_super_arbiter_deadline(admin, ledgers)` and read it with
+`get_super_arbiter_deadline()`; `get_super_arbiter_resolutions()` reports the
+total number of disputes concluded through the escalation path.
+
 ### Early Exit
 
 The early-exit protocol allows a **recruiter** to request a graceful exit from an engagement before all milestones are completed. It is a three-step flow involving both the recruiter and the company.
@@ -1170,6 +1221,8 @@ The contract emits Soroban events for all state transitions. Events are grouped 
 | `token_allowlisted` | — | `token` | `add_allowed_token` |
 | `token_removed` | — | `token` | `remove_allowed_token` |
 | `allowlist_enabled_set` | — | `enabled` | `set_token_allowlist_enabled` |
+| `super_arbiter_set` | — | `super_arbiter` | `set_super_arbiter` |
+| `super_arbiter_deadline_set` | — | `ledgers` | `set_super_arbiter_deadline` |
 
 ### Upgrade
 
@@ -1211,6 +1264,9 @@ The contract emits Soroban events for all state transitions. Events are grouped 
 | `dispute_raised` | `engagement_id` | `(milestone_index, reason)` | `raise_dispute` |
 | `arbiter_voted` | `engagement_id` | `(milestone_index, approve)` | `cast_arbiter_vote` |
 | `dispute_resolved` | `engagement_id` | `(milestone_index, approved)` | Quorum reached in `cast_arbiter_vote` |
+| `dispute_escalated` | `engagement_id` | `(milestone_index, super_arbiter)` | `escalate_dispute` |
+| `dispute_escalation_resolved` | `engagement_id` | `(milestone_index, super_arbiter, approved)` | `super_arbiter_resolve` |
+| `super_arbiter_timeout_resolved` | `engagement_id` | `milestone_index` | `resolve_escalation_timeout` (auto-favor recruiter) |
 
 #### Dispute-to-Super-Arbiter Escalation Path
 
