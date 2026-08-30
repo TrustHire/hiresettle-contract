@@ -2704,6 +2704,41 @@ impl HireSettleContract {
     // CONFIRM MILESTONE
     // ----------------------------------------------------------
 
+    /// Confirm a milestone after the recruiter has submitted proof, releasing the
+    /// milestone's payment share to the recruiter (minus platform fee).
+    ///
+    /// # Caller
+    /// `company` — must match the engagement's company (or its registered
+    /// co-signer) and sign the transaction.
+    ///
+    /// # Preconditions
+    /// - Engagement status is `Active`.
+    /// - Milestone status is `ProofSubmitted`.
+    /// - **Sequential confirmation (Issue #67)**: All prior milestones (indices
+    ///   `< milestone_index`) must already be `Confirmed` or `Resolved`.
+    /// - For `Retention` milestones: `current_ledger >= valid_after_ledger`
+    ///   (the retention window must have elapsed).
+    ///
+    /// # Payment Calculation
+    /// The gross payment is `total_amount * payment_percent / 100`. If the milestone
+    /// was previously paid out before a replacement reset (issue #183), only the
+    /// difference between the current share and `replacement_paid_out` is released.
+    /// Platform fee is deducted from the payment before transfer to the recruiter.
+    ///
+    /// # Panics
+    /// - `"engagement is not active"` — engagement status is not `Active`.
+    /// - `"unauthorized"` — caller is not the engagement's company or co-signer.
+    /// - `"invalid milestone index"` — `milestone_index` is out of bounds.
+    /// - `"milestone proof not yet submitted"` — milestone is not in `ProofSubmitted` status.
+    /// - `"PreviousMilestoneNotComplete"` — a prior milestone is not yet `Confirmed` or `Resolved`.
+    /// - `"retention window has not elapsed — cannot confirm yet"` — for `Retention` milestones
+    ///   confirmed before their `valid_after_ledger`.
+    ///
+    /// # Events
+    /// - `("milestone_confirmed", engagement_id)` with `(milestone_index, payment)`.
+    /// - `("platform_fee_collected", engagement_id)` with `(milestone_index, fee_amount, treasury)` — when fee > 0.
+    /// - `("status_changed", engagement_id)` — when the milestone status changes.
+    /// - `("engagement_completed", engagement_id)` — if all milestones are now done.
     pub fn confirm_milestone(
         env: Env,
         company: Address,
