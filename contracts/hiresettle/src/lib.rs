@@ -780,6 +780,12 @@ pub enum DataKey {
     /// Whether a single engagement is quarantined by the admin (issue #239).
     /// Independent of the global `Paused` flag.
     EngagementPaused(String),
++    /// Reason string supplied by the admin when quarantining an engagement
++    /// via `pause_engagement` (issue #327). Overwritten on each re-pause;
++    /// not cleared by `unpause_engagement`, so the last reason stays
++    /// queryable as an audit trail. Absent for engagements never paused.
++    EngagementPauseReason(String),
+    EngagementPaused(String),
     /// Global ordered list of every engagement ID ever created (issue #237).
     /// Backs `get_engagement_ids_by_status`.
     AllEngagements,
@@ -1371,10 +1377,59 @@ impl HireSettleContract {
     /// Pausing an already-paused engagement is a no-op that still emits the
     /// event, so the admin can re-assert quarantine idempotently.
     ///
-    /// # Panics
-    /// - `"unauthorized"` — caller is not the contract admin.
-    /// - `"engagement not found"` — no engagement exists with this ID.
-    ///
++    /// Re-pausing an already-paused engagement overwrites the stored reason
++    /// with the new one.
++    ///
+     /// # Panics
+     /// - `"unauthorized"` — caller is not the contract admin.
+     /// - `"engagement not found"` — no engagement exists with this ID.
++    /// - `"EmptyPauseReason"` — `reason` is an empty string.
++    /// - `"PauseReasonTooLong"` — `reason` exceeds `MAX_PAUSE_REASON_LEN` characters.
+     ///
+     /// # Events
++    /// Emits `("engagement_paused", engagement_id)` with the acting admin
++    /// and the reason.
++    pub fn pause_engagement(env: Env, admin: Address, engagement_id: String, reason: String) {
+         Self::assert_admin(&env, &admin);
+
+         // Reject unknown IDs so a typo cannot silently create a quarantine
+         // record that later blocks a legitimately created engagement.
+         let _ = Self::get_engagement_internal(&env, &engagement_id);
+
++        if reason.len() == 0 {
++            panic!("EmptyPauseReason");
++        }
++        if reason.len() > MAX_PAUSE_REASON_LEN {
++            panic!("PauseReasonTooLong");
++        }
++
+         env.storage()
+             .persistent()
+             .set(&DataKey::EngagementPaused(engagement_id.clone()), &true);
+         env.storage().persistent().extend_ttl(
+             &DataKey::EngagementPaused(engagement_id.clone()),
+             100_000,
+             6_300_000,
+         );
+
++        env.storage().persistent().set(
++            &DataKey::EngagementPauseReason(engagement_id.clone()),
++            &reason,
++        );
++        env.storage().persistent().extend_ttl(
++            &DataKey::EngagementPauseReason(engagement_id.clone()),
++            100_000,
++            6_300_000,
++        );
++
+         env.events().publish(
+             (
+                 Symbol::new(&env, "engagement_paused"),
+                 engagement_id.clone(),
+             ),
++            (admin, reason),
+         );
+     }
     /// # Events
     /// Emits `("engagement_paused", engagement_id)` with the acting admin.
     pub fn pause_engagement(env: Env, admin: Address, engagement_id: String) {
