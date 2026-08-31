@@ -203,6 +203,186 @@ pub struct MilestoneExtensionProposal {
     pub expires_at_ledger: u32,
 }
 
+// Add this constant near other constants (around line 200)
+const MAX_PAGINATED_QUERY_LIMIT: u32 = 100;
+
+// Add this DataKey variant to the DataKey enum (around line 560)
+/// Paused engagement IDs list for paginated queries (issue #326).
+PausedEngagements,
+
+// Add this function to the HireSettleContract impl (around line 850)
+/// Return a paginated list of engagement IDs that are currently paused/quarantined (issue #326).
+/// 
+/// # Arguments
+/// - `cursor`: Starting index for pagination (0-based). Use `0` for the first page.
+/// - `limit`: Maximum number of IDs to return. Must be ≤ 100.
+/// 
+/// # Returns
+/// Returns a `Vec<String>` containing up to `limit` engagement IDs, starting from `cursor`.
+/// If no more IDs are available, returns an empty vector.
+/// 
+/// # Panics
+/// Panics with `"InvalidLimit"` if `limit > 100`.
+/// 
+/// # Example
+/// ```
+/// let page1 = contract.get_paused_engagements(env.clone(), 0, 10);
+/// let page2 = contract.get_paused_engagements(env.clone(), 10, 10);
+/// ```
+pub fn get_paused_engagements(env: Env, cursor: u32, limit: u32) -> Vec<String> {
+    if limit == 0 || limit > MAX_PAGINATED_QUERY_LIMIT {
+        panic!("InvalidLimit");
+    }
+    
+    let paused_ids: Vec<String> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::PausedEngagements)
+        .unwrap_or_else(|| Vec::new(&env));
+    
+    let mut result = Vec::new(&env);
+    let total_len = paused_ids.len();
+    
+    // If cursor is out of bounds, return empty vector
+    if cursor >= total_len {
+        return result;
+    }
+    
+    let start = cursor;
+    let end = if cursor + limit > total_len {
+        total_len
+    } else {
+        cursor + limit
+    };
+    
+    for i in start..end {
+        if let Some(id) = paused_ids.get(i) {
+            result.push_back(id);
+        }
+    }
+    
+    result
+}
+
+/// Return the total number of currently paused engagements (issue #326).
+/// Useful for pagination calculations and monitoring.
+pub fn get_paused_engagement_count(env: Env) -> u32 {
+    let paused_ids: Vec<String> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::PausedEngagements)
+        .unwrap_or_else(|| Vec::new(&env));
+    
+    paused_ids.len()
+}
+
+// Update pause_engagement function to maintain the paused list
+pub fn pause_engagement(env: Env, admin: Address, engagement_id: String) {
+    Self::assert_admin(&env, &admin);
+
+    let _ = Self::get_engagement_internal(&env, &engagement_id);
+
+    // Set the paused flag
+    env.storage()
+        .persistent()
+        .set(&DataKey::EngagementPaused(engagement_id.clone()), &true);
+    env.storage().persistent().extend_ttl(
+        &DataKey::EngagementPaused(engagement_id.clone()),
+        100_000,
+        6_300_000,
+    );
+
+    // Add to the paused engagements list if not already present
+    let mut paused_ids: Vec<String> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::PausedEngagements)
+        .unwrap_or_else(|| Vec::new(&env));
+    
+    // Check if already in the list
+    let mut found = false;
+    for i in 0..paused_ids.len() {
+        if let Some(id) = paused_ids.get(i) {
+            if id == engagement_id {
+                found = true;
+                break;
+            }
+        }
+    }
+    
+    if !found {
+        paused_ids.push_back(engagement_id.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::PausedEngagements, &paused_ids);
+        env.storage().persistent().extend_ttl(
+            &DataKey::PausedEngagements,
+            100_000,
+            6_300_000,
+        );
+    }
+
+    env.events().publish(
+        (
+            Symbol::new(&env, "engagement_paused"),
+            engagement_id.clone(),
+        ),
+        admin,
+    );
+}
+
+// Update unpause_engagement function to maintain the paused list
+pub fn unpause_engagement(env: Env, admin: Address, engagement_id: String) {
+    Self::assert_admin(&env, &admin);
+
+    let _ = Self::get_engagement_internal(&env, &engagement_id);
+
+    // Remove the paused flag
+    env.storage()
+        .persistent()
+        .remove(&DataKey::EngagementPaused(engagement_id.clone()));
+
+    // Remove from the paused engagements list
+    let paused_ids: Vec<String> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::PausedEngagements)
+        .unwrap_or_else(|| Vec::new(&env));
+    
+    let mut new_paused_ids = Vec::new(&env);
+    for i in 0..paused_ids.len() {
+        if let Some(id) = paused_ids.get(i) {
+            if id != engagement_id {
+                new_paused_ids.push_back(id);
+            }
+        }
+    }
+    
+    if new_paused_ids.len() == 0 {
+        // Remove the storage key entirely if list is empty
+        env.storage()
+            .persistent()
+            .remove(&DataKey::PausedEngagements);
+    } else {
+        env.storage()
+            .persistent()
+            .set(&DataKey::PausedEngagements, &new_paused_ids);
+        env.storage().persistent().extend_ttl(
+            &DataKey::PausedEngagements,
+            100_000,
+            6_300_000,
+        );
+    }
+
+    env.events().publish(
+        (
+            Symbol::new(&env, "engagement_unpaused"),
+            engagement_id.clone(),
+        ),
+        admin,
+    );
+}
+
 /// The full engagement record stored on-chain — note that `proof_submitted_at` on
 /// each milestone is set by `submit_proof` and consumed by `force_confirm_milestone`.
 #[contracttype]
