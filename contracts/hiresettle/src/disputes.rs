@@ -96,6 +96,9 @@ impl HireSettleContract {
             &reason.clone(),
         );
 
+        // Issue #468: every panel member is now on the hook for a vote.
+        Self::record_arbiter_assignments(&env, &engagement.arbiters);
+
         // Issue #246: record when the dispute was raised so `escalate_dispute`
         // can measure elapsed time against the dispute window.
         env.storage().persistent().set(
@@ -180,6 +183,7 @@ impl HireSettleContract {
         }
 
         record.voted.push_back(arbiter.clone());
+        Self::record_arbiter_vote(&env, &arbiter, &engagement_id, milestone_index);
         if approve {
             record.approve_votes += 1;
         } else {
@@ -251,6 +255,7 @@ impl HireSettleContract {
             let old_engagement_status = engagement.status.clone();
             if all_done {
                 engagement.status = EngagementStatus::Completed;
+                Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
                 Self::decrement_company_active_count(&env, &engagement.company);
             }
 
@@ -292,6 +297,11 @@ impl HireSettleContract {
             milestone.status = MilestoneStatus::Pending;
             milestone.proof_hash = String::from_str(&env, "");
             milestone.proof_submitted_at = 0;
+            // Issue #465: a rejected proof reopens the milestone, so the
+            // recruiter's no-show clock restarts from here.
+            if milestone.kind == MilestoneKind::Placement {
+                Self::mark_milestone_pending_since(&env, &engagement_id, milestone_index);
+            }
             engagement.milestones.set(milestone_index, milestone);
 
             env.storage().persistent().remove(&vote_key);
@@ -592,6 +602,7 @@ impl HireSettleContract {
             let old_engagement_status = engagement.status.clone();
             if all_done {
                 engagement.status = EngagementStatus::Completed;
+                Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
                 Self::decrement_company_active_count(&env, &engagement.company);
             }
 
@@ -636,6 +647,11 @@ impl HireSettleContract {
             milestone.status = MilestoneStatus::Pending;
             milestone.proof_hash = String::from_str(&env, "");
             milestone.proof_submitted_at = 0;
+            // Issue #465: a rejected proof reopens the milestone, so the
+            // recruiter's no-show clock restarts from here.
+            if milestone.kind == MilestoneKind::Placement {
+                Self::mark_milestone_pending_since(&env, &engagement_id, milestone_index);
+            }
             engagement.milestones.set(milestone_index, milestone);
 
             env.storage().persistent().remove(&vote_key);
@@ -804,6 +820,7 @@ impl HireSettleContract {
         let old_engagement_status = engagement.status.clone();
         if all_done {
             engagement.status = EngagementStatus::Completed;
+            Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
             Self::decrement_company_active_count(&env, &engagement.company);
         }
 
@@ -1002,6 +1019,7 @@ impl HireSettleContract {
         let old_engagement_status = engagement.status.clone();
         if all_done {
             engagement.status = EngagementStatus::Completed;
+            Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
             Self::decrement_company_active_count(&env, &engagement.company);
         }
         engagement.last_activity_ledger = env.ledger().sequence();
