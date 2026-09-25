@@ -198,8 +198,15 @@ impl HireSettleContract {
             }
         }
 
-        let arbiters = arbiter_setup.arbiters;
-        let quorum = arbiter_setup.quorum;
+        // Issue #464: a bundled engagement takes its panel from the bundle and
+        // ignores `arbiter_setup`, so every member shares one arbiter set.
+        let (arbiters, quorum) = match config.bundle_id {
+            Some(ref bundle_id) => {
+                let bundle = Self::load_bundle_for(&env, bundle_id, &company);
+                (bundle.arbiters, bundle.quorum)
+            }
+            None => (arbiter_setup.arbiters, arbiter_setup.quorum),
+        };
 
         if arbiters.is_empty() {
             panic!("at least one arbiter required");
@@ -310,6 +317,11 @@ impl HireSettleContract {
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&company, &env.current_contract_address(), &total_amount);
 
+        // Issue #459: escrow the optional recruiter bond alongside the company's funding.
+        if let Some(bond_amount) = config.recruiter_bond_amount {
+            Self::escrow_recruiter_bond(&env, &engagement_id, &recruiter, &token, bond_amount);
+        }
+
         let engagement = Engagement {
             id: engagement_id.clone(),
             company: company.clone(),
@@ -409,6 +421,10 @@ impl HireSettleContract {
             100_000,
             6_300_000,
         );
+
+        if let Some(ref bundle_id) = config.bundle_id {
+            Self::add_bundle_member(&env, bundle_id, &engagement_id);
+        }
 
         env.events().publish(
             (
@@ -741,6 +757,7 @@ impl HireSettleContract {
         );
 
         Self::decrement_company_active_count(&env, &engagement.company);
+        Self::settle_recruiter_bond(&env, &engagement);
 
         env.events().publish(
             (

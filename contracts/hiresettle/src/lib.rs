@@ -40,6 +40,7 @@ mod disputes;
 mod transfers;
 mod queries;
 mod helpers;
+mod bonds;
 
 pub(crate) use constants::*;
 pub(crate) use errors::*;

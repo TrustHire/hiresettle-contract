@@ -353,9 +353,10 @@ impl HireSettleContract {
             let effective_bps = if Self::is_fee_waived_internal(&env, &engagement_id) {
                 0
             } else {
-                Self::apply_referral_discount(&env, platform_fee.bps, &engagement.referrer)
+                let tiered_bps =
+                    Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
+                Self::apply_referral_discount(&env, tiered_bps, &engagement.referrer)
             };
-            Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
             let fee_amount = (payment * effective_bps as i128) / 10_000;
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
@@ -383,6 +384,7 @@ impl HireSettleContract {
         engagement
             .milestones
             .set(milestone_index, milestone.clone());
+        Self::bond_clear_rejection(&env, &engagement_id, milestone_index);
 
         let all_done = (0..engagement.milestones.len()).all(|i| {
             let s = engagement.milestones.get(i).unwrap().status;
@@ -393,6 +395,7 @@ impl HireSettleContract {
         if all_done {
             engagement.status = EngagementStatus::Completed;
             Self::decrement_company_active_count(&env, &engagement.company);
+            Self::settle_recruiter_bond(&env, &engagement);
         }
         engagement.last_activity_ledger = env.ledger().sequence();
 

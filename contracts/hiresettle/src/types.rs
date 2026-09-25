@@ -238,4 +238,45 @@ pub struct EngagementConfig {
     /// Whether this engagement should be listed by `get_public_engagement_ids`
     /// (issue #365). Most engagements are private; set `true` to opt in.
     pub is_public: bool,
+    /// Optional collateral bond the recruiter posts into escrow at creation
+    /// (issue #459). When `Some`, the recruiter must also authorize
+    /// `create_engagement`, and the bond is either returned to the recruiter
+    /// or (partly) forfeited to the company when the engagement ends — see
+    /// [`RecruiterBond`]. `None` keeps the pre-#459 behaviour exactly.
+    pub recruiter_bond_amount: Option<i128>,
+    /// Optional engagement bundle to join (issue #464). When `Some`, the
+    /// bundle must already be registered via `create_engagement_bundle` by the
+    /// same company, and its shared arbiter panel/quorum is used in place of
+    /// the `arbiter_setup` argument (which is then ignored).
+    pub bundle_id: Option<String>,
+}
+/// Escrowed recruiter collateral bond for a single engagement (issue #459).
+/// Stored under `DataKey::RecruiterBond(engagement_id)`.
+#[contracttype]
+#[derive(Clone)]
+pub struct RecruiterBond {
+    /// Bond amount escrowed at creation, in the engagement token's smallest unit.
+    pub amount: i128,
+    /// `true` once the bond has been (fully or partly) forfeited to the company.
+    pub forfeited: bool,
+    /// `true` once the bond has been paid out (returned and/or forfeited);
+    /// guarantees the bond settles at most once.
+    pub settled: bool,
+    /// Milestone indices whose dispute was rejected (reject quorum or
+    /// super-arbiter rejection) and that have not since been confirmed or
+    /// resolved. If any remain when the engagement is cancelled or expires,
+    /// the bond is forfeited.
+    pub rejected_milestones: Vec<u32>,
+}
+/// Shared arbiter panel for a group of related engagements (issue #464).
+/// Stored under `DataKey::Bundle(bundle_id)`.
+#[contracttype]
+#[derive(Clone)]
+pub struct EngagementBundle {
+    /// Company that registered the bundle; only it may create member engagements.
+    pub company: Address,
+    /// Arbiter panel copied onto every member engagement at creation time.
+    pub arbiters: Vec<Address>,
+    /// M-of-N quorum copied onto every member engagement at creation time.
+    pub quorum: u32,
 }
