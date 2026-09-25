@@ -45,6 +45,9 @@ fn setup() -> (Env, Address, Address, Address, Address, Address) {
     (env, contract_id, token_id, company, recruiter, arbiter)
 }
 
+/// Linear prerequisites (each milestone depends on the previous one) — the
+/// issue #461 equivalent of the old strict sequential rule, so every test
+/// built on this fixture doubles as a regression test for it.
 fn build_milestones(env: &Env) -> Vec<Milestone> {
     vec![
         env,
@@ -57,6 +60,7 @@ fn build_milestones(env: &Env) -> Vec<Milestone> {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(env),
         },
         Milestone {
             name: String::from_str(env, "30-Day Retention"),
@@ -67,6 +71,7 @@ fn build_milestones(env: &Env) -> Vec<Milestone> {
             status: MilestoneStatus::Locked,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: vec![env, 0u32],
         },
         Milestone {
             name: String::from_str(env, "90-Day Retention"),
@@ -77,6 +82,7 @@ fn build_milestones(env: &Env) -> Vec<Milestone> {
             status: MilestoneStatus::Locked,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: vec![env, 1u32],
         },
     ]
 }
@@ -97,6 +103,7 @@ fn create_standard_engagement(
         &ArbiterSetup {
             arbiters: vec![env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         token_id,
         &1_000_000_000,
@@ -201,6 +208,7 @@ fn test_create_engagement_invalid_percentages() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
         Milestone {
             name: String::from_str(&env, "Retention"),
@@ -211,6 +219,7 @@ fn test_create_engagement_invalid_percentages() {
             status: MilestoneStatus::Locked,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -221,6 +230,7 @@ fn test_create_engagement_invalid_percentages() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -620,6 +630,7 @@ fn test_two_milestone_engagement_50_50() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
         Milestone {
             name: String::from_str(&env, "30-Day Retention"),
@@ -630,6 +641,7 @@ fn test_two_milestone_engagement_50_50() {
             status: MilestoneStatus::Locked,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -641,6 +653,7 @@ fn test_two_milestone_engagement_50_50() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &2_000_000_000,
@@ -1128,6 +1141,7 @@ fn test_arbiter_successor_cannot_double_vote_mid_dispute() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1182,6 +1196,7 @@ fn test_arbiter_successor_seat_migrated_not_duplicated() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1335,6 +1350,7 @@ fn test_metadata_hash_present() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1388,6 +1404,7 @@ fn test_metadata_hash_empty_string_rejected() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1434,6 +1451,7 @@ fn test_co_recruiter_60_40_split() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1521,6 +1539,7 @@ fn test_split_bps_over_10000_rejected() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1556,6 +1575,7 @@ fn test_co_recruiter_gets_remainder() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1606,6 +1626,7 @@ fn test_co_recruiter_summary_fields() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1645,6 +1666,7 @@ fn test_split_bps_10000_accepted() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1887,6 +1909,7 @@ fn test_quorum_2_of_3_approve() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1934,6 +1957,7 @@ fn test_quorum_2_of_3_reject() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1981,6 +2005,7 @@ fn test_duplicate_vote_rejected() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2055,6 +2080,7 @@ fn test_quorum_unanimous_requires_all_approvals() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2111,6 +2137,7 @@ fn test_quorum_unanimous_single_reject_resets_milestone() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2154,6 +2181,7 @@ fn test_quorum_unanimous_2_of_2_approve() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2201,6 +2229,7 @@ fn test_quorum_unanimous_4_of_4_approve() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone(), a4.clone()],
             quorum: 4,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2252,6 +2281,7 @@ fn test_quorum_unanimous_mixed_votes_reject_wins() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2300,6 +2330,7 @@ fn test_quorum_unanimous_non_arbiter_cannot_vote() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2342,6 +2373,7 @@ fn test_quorum_unanimous_vote_record_cleared_after_reset() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2406,6 +2438,7 @@ fn test_quorum_unanimous_duplicate_vote_panics() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2449,6 +2482,7 @@ fn test_quorum_unanimous_vote_after_resolution_panics() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2496,6 +2530,7 @@ fn test_quorum_unanimous_vote_without_dispute_panics() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2537,6 +2572,7 @@ fn test_quorum_unanimous_fee_paid_only_to_deciding_arbiter() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2587,6 +2623,7 @@ fn test_quorum_unanimous_final_milestone_completes_engagement() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2602,6 +2639,7 @@ fn test_quorum_unanimous_final_milestone_completes_engagement() {
                 status: MilestoneStatus::Pending,
                 proof_submitted_at: 0,
                 replacement_paid_out: 0,
+                prerequisites: Vec::new(&env),
             },
         ],
         &vec![&env],
@@ -3214,6 +3252,7 @@ fn test_get_engagements_by_company_insertion_order() {
             &ArbiterSetup {
                 arbiters: vec![&env, arbiter.clone()],
                 quorum: 1,
+                weights: None,
             },
             &token_id,
             &1_000_000_000,
@@ -3314,6 +3353,7 @@ fn test_get_engagements_first_page_ten() {
             &ArbiterSetup {
                 arbiters: vec![&env, arbiter.clone()],
                 quorum: 1,
+                weights: None,
             },
             &token_id,
             &1_000_000_000,
@@ -3361,6 +3401,7 @@ fn test_get_engagements_by_recruiter_insertion_order() {
             &ArbiterSetup {
                 arbiters: vec![&env, arbiter.clone()],
                 quorum: 1,
+                weights: None,
             },
             &token_id,
             &1_000_000_000,
@@ -3424,6 +3465,7 @@ fn test_get_engagements_by_recruiter_multi_recruiter() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -3439,6 +3481,7 @@ fn test_get_engagements_by_recruiter_multi_recruiter() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -4064,6 +4107,7 @@ fn test_force_confirm_last_milestone_completes_engagement() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -4075,6 +4119,7 @@ fn test_force_confirm_last_milestone_completes_engagement() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -4332,6 +4377,7 @@ fn create_engagement_with_id(
         &ArbiterSetup {
             arbiters: vec![env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         token_id,
         &1_000_000_000,
@@ -4728,6 +4774,7 @@ fn test_milestone_cap_at_cap() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         });
     }
 
@@ -4738,6 +4785,7 @@ fn test_milestone_cap_at_cap() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -4783,6 +4831,7 @@ fn test_milestone_cap_over_cap() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         });
     }
 
@@ -4793,6 +4842,7 @@ fn test_milestone_cap_over_cap() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -4816,6 +4866,7 @@ fn test_milestone_cap_zero_milestones() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -4851,6 +4902,7 @@ fn test_milestone_name_64_char_accepted() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -4861,6 +4913,7 @@ fn test_milestone_name_64_char_accepted() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -4892,6 +4945,7 @@ fn test_milestone_name_65_char_rejected() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -4902,6 +4956,7 @@ fn test_milestone_name_65_char_rejected() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -4929,6 +4984,7 @@ fn test_milestone_name_empty_rejected() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -4939,6 +4995,7 @@ fn test_milestone_name_empty_rejected() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -4970,6 +5027,7 @@ fn test_milestone_name_multi_milestone_partial_failure() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
         Milestone {
             name: name_65,
@@ -4980,6 +5038,7 @@ fn test_milestone_name_multi_milestone_partial_failure() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -4990,6 +5049,7 @@ fn test_milestone_name_multi_milestone_partial_failure() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5020,6 +5080,7 @@ fn test_milestone_name_uniqueness_happy_path() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
         Milestone {
             name: String::from_str(&env, "Second Milestone"),
@@ -5030,6 +5091,7 @@ fn test_milestone_name_uniqueness_happy_path() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -5040,6 +5102,7 @@ fn test_milestone_name_uniqueness_happy_path() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5067,6 +5130,7 @@ fn test_milestone_name_uniqueness_duplicate_detection() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
         Milestone {
             name: String::from_str(&env, "Duplicate Milestone"),
@@ -5077,6 +5141,7 @@ fn test_milestone_name_uniqueness_duplicate_detection() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -5087,6 +5152,7 @@ fn test_milestone_name_uniqueness_duplicate_detection() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5113,6 +5179,7 @@ fn test_milestone_name_uniqueness_case_sensitivity() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
         Milestone {
             name: String::from_str(&env, "placement"),
@@ -5123,6 +5190,7 @@ fn test_milestone_name_uniqueness_case_sensitivity() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -5133,6 +5201,7 @@ fn test_milestone_name_uniqueness_case_sensitivity() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5160,6 +5229,7 @@ fn test_job_title_empty_rejected() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5187,6 +5257,7 @@ fn test_job_title_64_char_accepted() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5215,6 +5286,7 @@ fn test_job_title_65_char_rejected() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5416,6 +5488,7 @@ fn test_cap_is_per_company_isolated() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id2,
         &1_000_000_000,
@@ -5450,6 +5523,7 @@ fn test_completion_frees_slot() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -5461,6 +5535,7 @@ fn test_completion_frees_slot() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5496,6 +5571,7 @@ fn test_completion_frees_slot() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5511,6 +5587,7 @@ fn test_completion_frees_slot() {
                 status: MilestoneStatus::Pending,
                 proof_submitted_at: 0,
                 replacement_paid_out: 0,
+                prerequisites: Vec::new(&env),
             },
         ],
         &vec![&env],
@@ -5638,6 +5715,7 @@ fn test_admin_decreasing_cap_blocks_new_while_over() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5790,6 +5868,7 @@ fn test_create_engagement_rejects_company_as_recruiter() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5813,6 +5892,7 @@ fn test_create_engagement_rejects_company_as_arbiter() {
         &ArbiterSetup {
             arbiters: vec![&env, company.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5836,6 +5916,7 @@ fn test_create_engagement_rejects_recruiter_as_arbiter() {
         &ArbiterSetup {
             arbiters: vec![&env, recruiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5860,6 +5941,7 @@ fn test_create_engagement_rejects_recruiter_as_one_of_several_arbiters() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone(), recruiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5948,6 +6030,7 @@ fn test_engagement_payout_math_is_decimal_agnostic_for_18_decimal_token() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &mock_token_id,
         &total_amount,
@@ -5998,6 +6081,7 @@ fn test_min_amount_is_raw_units_not_scaled_per_token_decimals() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &mock_token_id,
         &min_amount,
@@ -6032,6 +6116,7 @@ fn test_request_replacement_clears_in_flight_dispute_on_retention_milestone() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -6268,6 +6353,7 @@ fn test_create_engagement_below_updated_min_amount_rejected() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &(new_min - 1),
@@ -6656,6 +6742,7 @@ fn test_multi_arbiter_quorum_with_three_arbiters_and_quorum_two() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -6871,6 +6958,7 @@ fn test_arbiter_fee_deducted_on_dispute_approval() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -7042,6 +7130,7 @@ fn test_multiple_companies_independent_active_counts() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id2,
         &1_000_000_000,
@@ -7132,6 +7221,7 @@ fn test_co_recruiter_split_with_platform_fee() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -7407,6 +7497,7 @@ fn test_token_allowlist_rejects_second_token_when_only_first_allowed() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id2,
         &1_000_000_000,
@@ -7481,6 +7572,7 @@ fn test_arbiter_votes_reach_quorum_in_different_order() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -7538,6 +7630,7 @@ fn test_co_recruiter_split_with_odd_percentage_remainder() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -7703,6 +7796,7 @@ fn test_create_engagement_rejects_99_percent_total() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
         Milestone {
             name: String::from_str(&env, "M2"),
@@ -7713,6 +7807,7 @@ fn test_create_engagement_rejects_99_percent_total() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -7723,6 +7818,7 @@ fn test_create_engagement_rejects_99_percent_total() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -7853,4 +7949,927 @@ fn test_remove_fee_tier_from_empty_list_panics() {
 
     // No tiers set - try to remove one
     client.remove_fee_tier(&company, &1_000_000);
+}
+
+
+// ============================================================
+// SHARED HELPERS — ISSUES #460-#463
+// ============================================================
+
+fn milestone_with_prereqs(
+    env: &Env,
+    name: &str,
+    payment_percent: u32,
+    kind: MilestoneKind,
+    prerequisites: Vec<u32>,
+) -> Milestone {
+    let status = if kind == MilestoneKind::Placement {
+        MilestoneStatus::Pending
+    } else {
+        MilestoneStatus::Locked
+    };
+    Milestone {
+        name: String::from_str(env, name),
+        payment_percent,
+        kind,
+        valid_after_ledger: 0,
+        proof_hash: String::from_str(env, ""),
+        status,
+        proof_submitted_at: 0,
+        replacement_paid_out: 0,
+        prerequisites,
+    }
+}
+
+/// Two independent 50/50 placement milestones — no prerequisites.
+fn two_parallel_placements(env: &Env) -> Vec<Milestone> {
+    vec![
+        env,
+        milestone_with_prereqs(env, "Placement A", 50, MilestoneKind::Placement, Vec::new(env)),
+        milestone_with_prereqs(env, "Placement B", 50, MilestoneKind::Placement, Vec::new(env)),
+    ]
+}
+
+fn create_with_setup(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    id: &str,
+    arbiter_setup: ArbiterSetup,
+    milestones: Vec<Milestone>,
+) -> String {
+    let eng_id = String::from_str(env, id);
+    client.create_engagement(
+        &eng_id,
+        company,
+        recruiter,
+        &arbiter_setup,
+        token_id,
+        &1_000_000_000,
+        &String::from_str(env, "Engineer"),
+        &milestones,
+        &vec![env, 30u32, 90u32],
+        &default_config(),
+    );
+    eng_id
+}
+
+fn submit_and_dispute(
+    env: &Env,
+    client: &HireSettleContractClient,
+    company: &Address,
+    recruiter: &Address,
+    eng_id: &String,
+    milestone_index: u32,
+) {
+    let proof = std::format!("ipfs://proof-{}", milestone_index);
+    client.submit_proof(
+        recruiter,
+        eng_id,
+        &milestone_index,
+        &String::from_str(env, &proof),
+    );
+    client.raise_dispute(
+        company,
+        eng_id,
+        &milestone_index,
+        &String::from_str(env, "dispute"),
+    );
+}
+
+// ============================================================
+// ISSUE #460 — WEIGHTED ARBITER VOTING
+// ============================================================
+
+/// Panel of three with weights [5, 1, 1] and quorum 4 (total weight 7,
+/// so rejection resolves at reject_weight > 3).
+fn weighted_panel(env: &Env) -> (ArbiterSetup, Address, Address, Address) {
+    let heavy = Address::generate(env);
+    let light1 = Address::generate(env);
+    let light2 = Address::generate(env);
+    let setup = ArbiterSetup {
+        arbiters: vec![env, heavy.clone(), light1.clone(), light2.clone()],
+        quorum: 4,
+        weights: Some(vec![env, 5u32, 1u32, 1u32]),
+    };
+    (setup, heavy, light1, light2)
+}
+
+#[test]
+fn test_weighted_single_heavy_arbiter_approves_alone() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let (panel, heavy, _, _) = weighted_panel(&env);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "W-APPROVE", panel,
+        build_milestones(&env),
+    );
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+
+    client.cast_arbiter_vote(&heavy, &eng_id, &0, &true);
+
+    assert_eq!(
+        client.get_milestone(&eng_id, &0).status,
+        MilestoneStatus::Resolved
+    );
+    assert_eq!(token_client.balance(&recruiter), 300_000_000);
+}
+
+#[test]
+fn test_weighted_single_heavy_arbiter_rejects_alone() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let (panel, heavy, _, _) = weighted_panel(&env);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "W-REJECT", panel,
+        build_milestones(&env),
+    );
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+
+    client.cast_arbiter_vote(&heavy, &eng_id, &0, &false);
+
+    let m0 = client.get_milestone(&eng_id, &0);
+    assert_eq!(m0.status, MilestoneStatus::Pending);
+    assert!(m0.proof_hash.is_empty());
+}
+
+/// Two light approvals (weight 2) are below quorum 4 even though they are a
+/// headcount majority; both tallies are reported.
+#[test]
+fn test_weighted_light_votes_do_not_reach_quorum() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let (panel, _, light1, light2) = weighted_panel(&env);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "W-LIGHT", panel,
+        build_milestones(&env),
+    );
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+
+    client.cast_arbiter_vote(&light1, &eng_id, &0, &true);
+    client.cast_arbiter_vote(&light2, &eng_id, &0, &true);
+
+    assert_eq!(
+        client.get_milestone(&eng_id, &0).status,
+        MilestoneStatus::Disputed
+    );
+    let counts = client.get_arbiter_votes(&eng_id, &0);
+    assert_eq!(counts.approve_votes, 2);
+    assert_eq!(counts.reject_votes, 0);
+    let weights = client.get_arbiter_vote_weights(&eng_id, &0).unwrap();
+    assert_eq!(weights.approve_weight, 2);
+    assert_eq!(weights.reject_weight, 0);
+    assert_eq!(weights.total_weight, 7);
+    assert_eq!(weights.quorum, 4);
+}
+
+#[test]
+#[should_panic(expected = "duplicate vote")]
+fn test_weighted_duplicate_vote_rejected() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let (panel, _, light1, _) = weighted_panel(&env);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "W-DUP", panel,
+        build_milestones(&env),
+    );
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+
+    client.cast_arbiter_vote(&light1, &eng_id, &0, &true);
+    client.cast_arbiter_vote(&light1, &eng_id, &0, &true);
+}
+
+#[test]
+fn test_unweighted_engagement_has_no_weighted_tally() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "W-NONE",
+    );
+    let eng_id = String::from_str(&env, "W-NONE");
+    assert!(client.get_arbiter_vote_weights(&eng_id, &0).is_none());
+    assert!(client.get_engagement(&eng_id).arbiter_weights.is_none());
+}
+
+/// With weights, quorum is bounded by total weight, not headcount.
+#[test]
+fn test_weighted_quorum_may_exceed_headcount() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "W-BIGQ",
+        ArbiterSetup {
+            arbiters: vec![&env, a1.clone(), a2.clone()],
+            quorum: 5,
+            weights: Some(vec![&env, 3u32, 3u32]),
+        },
+        build_milestones(&env),
+    );
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+    client.cast_arbiter_vote(&a1, &eng_id, &0, &true);
+    assert_eq!(
+        client.get_milestone(&eng_id, &0).status,
+        MilestoneStatus::Disputed
+    );
+    client.cast_arbiter_vote(&a2, &eng_id, &0, &true);
+    assert_eq!(
+        client.get_milestone(&eng_id, &0).status,
+        MilestoneStatus::Resolved
+    );
+}
+
+#[test]
+#[should_panic(expected = "invalid quorum")]
+fn test_weighted_quorum_above_total_weight_rejected() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "W-BADQ",
+        ArbiterSetup {
+            arbiters: vec![&env, a1, a2],
+            quorum: 7,
+            weights: Some(vec![&env, 3u32, 3u32]),
+        },
+        build_milestones(&env),
+    );
+}
+
+#[test]
+#[should_panic(expected = "ArbiterWeightsLengthMismatch")]
+fn test_weighted_length_mismatch_rejected() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "W-LEN",
+        ArbiterSetup {
+            arbiters: vec![&env, a1, a2],
+            quorum: 1,
+            weights: Some(vec![&env, 3u32]),
+        },
+        build_milestones(&env),
+    );
+}
+
+#[test]
+#[should_panic(expected = "InvalidArbiterWeight")]
+fn test_weighted_zero_weight_rejected() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "W-ZERO",
+        ArbiterSetup {
+            arbiters: vec![&env, a1, a2],
+            quorum: 1,
+            weights: Some(vec![&env, 1u32, 0u32]),
+        },
+        build_milestones(&env),
+    );
+}
+
+/// Escalation must measure "still split" in weight: one light approval out
+/// of quorum 4 is unresolved and so escalatable.
+#[test]
+fn test_weighted_escalation_uses_weights() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let (panel, _, light1, _) = weighted_panel(&env);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "W-ESC", panel,
+        build_milestones(&env),
+    );
+    client.set_super_arbiter(&company, &Address::generate(&env));
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+    client.cast_arbiter_vote(&light1, &eng_id, &0, &true);
+
+    advance_ledger(&env, client.get_dispute_window() + 1);
+    client.escalate_dispute(&eng_id, &0);
+    assert!(client.is_dispute_escalated(&eng_id, &0));
+}
+
+// ============================================================
+// ISSUE #461 — MILESTONE DEPENDENCY GRAPH
+// ============================================================
+
+/// Linear prerequisites reproduce the old sequential rule: the second
+/// milestone cannot be confirmed while the first is still unconfirmed.
+#[test]
+#[should_panic(expected = "PreviousMilestoneNotComplete")]
+fn test_linear_prerequisites_block_out_of_order_confirm() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "P-LINEAR",
+    );
+    let eng_id = String::from_str(&env, "P-LINEAR");
+
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://p0"));
+    advance_ledger(&env, 31 * 17_280);
+    client.unlock_milestone(&eng_id, &1);
+    client.submit_proof(&recruiter, &eng_id, &1, &String::from_str(&env, "ipfs://p1"));
+
+    client.confirm_milestone(&company, &eng_id, &1);
+}
+
+#[test]
+fn test_linear_prerequisites_allow_in_order_confirm() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "P-INORDER",
+    );
+    let eng_id = String::from_str(&env, "P-INORDER");
+
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://p0"));
+    advance_ledger(&env, 31 * 17_280);
+    client.unlock_milestone(&eng_id, &1);
+    client.submit_proof(&recruiter, &eng_id, &1, &String::from_str(&env, "ipfs://p1"));
+
+    client.confirm_milestone(&company, &eng_id, &0);
+    client.confirm_milestone(&company, &eng_id, &1);
+    assert_eq!(
+        client.get_milestone(&eng_id, &1).status,
+        MilestoneStatus::Confirmed
+    );
+}
+
+/// Two placements gating one shared retention.
+fn branching_milestones(env: &Env) -> Vec<Milestone> {
+    vec![
+        env,
+        milestone_with_prereqs(env, "Placement A", 40, MilestoneKind::Placement, Vec::new(env)),
+        milestone_with_prereqs(env, "Placement B", 40, MilestoneKind::Placement, Vec::new(env)),
+        milestone_with_prereqs(
+            env,
+            "Shared Retention",
+            20,
+            MilestoneKind::Retention,
+            vec![env, 0u32, 1u32],
+        ),
+    ]
+}
+
+#[test]
+fn test_independent_branches_confirm_in_either_order() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+
+    for (id, first, second) in [("P-BR-AB", 0u32, 1u32), ("P-BR-BA", 1u32, 0u32)] {
+        let eng_id = create_with_setup(
+            &env, &client, &token_id, &company, &recruiter, id,
+            ArbiterSetup {
+                arbiters: vec![&env, arbiter.clone()],
+                quorum: 1,
+                weights: None,
+            },
+            branching_milestones(&env),
+        );
+        client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://a"));
+        client.submit_proof(&recruiter, &eng_id, &1, &String::from_str(&env, "ipfs://b"));
+        client.confirm_milestone(&company, &eng_id, &first);
+        client.confirm_milestone(&company, &eng_id, &second);
+        assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Confirmed);
+        assert_eq!(client.get_milestone(&eng_id, &1).status, MilestoneStatus::Confirmed);
+    }
+    assert_eq!(token_client.balance(&recruiter), 2 * 800_000_000);
+}
+
+#[test]
+#[should_panic(expected = "PreviousMilestoneNotComplete")]
+fn test_shared_milestone_requires_every_prerequisite() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "P-SHARED",
+        ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        branching_milestones(&env),
+    );
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://a"));
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    advance_ledger(&env, 31 * 17_280);
+    client.unlock_milestone(&eng_id, &2);
+    client.submit_proof(&recruiter, &eng_id, &2, &String::from_str(&env, "ipfs://r"));
+    // Placement B (index 1) is still pending.
+    client.confirm_milestone(&company, &eng_id, &2);
+}
+
+#[test]
+#[should_panic(expected = "PreviousMilestoneNotComplete")]
+fn test_force_confirm_enforces_prerequisites() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "P-FORCE",
+        ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        vec![
+            &env,
+            milestone_with_prereqs(&env, "Placement A", 50, MilestoneKind::Placement, Vec::new(&env)),
+            milestone_with_prereqs(
+                &env,
+                "Placement B",
+                50,
+                MilestoneKind::Placement,
+                vec![&env, 0u32],
+            ),
+        ],
+    );
+    client.submit_proof(&recruiter, &eng_id, &1, &String::from_str(&env, "ipfs://b"));
+    advance_ledger(&env, client.get_confirm_window() + 1);
+    client.force_confirm_milestone(&recruiter, &eng_id, &1);
+}
+
+#[test]
+#[should_panic(expected = "PrerequisiteCycle")]
+fn test_create_rejects_prerequisite_cycle() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "P-CYCLE",
+        ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        vec![
+            &env,
+            milestone_with_prereqs(&env, "A", 50, MilestoneKind::Placement, vec![&env, 1u32]),
+            milestone_with_prereqs(&env, "B", 50, MilestoneKind::Placement, vec![&env, 0u32]),
+        ],
+    );
+}
+
+#[test]
+#[should_panic(expected = "PrerequisiteCycle")]
+fn test_create_rejects_self_prerequisite() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "P-SELF",
+        ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        vec![
+            &env,
+            milestone_with_prereqs(&env, "A", 100, MilestoneKind::Placement, vec![&env, 0u32]),
+        ],
+    );
+}
+
+#[test]
+#[should_panic(expected = "InvalidPrerequisiteIndex")]
+fn test_create_rejects_out_of_range_prerequisite() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "P-RANGE",
+        ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        vec![
+            &env,
+            milestone_with_prereqs(&env, "A", 50, MilestoneKind::Placement, Vec::new(&env)),
+            milestone_with_prereqs(&env, "B", 50, MilestoneKind::Placement, vec![&env, 2u32]),
+        ],
+    );
+}
+
+// ============================================================
+// ISSUE #462 — PARTIAL-APPROVAL (SPLIT) DISPUTE RESOLUTION
+// ============================================================
+
+fn split_panel(env: &Env, n: u32, quorum: u32, weights: Option<Vec<u32>>) -> (ArbiterSetup, Vec<Address>) {
+    let mut arbiters = Vec::new(env);
+    for _ in 0..n {
+        arbiters.push_back(Address::generate(env));
+    }
+    (
+        ArbiterSetup {
+            arbiters: arbiters.clone(),
+            quorum,
+            weights,
+        },
+        arbiters,
+    )
+}
+
+#[test]
+#[should_panic(expected = "SplitVotingDisabled")]
+fn test_split_vote_rejected_when_not_enabled() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let (panel, arbs) = split_panel(&env, 1, 1, None);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "S-OFF", panel,
+        two_parallel_placements(&env),
+    );
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+    assert!(!client.is_split_voting_enabled(&eng_id));
+    client.cast_arbiter_split_vote(&arbs.get(0).unwrap(), &eng_id, &0, &50);
+}
+
+/// Odd quorum: votes 80, 20, 50 settle at the median, 50. The milestone
+/// share is 500M, so 250M is released and 250M withheld in escrow.
+#[test]
+fn test_split_vote_median_releases_fraction() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let (panel, arbs) = split_panel(&env, 3, 3, None);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "S-MEDIAN", panel,
+        two_parallel_placements(&env),
+    );
+    client.set_split_voting_enabled(&company, &eng_id, &true);
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+
+    client.cast_arbiter_split_vote(&arbs.get(0).unwrap(), &eng_id, &0, &80);
+    client.cast_arbiter_split_vote(&arbs.get(1).unwrap(), &eng_id, &0, &20);
+    assert_eq!(
+        client.get_dispute_split_votes(&eng_id, &0),
+        vec![&env, 80u32, 20u32]
+    );
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Disputed);
+
+    client.cast_arbiter_split_vote(&arbs.get(2).unwrap(), &eng_id, &0, &50);
+    assert!(has_event(&env, "dispute_split_resolved"));
+
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Resolved);
+    assert_eq!(token_client.balance(&recruiter), 250_000_000);
+    assert_eq!(token_client.balance(&contract_id), 750_000_000);
+    assert_eq!(client.get_engagement(&eng_id).released_amount, 250_000_000);
+    assert_eq!(client.get_dispute_split_votes(&eng_id, &0).len(), 0);
+}
+
+/// Even quorum settles at the lower of the two middle votes.
+#[test]
+fn test_split_vote_even_count_takes_lower_median() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let (panel, arbs) = split_panel(&env, 2, 2, None);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "S-EVEN", panel,
+        two_parallel_placements(&env),
+    );
+    client.set_split_voting_enabled(&company, &eng_id, &true);
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+
+    client.cast_arbiter_split_vote(&arbs.get(0).unwrap(), &eng_id, &0, &70);
+    client.cast_arbiter_split_vote(&arbs.get(1).unwrap(), &eng_id, &0, &30);
+
+    // 30% of the 500M share.
+    assert_eq!(token_client.balance(&recruiter), 150_000_000);
+}
+
+/// Weights [1, 1, 3], votes 10, 20, 90: cumulative weight reaches half of 5
+/// only at 90, so the heavy arbiter's position wins.
+#[test]
+fn test_split_vote_weighted_median() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let (panel, arbs) = split_panel(&env, 3, 5, Some(vec![&env, 1u32, 1u32, 3u32]));
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "S-WEIGHTED", panel,
+        two_parallel_placements(&env),
+    );
+    client.set_split_voting_enabled(&company, &eng_id, &true);
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+
+    client.cast_arbiter_split_vote(&arbs.get(0).unwrap(), &eng_id, &0, &10);
+    client.cast_arbiter_split_vote(&arbs.get(1).unwrap(), &eng_id, &0, &20);
+    client.cast_arbiter_split_vote(&arbs.get(2).unwrap(), &eng_id, &0, &90);
+
+    assert_eq!(token_client.balance(&recruiter), 450_000_000);
+}
+
+/// The withheld share stays in escrow until the engagement completes, then
+/// goes back to the company; escrow ends empty.
+#[test]
+fn test_split_withheld_refunded_to_company_on_completion() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let (panel, arbs) = split_panel(&env, 1, 1, None);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "S-REFUND", panel,
+        two_parallel_placements(&env),
+    );
+    let company_start = token_client.balance(&company);
+    client.set_split_voting_enabled(&company, &eng_id, &true);
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+    client.cast_arbiter_split_vote(&arbs.get(0).unwrap(), &eng_id, &0, &40);
+
+    // 200M released, 300M withheld, second milestone's 500M still escrowed.
+    assert_eq!(token_client.balance(&contract_id), 800_000_000);
+
+    client.submit_proof(&recruiter, &eng_id, &1, &String::from_str(&env, "ipfs://b"));
+    client.confirm_milestone(&company, &eng_id, &1);
+    assert!(has_event(&env, "split_withheld_refunded"));
+
+    let eng = client.get_engagement(&eng_id);
+    assert_eq!(eng.status, EngagementStatus::Completed);
+    assert_eq!(eng.released_amount, eng.total_amount);
+    assert_eq!(token_client.balance(&contract_id), 0);
+    assert_eq!(token_client.balance(&recruiter), 700_000_000);
+    assert_eq!(token_client.balance(&company), company_start + 300_000_000);
+}
+
+#[test]
+#[should_panic(expected = "MixedVoteModes")]
+fn test_split_vote_after_binary_vote_rejected() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let (panel, arbs) = split_panel(&env, 3, 2, None);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "S-MIX1", panel,
+        two_parallel_placements(&env),
+    );
+    client.set_split_voting_enabled(&company, &eng_id, &true);
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+    client.cast_arbiter_vote(&arbs.get(0).unwrap(), &eng_id, &0, &true);
+    client.cast_arbiter_split_vote(&arbs.get(1).unwrap(), &eng_id, &0, &50);
+}
+
+#[test]
+#[should_panic(expected = "MixedVoteModes")]
+fn test_binary_vote_after_split_vote_rejected() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let (panel, arbs) = split_panel(&env, 3, 2, None);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "S-MIX2", panel,
+        two_parallel_placements(&env),
+    );
+    client.set_split_voting_enabled(&company, &eng_id, &true);
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+    client.cast_arbiter_split_vote(&arbs.get(0).unwrap(), &eng_id, &0, &50);
+    client.cast_arbiter_vote(&arbs.get(1).unwrap(), &eng_id, &0, &true);
+}
+
+#[test]
+#[should_panic(expected = "InvalidSplitPercent")]
+fn test_split_vote_over_100_rejected() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let (panel, arbs) = split_panel(&env, 1, 1, None);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "S-101", panel,
+        two_parallel_placements(&env),
+    );
+    client.set_split_voting_enabled(&company, &eng_id, &true);
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+    client.cast_arbiter_split_vote(&arbs.get(0).unwrap(), &eng_id, &0, &101);
+}
+
+#[test]
+#[should_panic(expected = "duplicate vote")]
+fn test_split_vote_duplicate_rejected() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let (panel, arbs) = split_panel(&env, 3, 3, None);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "S-DUP", panel,
+        two_parallel_placements(&env),
+    );
+    client.set_split_voting_enabled(&company, &eng_id, &true);
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+    client.cast_arbiter_split_vote(&arbs.get(0).unwrap(), &eng_id, &0, &50);
+    client.cast_arbiter_split_vote(&arbs.get(0).unwrap(), &eng_id, &0, &60);
+}
+
+/// Enabling split voting does not change the binary flow when arbiters use it.
+#[test]
+fn test_binary_vote_unaffected_with_split_enabled() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "S-BINARY",
+    );
+    let eng_id = String::from_str(&env, "S-BINARY");
+    client.set_split_voting_enabled(&company, &eng_id, &true);
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &true);
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Resolved);
+    assert_eq!(token_client.balance(&recruiter), 300_000_000);
+}
+
+// ============================================================
+// ISSUE #463 — ARBITER VOTE DELEGATION
+// ============================================================
+
+#[test]
+fn test_delegate_vote_counts_for_arbiter() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "D-VOTE",
+    );
+    let eng_id = String::from_str(&env, "D-VOTE");
+    client.set_arbiter_fee(&company, &100u32);
+    let delegate = Address::generate(&env);
+    client.set_arbiter_vote_delegate(&arbiter, &eng_id, &Some(delegate.clone()));
+    assert_eq!(
+        client.get_arbiter_vote_delegate(&eng_id, &arbiter),
+        Some(delegate.clone())
+    );
+
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+    client.cast_arbiter_vote(&delegate, &eng_id, &0, &true);
+    assert!(has_event(&env, "arbiter_vote_delegated"));
+
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Resolved);
+    // Arbiter fee (1% of 300M) goes to the arbiter's slot, not the delegate.
+    assert_eq!(token_client.balance(&arbiter), 3_000_000);
+    assert_eq!(token_client.balance(&delegate), 0);
+}
+
+#[test]
+#[should_panic(expected = "duplicate vote")]
+fn test_arbiter_cannot_vote_after_delegate_voted() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let (panel, arbs) = split_panel(&env, 2, 2, None);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "D-DUP", panel,
+        build_milestones(&env),
+    );
+    let a1 = arbs.get(0).unwrap();
+    let delegate = Address::generate(&env);
+    client.set_arbiter_vote_delegate(&a1, &eng_id, &Some(delegate.clone()));
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+
+    client.cast_arbiter_vote(&delegate, &eng_id, &0, &true);
+    assert_eq!(client.get_arbiter_votes(&eng_id, &0).approve_votes, 1);
+    client.cast_arbiter_vote(&a1, &eng_id, &0, &true);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_revoked_delegate_cannot_vote() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "D-REVOKE",
+    );
+    let eng_id = String::from_str(&env, "D-REVOKE");
+    let delegate = Address::generate(&env);
+    client.set_arbiter_vote_delegate(&arbiter, &eng_id, &Some(delegate.clone()));
+    client.set_arbiter_vote_delegate(&arbiter, &eng_id, &None);
+    assert_eq!(client.get_arbiter_vote_delegate(&eng_id, &arbiter), None);
+
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+    client.cast_arbiter_vote(&delegate, &eng_id, &0, &true);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_delegation_scoped_to_one_engagement() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "D-SCOPE-A",
+    );
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "D-SCOPE-B",
+    );
+    let eng_a = String::from_str(&env, "D-SCOPE-A");
+    let eng_b = String::from_str(&env, "D-SCOPE-B");
+    let delegate = Address::generate(&env);
+    client.set_arbiter_vote_delegate(&arbiter, &eng_a, &Some(delegate.clone()));
+    assert_eq!(client.get_arbiter_vote_delegate(&eng_b, &arbiter), None);
+
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_b, 0);
+    client.cast_arbiter_vote(&delegate, &eng_b, &0, &true);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_delegation_cleared_by_claim_arbiter() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "D-CLAIM",
+    );
+    let eng_id = String::from_str(&env, "D-CLAIM");
+    let delegate = Address::generate(&env);
+    let successor = Address::generate(&env);
+    client.set_arbiter_vote_delegate(&arbiter, &eng_id, &Some(delegate.clone()));
+
+    client.nominate_arbiter_successor(&arbiter, &eng_id, &successor);
+    client.claim_arbiter(&successor, &eng_id);
+    assert_eq!(client.get_arbiter_vote_delegate(&eng_id, &arbiter), None);
+    assert_eq!(client.get_arbiter_vote_delegate(&eng_id, &successor), None);
+
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+    client.cast_arbiter_vote(&delegate, &eng_id, &0, &true);
+}
+
+#[test]
+fn test_delegate_can_cast_split_vote() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let (panel, arbs) = split_panel(&env, 1, 1, None);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "D-SPLIT", panel,
+        two_parallel_placements(&env),
+    );
+    let delegate = Address::generate(&env);
+    client.set_arbiter_vote_delegate(&arbs.get(0).unwrap(), &eng_id, &Some(delegate.clone()));
+    client.set_split_voting_enabled(&company, &eng_id, &true);
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+    client.cast_arbiter_split_vote(&delegate, &eng_id, &0, &60);
+    assert_eq!(token_client.balance(&recruiter), 300_000_000);
+}
+
+#[test]
+#[should_panic(expected = "InvalidDelegate")]
+fn test_delegate_cannot_be_another_arbiter() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let (panel, arbs) = split_panel(&env, 2, 1, None);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "D-OTHER", panel,
+        build_milestones(&env),
+    );
+    client.set_arbiter_vote_delegate(&arbs.get(0).unwrap(), &eng_id, &Some(arbs.get(1).unwrap()));
+}
+
+#[test]
+#[should_panic(expected = "DelegateAlreadyAssigned")]
+fn test_delegate_cannot_serve_two_arbiters() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let (panel, arbs) = split_panel(&env, 2, 1, None);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "D-TWICE", panel,
+        build_milestones(&env),
+    );
+    let delegate = Address::generate(&env);
+    client.set_arbiter_vote_delegate(&arbs.get(0).unwrap(), &eng_id, &Some(delegate.clone()));
+    client.set_arbiter_vote_delegate(&arbs.get(1).unwrap(), &eng_id, &Some(delegate));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_non_arbiter_cannot_set_delegate() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "D-NOTARB",
+    );
+    let eng_id = String::from_str(&env, "D-NOTARB");
+    client.set_arbiter_vote_delegate(
+        &Address::generate(&env),
+        &eng_id,
+        &Some(Address::generate(&env)),
+    );
+}
+
+/// A 0% split pays the recruiter nothing, resolves the milestone, and keeps
+/// the full share in escrow for the company.
+#[test]
+fn test_split_vote_zero_percent_withholds_full_share() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let (panel, arbs) = split_panel(&env, 1, 1, None);
+    let eng_id = create_with_setup(
+        &env, &client, &token_id, &company, &recruiter, "S-ZERO", panel,
+        two_parallel_placements(&env),
+    );
+    client.set_split_voting_enabled(&company, &eng_id, &true);
+    submit_and_dispute(&env, &client, &company, &recruiter, &eng_id, 0);
+    client.cast_arbiter_split_vote(&arbs.get(0).unwrap(), &eng_id, &0, &0);
+
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Resolved);
+    assert_eq!(token_client.balance(&recruiter), 0);
+    assert_eq!(token_client.balance(&contract_id), 1_000_000_000);
 }

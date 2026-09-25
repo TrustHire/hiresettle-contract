@@ -212,4 +212,16 @@ pub enum DataKey {
     /// engagement by the admin (issue #335). When `true`, every milestone
     /// payout on this engagement skips platform-fee collection entirely.
     FeeWaived(String),
+    /// Split-vote tally (`ArbiterSplitVoteRecord`) for a disputed
+    /// (engagement_id, milestone_index) (issue #462).
+    ArbiterSplitVotes(String, u32),
+    /// Whether the admin has enabled percentage-split dispute voting for an
+    /// engagement (issue #462). Absent means binary voting only.
+    SplitVotingEnabled(String),
+    /// Cumulative milestone share withheld from the recruiter by split-vote
+    /// resolutions on an engagement (issue #462). Kept in escrow and refunded
+    /// to the company when the engagement completes.
+    SplitWithheld(String),
+    /// Standing vote delegate for (engagement_id, arbiter) (issue #463).
+    ArbiterVoteDelegate(String, Address),
 }

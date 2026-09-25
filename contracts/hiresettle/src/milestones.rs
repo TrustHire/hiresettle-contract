@@ -274,8 +274,9 @@ impl HireSettleContract {
     /// # Preconditions
     /// - Engagement status is `Active`.
     /// - Milestone status is `ProofSubmitted`.
-    /// - **Sequential confirmation (Issue #67)**: All prior milestones (indices
-    ///   `< milestone_index`) must already be `Confirmed` or `Resolved`.
+    /// - **Prerequisites (issue #461)**: every index in the milestone's
+    ///   `prerequisites` must already be `Confirmed` or `Resolved`. A linear
+    ///   chain of prerequisites reproduces the old sequential rule (issue #67).
     /// - For `Retention` milestones: `current_ledger >= valid_after_ledger`
     ///   (the retention window must have elapsed).
     ///
@@ -290,7 +291,7 @@ impl HireSettleContract {
     /// - `"unauthorized"` — caller is not the engagement's company or co-signer.
     /// - `"invalid milestone index"` — `milestone_index` is out of bounds.
     /// - `"milestone proof not yet submitted"` — milestone is not in `ProofSubmitted` status.
-    /// - `"PreviousMilestoneNotComplete"` — a prior milestone is not yet `Confirmed` or `Resolved`.
+    /// - `"PreviousMilestoneNotComplete"` — a prerequisite milestone is not yet `Confirmed` or `Resolved`.
     /// - `"retention window has not elapsed — cannot confirm yet"` — for `Retention` milestones
     ///   confirmed before their `valid_after_ledger`.
     ///
@@ -325,14 +326,9 @@ impl HireSettleContract {
             panic!("milestone proof not yet submitted");
         }
 
-        // Issue #67: enforce sequential confirmation — all prior milestones must be done.
-        for i in 0..milestone_index {
-            let prev = engagement.milestones.get(i).unwrap();
-            if prev.status != MilestoneStatus::Confirmed && prev.status != MilestoneStatus::Resolved
-            {
-                panic!("PreviousMilestoneNotComplete");
-            }
-        }
+        // Issue #461 (replacing #67's flat "all lower indices" rule): every
+        // declared prerequisite must be done.
+        Self::assert_prerequisites_complete(&engagement, &milestone);
 
         if milestone.kind == MilestoneKind::Retention {
             let current_ledger = env.ledger().sequence();
@@ -393,6 +389,7 @@ impl HireSettleContract {
         if all_done {
             engagement.status = EngagementStatus::Completed;
             Self::decrement_company_active_count(&env, &engagement.company);
+            Self::refund_split_withheld(&env, &engagement_id, &mut engagement);
         }
         engagement.last_activity_ledger = env.ledger().sequence();
 

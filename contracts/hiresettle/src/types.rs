@@ -34,6 +34,13 @@ pub struct Milestone {
     /// added after a replacement is still paid out instead of getting stuck in
     /// the contract. See issue #183.
     pub replacement_paid_out: i128,
+    /// Indices of the milestones that must be `Confirmed` or `Resolved` before
+    /// this one can be confirmed (issue #461). Empty means no prerequisites.
+    /// Declaring every lower index — or just the previous one, as a linear
+    /// chain — reproduces the old strict sequential rule (issue #67).
+    /// Validated at `create_engagement`: every index must be in range and the
+    /// graph must be acyclic.
+    pub prerequisites: Vec<u32>,
 }
 /// The full engagement record stored on-chain — note that `proof_submitted_at` on
 /// each milestone is set by `submit_proof` and consumed by `force_confirm_milestone`.
@@ -49,7 +56,13 @@ pub struct Engagement {
     /// Ordered list of arbiters; quorum of these must agree to resolve a dispute.
     pub arbiters: Vec<Address>,
     /// Number of arbiter votes required to resolve a dispute (M of N).
+    /// When `arbiter_weights` is set, this is measured in cumulative weight
+    /// rather than headcount (issue #460).
     pub quorum: u32,
+    /// Optional per-arbiter vote weight, parallel to `arbiters` (issue #460).
+    /// `None` means every arbiter carries a weight of 1. Weights belong to the
+    /// slot, so they carry over when `claim_arbiter` replaces the address.
+    pub arbiter_weights: Option<Vec<u32>>,
     /// SAC address of the token held in escrow (e.g. USDC).
     pub token: Address,
     /// Total fee locked in escrow at creation, in the token's smallest unit.
@@ -138,7 +151,42 @@ pub struct ArbiterVoteRecord {
     /// Number of arbiters who voted to reject payment and return the milestone to `Pending`.
     pub reject_votes: u32,
     /// Addresses that have already cast a vote; prevents double-voting.
+    /// Always the arbiter's slot address, even for a vote cast by a delegate
+    /// (issue #463).
     pub voted: Vec<Address>,
+    /// Cumulative weight of approving arbiters (issue #460). Equals
+    /// `approve_votes` when the engagement has no `arbiter_weights`.
+    pub approve_weight: u32,
+    /// Cumulative weight of rejecting arbiters (issue #460). Equals
+    /// `reject_votes` when the engagement has no `arbiter_weights`.
+    pub reject_weight: u32,
+}
+/// Returned by `get_arbiter_vote_weights` (issue #460).
+#[contracttype]
+#[derive(Clone)]
+pub struct ArbiterVoteWeights {
+    /// Cumulative weight of arbiters who voted to approve.
+    pub approve_weight: u32,
+    /// Cumulative weight of arbiters who voted to reject.
+    pub reject_weight: u32,
+    /// Sum of every arbiter's weight on the panel.
+    pub total_weight: u32,
+    /// Weight required to approve; rejection resolves once
+    /// `reject_weight > total_weight - quorum`.
+    pub quorum: u32,
+}
+/// Per-dispute tally of split votes cast via `cast_arbiter_split_vote`
+/// (issue #462). Cleared once the dispute resolves.
+#[contracttype]
+#[derive(Clone)]
+pub struct ArbiterSplitVoteRecord {
+    /// Arbiter slot addresses that have voted, in submission order.
+    pub voters: Vec<Address>,
+    /// Payout percentage (0-100) submitted by each voter; parallel to `voters`.
+    pub splits: Vec<u32>,
+    /// Cumulative weight of `voters`; the dispute resolves once this reaches
+    /// the engagement's `quorum`.
+    pub cast_weight: u32,
 }
 /// Passed to `create_engagement` to configure the arbitration panel for an engagement.
 ///
@@ -151,8 +199,13 @@ pub struct ArbiterSetup {
     /// Must contain at least one address. All addresses must be distinct.
     pub arbiters: Vec<Address>,
     /// Number of votes required to resolve a dispute (M-of-N).
-    /// Must be ≥ 1 and ≤ `arbiters.len()`.
+    /// Must be ≥ 1 and ≤ `arbiters.len()`, or ≤ the sum of `weights` when
+    /// weights are given.
     pub quorum: u32,
+    /// Optional per-arbiter vote weight, parallel to `arbiters` (issue #460).
+    /// Must be the same length as `arbiters`, with every weight ≥ 1. `None`
+    /// gives every arbiter a weight of 1, i.e. one-address-one-vote.
+    pub weights: Option<Vec<u32>>,
 }
 /// Returned by `get_arbiter_votes`.
 #[contracttype]

@@ -157,19 +157,39 @@ impl HireSettleContract {
         milestone_index: u32,
     ) -> ArbiterVoteCounts {
         let vote_key = DataKey::ArbiterVotes(engagement_id, milestone_index);
-        let record: ArbiterVoteRecord =
-            env.storage()
-                .persistent()
-                .get(&vote_key)
-                .unwrap_or(ArbiterVoteRecord {
-                    approve_votes: 0,
-                    reject_votes: 0,
-                    voted: Vec::new(&env),
-                });
+        let record: ArbiterVoteRecord = env
+            .storage()
+            .persistent()
+            .get(&vote_key)
+            .unwrap_or_else(|| Self::empty_vote_record(&env));
         ArbiterVoteCounts {
             approve_votes: record.approve_votes,
             reject_votes: record.reject_votes,
         }
+    }
+
+    /// Return the weighted approve/reject tally for a disputed milestone on an
+    /// engagement configured with `arbiter_weights` (issue #460), or `None`
+    /// for an unweighted engagement (use `get_arbiter_votes` there). Weights
+    /// are (0, 0) if no votes have been cast yet.
+    pub fn get_arbiter_vote_weights(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Option<ArbiterVoteWeights> {
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        engagement.arbiter_weights.as_ref()?;
+        let record: ArbiterVoteRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ArbiterVotes(engagement_id, milestone_index))
+            .unwrap_or_else(|| Self::empty_vote_record(&env));
+        Some(ArbiterVoteWeights {
+            approve_weight: record.approve_weight,
+            reject_weight: record.reject_weight,
+            total_weight: Self::total_arbiter_weight(&engagement),
+            quorum: engagement.quorum,
+        })
     }
 
     /// Total amount released for this engagement, represented by
