@@ -701,7 +701,7 @@ Functions that manage contract-wide settings, admin succession, and operational 
 | `get_platform_fee()` → `(u32, Address)` | Anyone | Return current **base** `(bps, treasury)`; defaults to `(0, admin)`. Does not resolve fee tiers. | — |
 | `set_fee_tiers(admin, tiers)` | Admin | Replace the fee-tier list (max 10, strictly ascending `threshold`, each `bps` ≤ base platform fee). Empty vec clears tiers. | `ContractPaused`, `NoAdmin`, `unauthorized`, `too many fee tiers`, `tier bps exceeds base platform fee`, `tier threshold must be positive`, `tiers must be sorted by ascending threshold` |
 | `get_fee_tiers()` → `Vec<FeeTier>` | Anyone | Return configured tiers; empty vec means flat base fee. | — |
-| `set_version(admin, version)` | Admin | Set contract version string (max 32 chars). | `NoAdmin`, `unauthorized`, `VersionTooLong` |
+| `set_version(admin, version)` | Admin | Set a version label (max 32 chars); does not check upgrade or storage compatibility. | `NoAdmin`, `unauthorized`, `VersionTooLong` |
 | `set_min_amount(admin, amount)` | Admin | Set minimum engagement amount in raw token units. | `NoAdmin`, `unauthorized` |
 | `pause(admin)` | Admin | Pause all state-changing operations. | `NoAdmin`, `unauthorized` |
 | `unpause(admin)` | Admin | Resume state-changing operations. | `NoAdmin`, `unauthorized` |
@@ -716,6 +716,17 @@ Functions that manage contract-wide settings, admin succession, and operational 
 | `set_proof_cooldown(admin, ledgers)` | Admin | Set minimum ledger gap between proof resubmissions on the same milestone. Works even when paused. | `contract not initialised`, `unauthorized` |
 
 Additional admin functions (documented elsewhere): `init`, `renounce_admin`, `set_ledgers_per_day`, `set_max_retention_days`, `set_max_milestones`, `set_inactivity_timeout_ledgers`, `set_storage_ttl_extend_to`, `set_confirm_window`, `set_dispute_window`, `set_max_proof_hash_length`, `set_arbiter_fee`, `set_amendment_ttl`, `set_upgrade_lock_duration`, `propose_upgrade`, `add_allowed_token`, `remove_allowed_token`, `set_token_allowlist_enabled`.
+
+### Versioning & Backwards Compatibility
+
+`set_version` stores a version string for identification; it is only a label. It
+does not validate the WASM, check compatibility, or migrate contract state. An
+`execute_upgrade` replaces the contract code but does not automatically transform
+existing stored records. New WASM must continue to read records written by prior
+versions, including `Engagement` and `Milestone` values. Treat changes to their
+stored representation or field types as potentially incompatible, and provide
+and verify an explicit migration before deploying such a change. Deployment and
+upgrade procedures will be documented in `DEPLOYMENT.md` when that guide exists.
 
 ### Engagement Lifecycle
 `create_engagement`, `unlock_milestone`, `notify_milestone_due_soon`, `submit_proof`, `confirm_milestone`, `batch_confirm_milestones`, `force_confirm_milestone`, `raise_dispute`, `cast_arbiter_vote`, `request_replacement`, `cancel_engagement`, `top_up_escrow`, `request_early_exit`, `accept_early_exit`, `reject_early_exit`, `expire_engagement`, `propose_recruiter_transfer`, `accept_recruiter_transfer`
