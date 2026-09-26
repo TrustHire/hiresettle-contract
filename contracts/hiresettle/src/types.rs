@@ -103,6 +103,10 @@ pub struct Engagement {
     /// Whether this engagement is listed by `get_public_engagement_ids`
     /// (issue #365). Set at creation time from `EngagementConfig::is_public`.
     pub is_public: bool,
+    /// When `Some`, `confirm_milestone` vests each confirmed milestone's net
+    /// payout linearly over this many ledgers instead of paying it out in one
+    /// lump sum (issue #466). Set at creation time from `EngagementConfig`.
+    pub stream_duration_ledgers: Option<u32>,
 }
 /// A lightweight read-only view of an engagement, suitable for list/dashboard APIs.
 ///
@@ -291,4 +295,48 @@ pub struct EngagementConfig {
     /// Whether this engagement should be listed by `get_public_engagement_ids`
     /// (issue #365). Most engagements are private; set `true` to opt in.
     pub is_public: bool,
+    /// Opt-in streaming payout (issue #466). `None` keeps today's lump-sum
+    /// payout on `confirm_milestone`; `Some(n)` vests each confirmed
+    /// milestone's net payout linearly over `n` ledgers, claimable via
+    /// `claim_streamed_payout`. Must be non-zero if provided.
+    pub stream_duration_ledgers: Option<u32>,
+}
+/// Vesting record for a streamed milestone payout (issue #466), stored under
+/// `DataKey::StreamedPayout(engagement_id, milestone_index)`.
+#[contracttype]
+#[derive(Clone)]
+pub struct StreamedPayout {
+    /// Net amount (after platform fee) vesting to the recruiter side.
+    pub total: i128,
+    /// Amount already transferred out by `claim_streamed_payout`.
+    pub claimed: i128,
+    /// Ledger at which vesting started (the confirmation ledger).
+    pub start_ledger: u32,
+    /// Number of ledgers over which `total` vests linearly.
+    pub duration_ledgers: u32,
+}
+/// Passed to `create_engagement_with_random_arbiters` (issue #467) in place
+/// of [`ArbiterSetup`]: the panel is drawn from the admin-curated arbiter pool
+/// instead of being supplied by the company. Bundled into a struct to stay
+/// within Soroban's 10-parameter limit.
+#[contracttype]
+#[derive(Clone)]
+pub struct RandomArbiterSetup {
+    /// Number of distinct arbiters to draw from the pool.
+    pub panel_size: u32,
+    /// Number of votes required to resolve a dispute (M-of-N).
+    /// Must be ≥ 1 and ≤ `panel_size`.
+    pub quorum: u32,
+}
+/// Historical dispute-response record for one arbiter (issue #468), updated
+/// by `raise_dispute` and `cast_arbiter_vote`.
+#[contracttype]
+#[derive(Clone)]
+pub struct ArbiterStats {
+    /// Disputes raised on engagements where this address sat on the panel.
+    pub disputes_assigned: u32,
+    /// Votes this address actually cast on those disputes.
+    pub votes_cast: u32,
+    /// Sum over all cast votes of `vote_ledger - dispute_raised_ledger`.
+    pub total_response_ledgers: u64,
 }

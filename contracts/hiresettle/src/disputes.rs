@@ -96,6 +96,9 @@ impl HireSettleContract {
             &reason.clone(),
         );
 
+        // Issue #468: every panel member is now on the hook for a vote.
+        Self::record_arbiter_assignments(&env, &engagement.arbiters);
+
         // Issue #246: record when the dispute was raised so `escalate_dispute`
         // can measure elapsed time against the dispute window.
         env.storage().persistent().set(
@@ -196,6 +199,7 @@ impl HireSettleContract {
 
         let weight = Self::arbiter_weight(&engagement, slot_index);
         record.voted.push_back(arbiter.clone());
+        Self::record_arbiter_vote(&env, &arbiter, &engagement_id, milestone_index);
         if approve {
             record.approve_votes += 1;
             record.approve_weight += weight;
@@ -211,7 +215,84 @@ impl HireSettleContract {
             (Symbol::new(&env, "arbiter_voted"), engagement_id.clone()),
             (milestone_index, approve),
         );
-        if caller != arbiter {
+
+        if record.approve_votes >= quorum {
+            let payment = (engagement.total_amount * milestone.payment_percent as i128) / 100;
+            engagement.released_amount += payment;
+
+            let platform_fee = Self::get_platform_fee_internal(&env);
+            let effective_bps = if Self::is_fee_waived_internal(&env, &engagement_id) {
+                0
+            } else {
+                Self::apply_referral_discount(&env, platform_fee.bps, &engagement.referrer)
+            };
+            Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
+            let platform_fee_amount = (payment * effective_bps as i128) / 10_000;
+            let after_platform_fee = payment - platform_fee_amount;
+
+            let arbiter_fee_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::Config(ConfigKey::ArbiterFee))
+                .unwrap_or(0u32);
+            let arbiter_fee_amount = (after_platform_fee * arbiter_fee_bps as i128) / 10_000;
+            let net_payment = after_platform_fee - arbiter_fee_amount;
+
+            let token_client = token::Client::new(&env, &engagement.token);
+            if platform_fee_amount > 0 {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &platform_fee.treasury,
+                    &platform_fee_amount,
+                );
+                env.events().publish(
+                    (
+                        Symbol::new(&env, "platform_fee_collected"),
+                        engagement_id.clone(),
+                    ),
+                    (milestone_index, platform_fee_amount, platform_fee.treasury),
+                );
+            }
+            if arbiter_fee_amount > 0 {
+                token_client.transfer(
+                    &env.current_contract_address(),
+                    &arbiter,
+                    &arbiter_fee_amount,
+                );
+            }
+            Self::distribute_recruiter_payout(&env, &engagement, net_payment, &token_client);
+
+            let old_status = milestone.status.clone();
+            milestone.status = MilestoneStatus::Resolved;
+            engagement.milestones.set(milestone_index, milestone);
+
+            let all_done = (0..engagement.milestones.len()).all(|i| {
+                let s = engagement.milestones.get(i).unwrap().status;
+                s == MilestoneStatus::Confirmed || s == MilestoneStatus::Resolved
+            });
+            let old_engagement_status = engagement.status.clone();
+            if all_done {
+                engagement.status = EngagementStatus::Completed;
+                Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
+                Self::decrement_company_active_count(&env, &engagement.company);
+            }
+
+            env.storage().persistent().remove(&vote_key);
+            env.storage().persistent().remove(&DataKey::DisputeReason(
+                engagement_id.clone(),
+                milestone_index,
+            ));
+            env.storage().persistent().remove(&DataKey::DisputeRaisedAt(
+                engagement_id.clone(),
+                milestone_index,
+            ));
+            env.storage()
+                .persistent()
+                .remove(&DataKey::EscalatedDispute(
+                    engagement_id.clone(),
+                    milestone_index,
+                ));
+
             env.events().publish(
                 (
                     Symbol::new(&env, "arbiter_vote_delegated"),
@@ -238,6 +319,11 @@ impl HireSettleContract {
             milestone.status = MilestoneStatus::Pending;
             milestone.proof_hash = String::from_str(&env, "");
             milestone.proof_submitted_at = 0;
+            // Issue #465: a rejected proof reopens the milestone, so the
+            // recruiter's no-show clock restarts from here.
+            if milestone.kind == MilestoneKind::Placement {
+                Self::mark_milestone_pending_since(&env, &engagement_id, milestone_index);
+            }
             engagement.milestones.set(milestone_index, milestone);
 
             env.storage().persistent().remove(&vote_key);
@@ -990,6 +1076,7 @@ impl HireSettleContract {
             let old_engagement_status = engagement.status.clone();
             if all_done {
                 engagement.status = EngagementStatus::Completed;
+                Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
                 Self::decrement_company_active_count(&env, &engagement.company);
                 Self::refund_split_withheld(&env, &engagement_id, &mut engagement);
             }
@@ -1035,6 +1122,11 @@ impl HireSettleContract {
             milestone.status = MilestoneStatus::Pending;
             milestone.proof_hash = String::from_str(&env, "");
             milestone.proof_submitted_at = 0;
+            // Issue #465: a rejected proof reopens the milestone, so the
+            // recruiter's no-show clock restarts from here.
+            if milestone.kind == MilestoneKind::Placement {
+                Self::mark_milestone_pending_since(&env, &engagement_id, milestone_index);
+            }
             engagement.milestones.set(milestone_index, milestone);
 
             env.storage().persistent().remove(&vote_key);
@@ -1206,6 +1298,7 @@ impl HireSettleContract {
         let old_engagement_status = engagement.status.clone();
         if all_done {
             engagement.status = EngagementStatus::Completed;
+            Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
             Self::decrement_company_active_count(&env, &engagement.company);
             Self::refund_split_withheld(&env, &engagement_id, &mut engagement);
         }
@@ -1411,6 +1504,7 @@ impl HireSettleContract {
         let old_engagement_status = engagement.status.clone();
         if all_done {
             engagement.status = EngagementStatus::Completed;
+            Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
             Self::decrement_company_active_count(&env, &engagement.company);
             Self::refund_split_withheld(&env, &engagement_id, &mut engagement);
         }

@@ -29,6 +29,32 @@ cd contracts/hiresettle
 cargo build
 ```
 
+### Build the Deployable WASM Artifact
+
+The command above runs on your host target and is only useful for local development and editor tooling. To produce the artifact that actually gets deployed to Stellar, build for the `wasm32v1-none` target:
+
+```bash
+rustup target add wasm32v1-none   # one-time setup
+cargo build --target wasm32v1-none --release
+```
+
+This is equivalent to the Stellar CLI invocation used in CI and the Makefile:
+
+```bash
+stellar contract build
+```
+
+The resulting WASM binary is emitted at `target/wasm32v1-none/release/hiresettle.wasm`. To optimize it for deployment:
+
+```bash
+stellar contract optimize --wasm target/wasm32v1-none/release/hiresettle.wasm
+# or simply: make optimize
+```
+
+The optimized artifact is `target/wasm32v1-none/release/hiresettle.optimized.wasm`.
+
+Because Soroban runs contracts inside the Stellar WASM VM, the contract must compile to a freestanding WASM binary with no reliance on the host OS — hence the crate is annotated `#![no_std]` and built with the `wasm32v1-none` target, which ships no standard library and no OS interface. By contrast, `cargo build` and `cargo test` (the host-target commands above) compile natively so the tests can run in a normal process with the Soroban host emulated by the SDK.
+
 ### Run the Tests
 
 ```bash
@@ -598,9 +624,9 @@ rate each other for the same engagement. Use `is_recruiter_rated` /
 `is_company_rated` to hide a rating prompt instead of surfacing the failure.
 
 Ratings are credited to whoever holds the role at completion time. If the
-recruiter role was transferred mid-engagement via `accept_recruiter_transfer`,
-the incoming address receives the rating — matching where the milestone payouts
-went.
+recruiter role was transferred mid-engagement via
+[`accept_recruiter_transfer`](#recruiter-transfer), the incoming address receives
+the rating — matching where the milestone payouts went.
 
 ## Token Allowlist
 
@@ -692,7 +718,47 @@ Functions that manage contract-wide settings, admin succession, and operational 
 Additional admin functions (documented elsewhere): `init`, `renounce_admin`, `set_ledgers_per_day`, `set_max_retention_days`, `set_max_milestones`, `set_inactivity_timeout_ledgers`, `set_storage_ttl_extend_to`, `set_confirm_window`, `set_dispute_window`, `set_max_proof_hash_length`, `set_arbiter_fee`, `set_amendment_ttl`, `set_upgrade_lock_duration`, `propose_upgrade`, `add_allowed_token`, `remove_allowed_token`, `set_token_allowlist_enabled`.
 
 ### Engagement Lifecycle
-`create_engagement`, `unlock_milestone`, `notify_milestone_due_soon`, `submit_proof`, `confirm_milestone`, `batch_confirm_milestones`, `force_confirm_milestone`, `raise_dispute`, `cast_arbiter_vote`, `request_replacement`, `cancel_engagement`, `top_up_escrow`, `request_early_exit`, `accept_early_exit`, `reject_early_exit`, `expire_engagement`
+`create_engagement`, `unlock_milestone`, `notify_milestone_due_soon`, `submit_proof`, `confirm_milestone`, `batch_confirm_milestones`, `force_confirm_milestone`, `raise_dispute`, `cast_arbiter_vote`, `request_replacement`, `cancel_engagement`, `top_up_escrow`, `request_early_exit`, `accept_early_exit`, `reject_early_exit`, `expire_engagement`, `propose_recruiter_transfer`, `accept_recruiter_transfer`
+
+### Recruiter Transfer
+
+The recruiter role on an engagement can be handed to a new address through a
+two-step **propose → accept** flow, so the outgoing recruiter cannot unilaterally
+redirect future payouts and the company must consent to the replacement.
+
+1. **Propose** — the current recruiter (or the recruiter's registered cosigner)
+   calls `propose_recruiter_transfer(recruiter, engagement_id, new_recruiter)`.
+   This records `new_recruiter` as a *pending* transfer but leaves
+   `engagement.recruiter` unchanged: until the proposal is accepted, all payouts
+   and ratings still follow the original recruiter.
+2. **Accept** — the engagement's company (or the company's registered cosigner)
+   calls `accept_recruiter_transfer(company, engagement_id)`. Only then does the
+   pending address become the engagement's recruiter.
+
+Both steps require the engagement to be `Active` or `ReplacementRequested`, and
+both respect the contract-wide pause and the per-engagement quarantine guards
+(see [Per-Engagement Pause](#per-engagement-pause-quarantine)).
+
+On acceptance the contract changes the engagement as follows:
+
+- Sets `engagement.recruiter` to the proposed address, so all future milestone
+  payouts and completion-time [feedback ratings](#feedback-ratings) are credited
+  to the new recruiter.
+- Updates `engagement.last_activity_ledger` to the current ledger sequence.
+- Removes the pending `ProposedRecruiterTransfer(engagement_id)` record.
+- Emits `("recruiter_transferred", engagement_id)` with
+  `(old_recruiter, new_recruiter)`.
+
+Because the proposal is stored per engagement, only one transfer can be pending
+at a time; a later `propose_recruiter_transfer` call overwrites the pending
+address before it is accepted (no proposal event is emitted until acceptance).
+See the [role-transfer error entries](#role-transfer--cosigner) for the failure
+modes.
+
+| Function | Caller | Purpose | Panics |
+|---|---|---|---|
+| `propose_recruiter_transfer(recruiter, engagement_id, new_recruiter)` | Current recruiter (or recruiter co-signer) | Record `new_recruiter` as the pending recruiter for the engagement. Does not change payouts until accepted. | `ContractPaused`, `EngagementPaused`, `unauthorized`, `engagement is not active` |
+| `accept_recruiter_transfer(company, engagement_id)` | Company (or company co-signer) | Promote the pending recruiter to `engagement.recruiter` and emit `recruiter_transferred`. | `ContractPaused`, `EngagementPaused`, `unauthorized`, `engagement is not active`, `no pending recruiter transfer` |
 
 ### Per-Engagement Pause (Quarantine)
 

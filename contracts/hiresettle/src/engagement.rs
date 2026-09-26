@@ -273,6 +273,11 @@ impl HireSettleContract {
             panic!("InvalidSplitBps");
         }
 
+        // Issue #466: a zero-length stream would divide by zero when vesting.
+        if config.stream_duration_ledgers == Some(0) {
+            panic!("InvalidStreamDuration");
+        }
+
         let mut total_percent: u32 = 0;
         for i in 0..milestones.len() {
             total_percent += milestones.get(i).unwrap().payment_percent;
@@ -364,6 +369,7 @@ impl HireSettleContract {
             referrer: config.referrer,
             tags: config.tags.clone(),
             is_public: config.is_public,
+            stream_duration_ledgers: config.stream_duration_ledgers,
         };
 
         env.storage()
@@ -535,6 +541,8 @@ impl HireSettleContract {
                         env.storage()
                             .persistent()
                             .remove(&DataKey::LastProofAt(engagement_id.clone(), i));
+                        // Issue #465: restart the no-show clock for the replacement.
+                        Self::mark_milestone_pending_since(&env, &engagement_id, i);
                     }
                 }
                 MilestoneKind::Retention => {
