@@ -347,6 +347,11 @@ impl HireSettleContract {
         let token_client = token::Client::new(&env, &token);
         token_client.transfer(&company, &env.current_contract_address(), &total_amount);
 
+        // Issue #459: escrow the optional recruiter bond alongside the company's funding.
+        if let Some(bond_amount) = config.recruiter_bond_amount {
+            Self::escrow_recruiter_bond(&env, &engagement_id, &recruiter, &token, bond_amount);
+        }
+
         let engagement = Engagement {
             id: engagement_id.clone(),
             company: company.clone(),
@@ -448,6 +453,10 @@ impl HireSettleContract {
             100_000,
             6_300_000,
         );
+
+        if let Some(ref bundle_id) = config.bundle_id {
+            Self::add_bundle_member(&env, bundle_id, &engagement_id);
+        }
 
         env.events().publish(
             (
@@ -785,6 +794,7 @@ impl HireSettleContract {
         );
 
         Self::decrement_company_active_count(&env, &engagement.company);
+        Self::settle_recruiter_bond(&env, &engagement);
 
         env.events().publish(
             (

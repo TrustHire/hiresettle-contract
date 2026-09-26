@@ -3080,7 +3080,7 @@ fn test_engagement_unpause_does_not_clear_global_pause() {
 
 #[test]
 fn test_engagement_pause_query_unknown_id_false() {
-    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
 
     // Unknown engagement IDs report false rather than panicking.

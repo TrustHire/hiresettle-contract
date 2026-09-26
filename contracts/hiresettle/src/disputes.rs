@@ -224,9 +224,10 @@ impl HireSettleContract {
             let effective_bps = if Self::is_fee_waived_internal(&env, &engagement_id) {
                 0
             } else {
-                Self::apply_referral_discount(&env, platform_fee.bps, &engagement.referrer)
+                let tiered_bps =
+                    Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
+                Self::apply_referral_discount(&env, tiered_bps, &engagement.referrer)
             };
-            Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
             let platform_fee_amount = (payment * effective_bps as i128) / 10_000;
             let after_platform_fee = payment - platform_fee_amount;
 
@@ -265,6 +266,7 @@ impl HireSettleContract {
             let old_status = milestone.status.clone();
             milestone.status = MilestoneStatus::Resolved;
             engagement.milestones.set(milestone_index, milestone);
+            Self::bond_clear_rejection(&env, &engagement_id, milestone_index);
 
             let all_done = (0..engagement.milestones.len()).all(|i| {
                 let s = engagement.milestones.get(i).unwrap().status;
@@ -275,6 +277,7 @@ impl HireSettleContract {
                 engagement.status = EngagementStatus::Completed;
                 Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
                 Self::decrement_company_active_count(&env, &engagement.company);
+                Self::settle_recruiter_bond(&env, &engagement);
             }
 
             env.storage().persistent().remove(&vote_key);
@@ -325,6 +328,7 @@ impl HireSettleContract {
                 Self::mark_milestone_pending_since(&env, &engagement_id, milestone_index);
             }
             engagement.milestones.set(milestone_index, milestone);
+            Self::bond_record_rejection(&env, &engagement_id, milestone_index);
 
             env.storage().persistent().remove(&vote_key);
             // A rejected proof starts a new submission round, so do not make
@@ -1027,9 +1031,10 @@ impl HireSettleContract {
             let effective_bps = if Self::is_fee_waived_internal(&env, &engagement_id) {
                 0
             } else {
-                Self::apply_referral_discount(&env, platform_fee.bps, &engagement.referrer)
+                let tiered_bps =
+                    Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
+                Self::apply_referral_discount(&env, tiered_bps, &engagement.referrer)
             };
-            Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
             let platform_fee_amount = (payment * effective_bps as i128) / 10_000;
             let after_platform_fee = payment - platform_fee_amount;
 
@@ -1068,6 +1073,7 @@ impl HireSettleContract {
             let old_status = milestone.status.clone();
             milestone.status = MilestoneStatus::Resolved;
             engagement.milestones.set(milestone_index, milestone);
+            Self::bond_clear_rejection(&env, &engagement_id, milestone_index);
 
             let all_done = (0..engagement.milestones.len()).all(|i| {
                 let s = engagement.milestones.get(i).unwrap().status;
@@ -1128,6 +1134,7 @@ impl HireSettleContract {
                 Self::mark_milestone_pending_since(&env, &engagement_id, milestone_index);
             }
             engagement.milestones.set(milestone_index, milestone);
+            Self::bond_record_rejection(&env, &engagement_id, milestone_index);
 
             env.storage().persistent().remove(&vote_key);
             env.storage().persistent().remove(&DataKey::LastProofAt(
@@ -1264,9 +1271,10 @@ impl HireSettleContract {
         let effective_bps = if Self::is_fee_waived_internal(&env, &engagement_id) {
             0
         } else {
-            Self::apply_referral_discount(&env, platform_fee.bps, &engagement.referrer)
+            let tiered_bps =
+                Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
+            Self::apply_referral_discount(&env, tiered_bps, &engagement.referrer)
         };
-        Self::resolve_platform_fee_bps(&env, platform_fee.bps, engagement.total_amount);
         let platform_fee_amount = (payment * effective_bps as i128) / 10_000;
         let net_payment = payment - platform_fee_amount;
 
@@ -1290,6 +1298,7 @@ impl HireSettleContract {
         let old_status = milestone.status.clone();
         milestone.status = MilestoneStatus::Resolved;
         engagement.milestones.set(milestone_index, milestone);
+        Self::bond_clear_rejection(&env, &engagement_id, milestone_index);
 
         let all_done = (0..engagement.milestones.len()).all(|i| {
             let s = engagement.milestones.get(i).unwrap().status;
@@ -1495,6 +1504,7 @@ impl HireSettleContract {
         let old_status = milestone.status.clone();
         milestone.status = MilestoneStatus::Confirmed;
         engagement.milestones.set(milestone_index, milestone);
+        Self::bond_clear_rejection(&env, &engagement_id, milestone_index);
 
         let all_done = (0..engagement.milestones.len()).all(|i| {
             let s = engagement.milestones.get(i).unwrap().status;
