@@ -40,7 +40,7 @@ mod disputes;
 mod transfers;
 mod queries;
 mod helpers;
-mod bonds;
+mod arbiter_pool;
 
 pub(crate) use constants::*;
 pub(crate) use errors::*;

@@ -33,3 +33,10 @@ pub(crate) const DEFAULT_SUPER_ARBITER_RESPONSE_WINDOW_LEDGERS: u32 = 51_840;
 pub(crate) const MAX_TAGS: u32 = 10;
 /// Maximum length, in characters, of a single engagement tag (issue #248).
 pub(crate) const MAX_TAG_LENGTH: u32 = 32;
+/// Selection weight given to arbiter-pool members with no dispute history yet
+/// (issue #468): the midpoint of the 1–100 weight range, so newcomers are
+/// neither favoured nor excluded.
+pub(crate) const DEFAULT_ARBITER_SELECTION_WEIGHT: u32 = 50;
+/// Average response time, in ledgers, at which an arbiter's speed score is
+/// halved in `get_arbiter_selection_weight` (issue #468). ~1 day.
+pub(crate) const ARBITER_RESPONSE_REFERENCE_LEDGERS: u64 = 17_280;

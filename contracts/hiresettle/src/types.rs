@@ -34,6 +34,13 @@ pub struct Milestone {
     /// added after a replacement is still paid out instead of getting stuck in
     /// the contract. See issue #183.
     pub replacement_paid_out: i128,
+    /// Indices of the milestones that must be `Confirmed` or `Resolved` before
+    /// this one can be confirmed (issue #461). Empty means no prerequisites.
+    /// Declaring every lower index — or just the previous one, as a linear
+    /// chain — reproduces the old strict sequential rule (issue #67).
+    /// Validated at `create_engagement`: every index must be in range and the
+    /// graph must be acyclic.
+    pub prerequisites: Vec<u32>,
 }
 /// The full engagement record stored on-chain — note that `proof_submitted_at` on
 /// each milestone is set by `submit_proof` and consumed by `force_confirm_milestone`.
@@ -49,7 +56,13 @@ pub struct Engagement {
     /// Ordered list of arbiters; quorum of these must agree to resolve a dispute.
     pub arbiters: Vec<Address>,
     /// Number of arbiter votes required to resolve a dispute (M of N).
+    /// When `arbiter_weights` is set, this is measured in cumulative weight
+    /// rather than headcount (issue #460).
     pub quorum: u32,
+    /// Optional per-arbiter vote weight, parallel to `arbiters` (issue #460).
+    /// `None` means every arbiter carries a weight of 1. Weights belong to the
+    /// slot, so they carry over when `claim_arbiter` replaces the address.
+    pub arbiter_weights: Option<Vec<u32>>,
     /// SAC address of the token held in escrow (e.g. USDC).
     pub token: Address,
     /// Total fee locked in escrow at creation, in the token's smallest unit.
@@ -90,6 +103,10 @@ pub struct Engagement {
     /// Whether this engagement is listed by `get_public_engagement_ids`
     /// (issue #365). Set at creation time from `EngagementConfig::is_public`.
     pub is_public: bool,
+    /// When `Some`, `confirm_milestone` vests each confirmed milestone's net
+    /// payout linearly over this many ledgers instead of paying it out in one
+    /// lump sum (issue #466). Set at creation time from `EngagementConfig`.
+    pub stream_duration_ledgers: Option<u32>,
 }
 /// A lightweight read-only view of an engagement, suitable for list/dashboard APIs.
 ///
@@ -138,7 +155,42 @@ pub struct ArbiterVoteRecord {
     /// Number of arbiters who voted to reject payment and return the milestone to `Pending`.
     pub reject_votes: u32,
     /// Addresses that have already cast a vote; prevents double-voting.
+    /// Always the arbiter's slot address, even for a vote cast by a delegate
+    /// (issue #463).
     pub voted: Vec<Address>,
+    /// Cumulative weight of approving arbiters (issue #460). Equals
+    /// `approve_votes` when the engagement has no `arbiter_weights`.
+    pub approve_weight: u32,
+    /// Cumulative weight of rejecting arbiters (issue #460). Equals
+    /// `reject_votes` when the engagement has no `arbiter_weights`.
+    pub reject_weight: u32,
+}
+/// Returned by `get_arbiter_vote_weights` (issue #460).
+#[contracttype]
+#[derive(Clone)]
+pub struct ArbiterVoteWeights {
+    /// Cumulative weight of arbiters who voted to approve.
+    pub approve_weight: u32,
+    /// Cumulative weight of arbiters who voted to reject.
+    pub reject_weight: u32,
+    /// Sum of every arbiter's weight on the panel.
+    pub total_weight: u32,
+    /// Weight required to approve; rejection resolves once
+    /// `reject_weight > total_weight - quorum`.
+    pub quorum: u32,
+}
+/// Per-dispute tally of split votes cast via `cast_arbiter_split_vote`
+/// (issue #462). Cleared once the dispute resolves.
+#[contracttype]
+#[derive(Clone)]
+pub struct ArbiterSplitVoteRecord {
+    /// Arbiter slot addresses that have voted, in submission order.
+    pub voters: Vec<Address>,
+    /// Payout percentage (0-100) submitted by each voter; parallel to `voters`.
+    pub splits: Vec<u32>,
+    /// Cumulative weight of `voters`; the dispute resolves once this reaches
+    /// the engagement's `quorum`.
+    pub cast_weight: u32,
 }
 /// Passed to `create_engagement` to configure the arbitration panel for an engagement.
 ///
@@ -151,8 +203,13 @@ pub struct ArbiterSetup {
     /// Must contain at least one address. All addresses must be distinct.
     pub arbiters: Vec<Address>,
     /// Number of votes required to resolve a dispute (M-of-N).
-    /// Must be ≥ 1 and ≤ `arbiters.len()`.
+    /// Must be ≥ 1 and ≤ `arbiters.len()`, or ≤ the sum of `weights` when
+    /// weights are given.
     pub quorum: u32,
+    /// Optional per-arbiter vote weight, parallel to `arbiters` (issue #460).
+    /// Must be the same length as `arbiters`, with every weight ≥ 1. `None`
+    /// gives every arbiter a weight of 1, i.e. one-address-one-vote.
+    pub weights: Option<Vec<u32>>,
 }
 /// Returned by `get_arbiter_votes`.
 #[contracttype]
@@ -238,45 +295,48 @@ pub struct EngagementConfig {
     /// Whether this engagement should be listed by `get_public_engagement_ids`
     /// (issue #365). Most engagements are private; set `true` to opt in.
     pub is_public: bool,
-    /// Optional collateral bond the recruiter posts into escrow at creation
-    /// (issue #459). When `Some`, the recruiter must also authorize
-    /// `create_engagement`, and the bond is either returned to the recruiter
-    /// or (partly) forfeited to the company when the engagement ends — see
-    /// [`RecruiterBond`]. `None` keeps the pre-#459 behaviour exactly.
-    pub recruiter_bond_amount: Option<i128>,
-    /// Optional engagement bundle to join (issue #464). When `Some`, the
-    /// bundle must already be registered via `create_engagement_bundle` by the
-    /// same company, and its shared arbiter panel/quorum is used in place of
-    /// the `arbiter_setup` argument (which is then ignored).
-    pub bundle_id: Option<String>,
+    /// Opt-in streaming payout (issue #466). `None` keeps today's lump-sum
+    /// payout on `confirm_milestone`; `Some(n)` vests each confirmed
+    /// milestone's net payout linearly over `n` ledgers, claimable via
+    /// `claim_streamed_payout`. Must be non-zero if provided.
+    pub stream_duration_ledgers: Option<u32>,
 }
-/// Escrowed recruiter collateral bond for a single engagement (issue #459).
-/// Stored under `DataKey::RecruiterBond(engagement_id)`.
+/// Vesting record for a streamed milestone payout (issue #466), stored under
+/// `DataKey::StreamedPayout(engagement_id, milestone_index)`.
 #[contracttype]
 #[derive(Clone)]
-pub struct RecruiterBond {
-    /// Bond amount escrowed at creation, in the engagement token's smallest unit.
-    pub amount: i128,
-    /// `true` once the bond has been (fully or partly) forfeited to the company.
-    pub forfeited: bool,
-    /// `true` once the bond has been paid out (returned and/or forfeited);
-    /// guarantees the bond settles at most once.
-    pub settled: bool,
-    /// Milestone indices whose dispute was rejected (reject quorum or
-    /// super-arbiter rejection) and that have not since been confirmed or
-    /// resolved. If any remain when the engagement is cancelled or expires,
-    /// the bond is forfeited.
-    pub rejected_milestones: Vec<u32>,
+pub struct StreamedPayout {
+    /// Net amount (after platform fee) vesting to the recruiter side.
+    pub total: i128,
+    /// Amount already transferred out by `claim_streamed_payout`.
+    pub claimed: i128,
+    /// Ledger at which vesting started (the confirmation ledger).
+    pub start_ledger: u32,
+    /// Number of ledgers over which `total` vests linearly.
+    pub duration_ledgers: u32,
 }
-/// Shared arbiter panel for a group of related engagements (issue #464).
-/// Stored under `DataKey::Bundle(bundle_id)`.
+/// Passed to `create_engagement_with_random_arbiters` (issue #467) in place
+/// of [`ArbiterSetup`]: the panel is drawn from the admin-curated arbiter pool
+/// instead of being supplied by the company. Bundled into a struct to stay
+/// within Soroban's 10-parameter limit.
 #[contracttype]
 #[derive(Clone)]
-pub struct EngagementBundle {
-    /// Company that registered the bundle; only it may create member engagements.
-    pub company: Address,
-    /// Arbiter panel copied onto every member engagement at creation time.
-    pub arbiters: Vec<Address>,
-    /// M-of-N quorum copied onto every member engagement at creation time.
+pub struct RandomArbiterSetup {
+    /// Number of distinct arbiters to draw from the pool.
+    pub panel_size: u32,
+    /// Number of votes required to resolve a dispute (M-of-N).
+    /// Must be ≥ 1 and ≤ `panel_size`.
     pub quorum: u32,
+}
+/// Historical dispute-response record for one arbiter (issue #468), updated
+/// by `raise_dispute` and `cast_arbiter_vote`.
+#[contracttype]
+#[derive(Clone)]
+pub struct ArbiterStats {
+    /// Disputes raised on engagements where this address sat on the panel.
+    pub disputes_assigned: u32,
+    /// Votes this address actually cast on those disputes.
+    pub votes_cast: u32,
+    /// Sum over all cast votes of `vote_ledger - dispute_raised_ledger`.
+    pub total_response_ledgers: u64,
 }

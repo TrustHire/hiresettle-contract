@@ -274,8 +274,9 @@ impl HireSettleContract {
     /// # Preconditions
     /// - Engagement status is `Active`.
     /// - Milestone status is `ProofSubmitted`.
-    /// - **Sequential confirmation (Issue #67)**: All prior milestones (indices
-    ///   `< milestone_index`) must already be `Confirmed` or `Resolved`.
+    /// - **Prerequisites (issue #461)**: every index in the milestone's
+    ///   `prerequisites` must already be `Confirmed` or `Resolved`. A linear
+    ///   chain of prerequisites reproduces the old sequential rule (issue #67).
     /// - For `Retention` milestones: `current_ledger >= valid_after_ledger`
     ///   (the retention window must have elapsed).
     ///
@@ -284,13 +285,17 @@ impl HireSettleContract {
     /// was previously paid out before a replacement reset (issue #183), only the
     /// difference between the current share and `replacement_paid_out` is released.
     /// Platform fee is deducted from the payment before transfer to the recruiter.
+    /// If the engagement was created with `stream_duration_ledgers` set
+    /// (issue #466), the platform fee is still collected immediately but the net
+    /// payment stays in escrow and vests linearly from this ledger; the recruiter
+    /// pulls it via [`Self::claim_streamed_payout`].
     ///
     /// # Panics
     /// - `"engagement is not active"` — engagement status is not `Active`.
     /// - `"unauthorized"` — caller is not the engagement's company or co-signer.
     /// - `"invalid milestone index"` — `milestone_index` is out of bounds.
     /// - `"milestone proof not yet submitted"` — milestone is not in `ProofSubmitted` status.
-    /// - `"PreviousMilestoneNotComplete"` — a prior milestone is not yet `Confirmed` or `Resolved`.
+    /// - `"PreviousMilestoneNotComplete"` — a prerequisite milestone is not yet `Confirmed` or `Resolved`.
     /// - `"retention window has not elapsed — cannot confirm yet"` — for `Retention` milestones
     ///   confirmed before their `valid_after_ledger`.
     ///
@@ -325,14 +330,9 @@ impl HireSettleContract {
             panic!("milestone proof not yet submitted");
         }
 
-        // Issue #67: enforce sequential confirmation — all prior milestones must be done.
-        for i in 0..milestone_index {
-            let prev = engagement.milestones.get(i).unwrap();
-            if prev.status != MilestoneStatus::Confirmed && prev.status != MilestoneStatus::Resolved
-            {
-                panic!("PreviousMilestoneNotComplete");
-            }
-        }
+        // Issue #461 (replacing #67's flat "all lower indices" rule): every
+        // declared prerequisite must be done.
+        Self::assert_prerequisites_complete(&engagement, &milestone);
 
         if milestone.kind == MilestoneKind::Retention {
             let current_ledger = env.ledger().sequence();
@@ -376,7 +376,19 @@ impl HireSettleContract {
                     (milestone_index, fee_amount, platform_fee.treasury),
                 );
             }
-            Self::distribute_recruiter_payout(&env, &engagement, net_payment, &token_client);
+            match engagement.stream_duration_ledgers {
+                // Issue #466: keep the net share escrowed and vest it instead.
+                Some(duration) => Self::start_streamed_payout(
+                    &env,
+                    &engagement_id,
+                    milestone_index,
+                    net_payment,
+                    duration,
+                ),
+                None => {
+                    Self::distribute_recruiter_payout(&env, &engagement, net_payment, &token_client)
+                }
+            }
         }
 
         let old_status = milestone.status.clone();
@@ -394,8 +406,9 @@ impl HireSettleContract {
         let old_engagement_status = engagement.status.clone();
         if all_done {
             engagement.status = EngagementStatus::Completed;
+            Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
             Self::decrement_company_active_count(&env, &engagement.company);
-            Self::settle_recruiter_bond(&env, &engagement);
+            Self::refund_split_withheld(&env, &engagement_id, &mut engagement);
         }
         engagement.last_activity_ledger = env.ledger().sequence();
 
@@ -488,5 +501,295 @@ impl HireSettleContract {
             .instance()
             .get(&DataKey::Config(ConfigKey::ConfirmWindow))
             .unwrap_or(DEFAULT_CONFIRM_WINDOW_LEDGERS)
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #465 — RECRUITER NO-SHOW PENALTY
+    // ----------------------------------------------------------
+
+    /// Admin sets how many ledgers a Placement milestone may sit `Pending`
+    /// without proof before `trigger_no_show` can forfeit it. `0` (the
+    /// default) disables the feature.
+    pub fn set_no_show_deadline_ledgers(env: Env, admin: Address, ledgers: u32) {
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::Config(ConfigKey::NoShowDeadline), &ledgers);
+        env.events()
+            .publish((Symbol::new(&env, "no_show_deadline_set"),), ledgers);
+    }
+
+    /// Return the configured no-show deadline in ledgers (`0` = disabled).
+    pub fn get_no_show_deadline_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::NoShowDeadline))
+            .unwrap_or(0u32)
+    }
+
+    /// Forfeit a Placement milestone whose recruiter never submitted proof.
+    ///
+    /// # Caller
+    /// Anyone — this is a permissionless keeper function.
+    ///
+    /// # Behaviour
+    /// - The engagement must be `Active` or `ReplacementRequested`.
+    /// - The milestone must be a `Pending` Placement milestone, and the current
+    ///   ledger must be strictly after `unlocked_at + no_show_deadline_ledgers`,
+    ///   where `unlocked_at` is the ledger it last became `Pending` (creation,
+    ///   a replacement reset, or a rejected dispute).
+    /// - The milestone moves to the terminal `Resolved` status (closed, unpaid)
+    ///   and its unpaid share is excluded from any recruiter payout; it is not
+    ///   added to `released_amount`, so it stays in the company's refund path
+    ///   (`cancel_engagement` / `expire_engagement` refund
+    ///   `total_amount - released_amount`). If the engagement instead runs to
+    ///   `Completed`, the forfeited amount is refunded to the company then.
+    ///
+    /// # Panics
+    /// - `"NoShowDisabled"` — no deadline configured.
+    /// - `"engagement is not active"` — engagement is not `Active`/`ReplacementRequested`.
+    /// - `"milestone is not pending"` — milestone is not `Pending`.
+    /// - `"only placement milestones can be forfeited"` — milestone is a Retention milestone.
+    /// - `"NoShowDeadlineNotReached"` — the deadline has not elapsed yet.
+    ///
+    /// # Events
+    /// `("milestone_no_show", engagement_id)` with `(milestone_index, forfeited_amount)`.
+    pub fn trigger_no_show(env: Env, engagement_id: String, milestone_index: u32) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+
+        let deadline = Self::get_no_show_deadline_ledgers(env.clone());
+        if deadline == 0 {
+            panic!("NoShowDisabled");
+        }
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+        if engagement.status != EngagementStatus::Active
+            && engagement.status != EngagementStatus::ReplacementRequested
+        {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+
+        let mut milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.status != MilestoneStatus::Pending {
+            panic!("milestone is not pending");
+        }
+        if milestone.kind != MilestoneKind::Placement {
+            panic!("only placement milestones can be forfeited");
+        }
+
+        let unlocked_at: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::MilestonePendingSince(
+                engagement_id.clone(),
+                milestone_index,
+            ))
+            .unwrap_or(engagement.created_at_ledger);
+        let current_ledger = env.ledger().sequence();
+        if current_ledger <= unlocked_at.saturating_add(deadline) {
+            panic!("NoShowDeadlineNotReached");
+        }
+
+        // Only the not-yet-paid part of the share is forfeited; anything paid
+        // before a replacement reset (issue #183) is already gone.
+        let full_share = (engagement.total_amount * milestone.payment_percent as i128) / 100;
+        let forfeited = (full_share - milestone.replacement_paid_out).max(0);
+        let forfeit_key = DataKey::NoShowForfeited(engagement_id.clone());
+        let pending_forfeit: i128 = env.storage().persistent().get(&forfeit_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&forfeit_key, &(pending_forfeit + forfeited));
+        env.storage()
+            .persistent()
+            .extend_ttl(&forfeit_key, 100_000, 6_300_000);
+
+        let old_status = milestone.status.clone();
+        milestone.status = MilestoneStatus::Resolved;
+        engagement.milestones.set(milestone_index, milestone);
+
+        let all_done = (0..engagement.milestones.len()).all(|i| {
+            let s = engagement.milestones.get(i).unwrap().status;
+            s == MilestoneStatus::Confirmed || s == MilestoneStatus::Resolved
+        });
+        let old_engagement_status = engagement.status.clone();
+        if all_done {
+            engagement.status = EngagementStatus::Completed;
+            Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
+            Self::decrement_company_active_count(&env, &engagement.company);
+        }
+        engagement.last_activity_ledger = current_ledger;
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
+
+        Self::emit_milestone_status_changed(
+            &env,
+            &engagement_id,
+            milestone_index,
+            old_status,
+            MilestoneStatus::Resolved,
+        );
+        Self::emit_engagement_status_changed(
+            &env,
+            &engagement_id,
+            old_engagement_status,
+            engagement.status.clone(),
+        );
+        env.events().publish(
+            (Symbol::new(&env, "milestone_no_show"), engagement_id.clone()),
+            (milestone_index, forfeited),
+        );
+    }
+
+    /// Record that a Placement milestone re-entered `Pending` at the current
+    /// ledger, restarting its no-show clock (issue #465).
+    pub(crate) fn mark_milestone_pending_since(env: &Env, engagement_id: &String, milestone_index: u32) {
+        let key = DataKey::MilestonePendingSince(engagement_id.clone(), milestone_index);
+        env.storage().persistent().set(&key, &env.ledger().sequence());
+        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+    }
+
+    /// Refund any no-show-forfeited shares to the company once an engagement
+    /// reaches `Completed` (issue #465). Cancelled/expired engagements don't
+    /// need this — their `total_amount - released_amount` refund already
+    /// covers the forfeited shares.
+    pub(crate) fn refund_no_show_forfeit(env: &Env, engagement_id: &String, engagement: &Engagement) {
+        let key = DataKey::NoShowForfeited(engagement_id.clone());
+        let forfeited: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        if forfeited > 0 {
+            token::Client::new(env, &engagement.token).transfer(
+                &env.current_contract_address(),
+                &engagement.company,
+                &forfeited,
+            );
+            env.storage().persistent().remove(&key);
+        }
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #466 — STREAMING MILESTONE PAYOUT
+    // ----------------------------------------------------------
+
+    /// Start (or restart) vesting `net_payment` for a confirmed milestone.
+    /// If a previous stream on this milestone still has an unclaimed balance
+    /// (e.g. a replacement re-confirmation), that balance is folded into the
+    /// new stream so no escrowed funds are stranded.
+    pub(crate) fn start_streamed_payout(
+        env: &Env,
+        engagement_id: &String,
+        milestone_index: u32,
+        net_payment: i128,
+        duration_ledgers: u32,
+    ) {
+        let key = DataKey::StreamedPayout(engagement_id.clone(), milestone_index);
+        let carried_over = env
+            .storage()
+            .persistent()
+            .get::<DataKey, StreamedPayout>(&key)
+            .map(|prev| prev.total - prev.claimed)
+            .unwrap_or(0);
+        let stream = StreamedPayout {
+            total: net_payment + carried_over,
+            claimed: 0,
+            start_ledger: env.ledger().sequence(),
+            duration_ledgers,
+        };
+        env.storage().persistent().set(&key, &stream);
+        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+    }
+
+    /// Transfer the currently-vested, not-yet-claimed part of a streamed
+    /// milestone payout and return the amount transferred.
+    ///
+    /// # Caller
+    /// Anyone may trigger the claim, but funds only ever go to the
+    /// engagement's recruiter (split with the co-recruiter, if any, exactly as
+    /// a lump-sum payout would be). `recruiter` must match the engagement's
+    /// recruiter; no signature is required.
+    ///
+    /// # Vesting
+    /// `vested = total * min(elapsed, duration) / duration` (integer division,
+    /// rounding down), where `elapsed = current_ledger - start_ledger`. Rounding
+    /// dust is never lost: once `elapsed >= duration`, `vested == total`
+    /// exactly. Claiming with nothing newly vested returns `0` without
+    /// panicking.
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — `recruiter` is not the engagement's recruiter.
+    /// - `"NoStreamedPayout"` — the milestone has no streamed payout.
+    ///
+    /// # Events
+    /// `("streamed_payout_claimed", engagement_id)` with
+    /// `(milestone_index, amount, claimed_total)` when `amount > 0`.
+    pub fn claim_streamed_payout(
+        env: Env,
+        recruiter: Address,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> i128 {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        if recruiter != engagement.recruiter {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let key = DataKey::StreamedPayout(engagement_id.clone(), milestone_index);
+        let mut stream: StreamedPayout = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("NoStreamedPayout"));
+
+        let amount = Self::vested_amount(&env, &stream) - stream.claimed;
+        if amount <= 0 {
+            return 0;
+        }
+
+        stream.claimed += amount;
+        env.storage().persistent().set(&key, &stream);
+        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+
+        let token_client = token::Client::new(&env, &engagement.token);
+        Self::distribute_recruiter_payout(&env, &engagement, amount, &token_client);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "streamed_payout_claimed"),
+                engagement_id.clone(),
+            ),
+            (milestone_index, amount, stream.claimed),
+        );
+        amount
+    }
+
+    /// Return `(claimed, total)` for a streamed milestone payout, or `(0, 0)`
+    /// if the milestone has no stream.
+    pub fn get_streamed_payout_status(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> (i128, i128) {
+        env.storage()
+            .persistent()
+            .get::<DataKey, StreamedPayout>(&DataKey::StreamedPayout(
+                engagement_id,
+                milestone_index,
+            ))
+            .map(|s| (s.claimed, s.total))
+            .unwrap_or((0, 0))
+    }
+
+    /// Linear vesting: amount of `stream.total` vested at the current ledger.
+    pub(crate) fn vested_amount(env: &Env, stream: &StreamedPayout) -> i128 {
+        let elapsed = env.ledger().sequence().saturating_sub(stream.start_ledger);
+        if elapsed >= stream.duration_ledgers {
+            return stream.total;
+        }
+        stream.total * elapsed as i128 / stream.duration_ledgers as i128
     }
 }
