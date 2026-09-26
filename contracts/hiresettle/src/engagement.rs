@@ -13,8 +13,8 @@ impl HireSettleContract {
     /// - `engagement_id`   — unique string ID for this engagement
     /// - `company`         — company address (must sign this tx)
     /// - `recruiter`       — recruiter address (receives payments)
-    /// - `arbiters`        — ordered list of arbiter addresses (min 1)
-    /// - `quorum`          — number of arbiter approvals required to release on dispute (M of N)
+    /// - `arbiter_setup`   — arbiter addresses, quorum (M of N), and optional per-arbiter
+    ///   weights; with weights, quorum is measured in cumulative weight (issue #460)
     /// - `token`           — SAC address of the escrow token (USDC or any allowlisted token,
     ///   see [`Self::add_allowed_token`]). `total_amount` and all amount-based math below are
     ///   raw integer units in this token's smallest denomination (e.g. stroops for a 7-decimal
@@ -36,6 +36,12 @@ impl HireSettleContract {
     /// - `"InvalidMilestones"` — milestone vector is empty or exceeds maximum milestone limit.
     /// - `"InvalidNameLength"` — `job_title` string length is invalid or empty.
     /// - `"TokenNotAllowed"` — payment token is not present in the allowed token list.
+    /// - `"ArbiterWeightsLengthMismatch"` / `"InvalidArbiterWeight"` — `arbiter_setup.weights`
+    ///   is not parallel to `arbiters` or contains a zero weight (issue #460).
+    /// - `"invalid quorum"` — quorum is 0 or exceeds the arbiter count (total weight when
+    ///   weights are given).
+    /// - `"InvalidPrerequisiteIndex"` / `"PrerequisiteCycle"` — a milestone's `prerequisites`
+    ///   reference an out-of-range index or form a cycle (issue #461).
     ///
     /// These checks exist so a company cannot name itself (or a colluding address)
     /// as arbiter and vote on its own disputes, or name itself as recruiter to
@@ -200,12 +206,35 @@ impl HireSettleContract {
 
         let arbiters = arbiter_setup.arbiters;
         let quorum = arbiter_setup.quorum;
+        let arbiter_weights = arbiter_setup.weights;
 
         if arbiters.is_empty() {
             panic!("at least one arbiter required");
         }
 
-        if quorum == 0 || quorum > arbiters.len() {
+        // Issue #460: with weights, quorum is measured in cumulative weight
+        // rather than headcount, so it is bounded by the total weight.
+        let total_weight: u32 = match &arbiter_weights {
+            Some(weights) => {
+                if weights.len() != arbiters.len() {
+                    panic!("ArbiterWeightsLengthMismatch");
+                }
+                let mut total: u32 = 0;
+                for i in 0..weights.len() {
+                    let w = weights.get(i).unwrap();
+                    if w == 0 {
+                        panic!("InvalidArbiterWeight: index {}", i);
+                    }
+                    total = total
+                        .checked_add(w)
+                        .unwrap_or_else(|| panic!("ArbiterWeightOverflow"));
+                }
+                total
+            }
+            None => arbiters.len(),
+        };
+
+        if quorum == 0 || quorum > total_weight {
             panic!("invalid quorum");
         }
 
@@ -256,6 +285,9 @@ impl HireSettleContract {
         if total_percent != 100 {
             panic!("milestone percentages must sum to 100");
         }
+
+        // Issue #461: prerequisite indices must be in range and acyclic.
+        Self::validate_milestone_prerequisites(&milestones);
 
         if env
             .storage()
@@ -321,6 +353,7 @@ impl HireSettleContract {
             recruiter: recruiter.clone(),
             arbiters,
             quorum,
+            arbiter_weights,
             token,
             total_amount,
             released_amount: 0,
@@ -553,6 +586,9 @@ impl HireSettleContract {
                             env.storage()
                                 .persistent()
                                 .remove(&DataKey::ArbiterVotes(engagement_id.clone(), i));
+                            env.storage()
+                                .persistent()
+                                .remove(&DataKey::ArbiterSplitVotes(engagement_id.clone(), i));
                             env.storage()
                                 .persistent()
                                 .remove(&DataKey::DisputeReason(engagement_id.clone(), i));

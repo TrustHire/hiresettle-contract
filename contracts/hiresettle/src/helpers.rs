@@ -220,6 +220,175 @@ impl HireSettleContract {
 
 
     // ----------------------------------------------------------
+    // ISSUE #460 — WEIGHTED ARBITER VOTING
+    // ----------------------------------------------------------
+
+    /// Vote weight of the arbiter in slot `slot_index`; 1 when the engagement
+    /// has no `arbiter_weights`.
+    pub(crate) fn arbiter_weight(engagement: &Engagement, slot_index: u32) -> u32 {
+        match &engagement.arbiter_weights {
+            Some(weights) => weights.get(slot_index).unwrap(),
+            None => 1,
+        }
+    }
+
+    /// Sum of every arbiter's weight; `arbiters.len()` when unweighted.
+    pub(crate) fn total_arbiter_weight(engagement: &Engagement) -> u32 {
+        match &engagement.arbiter_weights {
+            Some(weights) => {
+                let mut total: u32 = 0;
+                for i in 0..weights.len() {
+                    total += weights.get(i).unwrap();
+                }
+                total
+            }
+            None => engagement.arbiters.len(),
+        }
+    }
+
+    pub(crate) fn empty_vote_record(env: &Env) -> ArbiterVoteRecord {
+        ArbiterVoteRecord {
+            approve_votes: 0,
+            reject_votes: 0,
+            voted: Vec::new(env),
+            approve_weight: 0,
+            reject_weight: 0,
+        }
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #463 — ARBITER VOTE DELEGATION
+    // ----------------------------------------------------------
+
+    /// Resolve the arbiter slot a voting `caller` acts for: the caller's own
+    /// slot if they are an arbiter, otherwise the slot of the arbiter who has
+    /// named them as vote delegate on this engagement. Returns the slot's
+    /// arbiter address and index; panics `"unauthorized"` if neither applies.
+    pub(crate) fn resolve_voting_arbiter(
+        env: &Env,
+        engagement: &Engagement,
+        engagement_id: &String,
+        caller: &Address,
+    ) -> (Address, u32) {
+        for i in 0..engagement.arbiters.len() {
+            if engagement.arbiters.get(i).unwrap() == *caller {
+                return (caller.clone(), i);
+            }
+        }
+        for i in 0..engagement.arbiters.len() {
+            let arbiter = engagement.arbiters.get(i).unwrap();
+            let delegate: Option<Address> = env.storage().persistent().get(
+                &DataKey::ArbiterVoteDelegate(engagement_id.clone(), arbiter.clone()),
+            );
+            if delegate.as_ref() == Some(caller) {
+                return (arbiter, i);
+            }
+        }
+        panic!("{}", ERR_UNAUTHORIZED);
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #461 — MILESTONE PREREQUISITES
+    // ----------------------------------------------------------
+
+    /// Panics unless every prerequisite index is in range and the
+    /// prerequisite graph has no cycle (a self-reference counts as a cycle).
+    pub(crate) fn validate_milestone_prerequisites(milestones: &Vec<Milestone>) {
+        let n = milestones.len();
+        for i in 0..n {
+            let prereqs = milestones.get(i).unwrap().prerequisites;
+            for j in 0..prereqs.len() {
+                if prereqs.get(j).unwrap() >= n {
+                    panic!("InvalidPrerequisiteIndex: milestone {}", i);
+                }
+            }
+        }
+
+        // Kahn's algorithm: repeatedly retire milestones whose prerequisites
+        // are all retired. If a pass retires nothing while some remain, the
+        // remainder contains a cycle. n ≤ DEFAULT_MAX_MILESTONES, so the
+        // fixed-size bitmap and O(n³) worst case are both trivially bounded.
+        let mut done = [false; DEFAULT_MAX_MILESTONES as usize];
+        let mut remaining = n;
+        while remaining > 0 {
+            let mut progressed = false;
+            for i in 0..n {
+                if done[i as usize] {
+                    continue;
+                }
+                let prereqs = milestones.get(i).unwrap().prerequisites;
+                if (0..prereqs.len()).all(|j| done[prereqs.get(j).unwrap() as usize]) {
+                    done[i as usize] = true;
+                    remaining -= 1;
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                panic!("PrerequisiteCycle");
+            }
+        }
+    }
+
+    /// Panics `"PreviousMilestoneNotComplete"` unless every prerequisite of
+    /// `milestone` is `Confirmed` or `Resolved`.
+    pub(crate) fn assert_prerequisites_complete(engagement: &Engagement, milestone: &Milestone) {
+        for j in 0..milestone.prerequisites.len() {
+            let prereq = engagement
+                .milestones
+                .get(milestone.prerequisites.get(j).unwrap())
+                .unwrap();
+            if prereq.status != MilestoneStatus::Confirmed
+                && prereq.status != MilestoneStatus::Resolved
+            {
+                panic!("PreviousMilestoneNotComplete");
+            }
+        }
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #462 — SPLIT-VOTE WITHHELD ESCROW
+    // ----------------------------------------------------------
+
+    /// Refund to the company any milestone share withheld by split-vote
+    /// resolutions. Call whenever an engagement transitions to `Completed`;
+    /// a no-op for engagements that never had a split resolution. Cancel and
+    /// expiry need no call because they already refund
+    /// `total_amount - released_amount`, which includes the withheld amount.
+    ///
+    /// The refund is added to `released_amount` so `total_amount -
+    /// released_amount` keeps reporting the true escrow balance, and is capped
+    /// at that balance so it can never over-draw escrow and block completion.
+    pub(crate) fn refund_split_withheld(
+        env: &Env,
+        engagement_id: &String,
+        engagement: &mut Engagement,
+    ) {
+        let key = DataKey::SplitWithheld(engagement_id.clone());
+        let recorded: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        if recorded <= 0 {
+            return;
+        }
+        env.storage().persistent().remove(&key);
+        let withheld = recorded.min(engagement.total_amount - engagement.released_amount);
+        if withheld <= 0 {
+            return;
+        }
+        engagement.released_amount += withheld;
+        token::Client::new(env, &engagement.token).transfer(
+            &env.current_contract_address(),
+            &engagement.company,
+            &withheld,
+        );
+        env.events().publish(
+            (
+                soroban_sdk::Symbol::new(env, "split_withheld_refunded"),
+                engagement_id.clone(),
+            ),
+            withheld,
+        );
+    }
+
+    // ----------------------------------------------------------
     // ISSUE #56 — CO-RECRUITER SPLIT PAYOUT
     // ----------------------------------------------------------
 

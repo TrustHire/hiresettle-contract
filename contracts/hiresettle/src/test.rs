@@ -45,6 +45,9 @@ fn setup() -> (Env, Address, Address, Address, Address, Address) {
     (env, contract_id, token_id, company, recruiter, arbiter)
 }
 
+/// Linear prerequisites (each milestone depends on the previous one) — the
+/// issue #461 equivalent of the old strict sequential rule, so every test
+/// built on this fixture doubles as a regression test for it.
 fn build_milestones(env: &Env) -> Vec<Milestone> {
     vec![
         env,
@@ -57,6 +60,7 @@ fn build_milestones(env: &Env) -> Vec<Milestone> {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(env),
         },
         Milestone {
             name: String::from_str(env, "30-Day Retention"),
@@ -67,6 +71,7 @@ fn build_milestones(env: &Env) -> Vec<Milestone> {
             status: MilestoneStatus::Locked,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: vec![env, 0u32],
         },
         Milestone {
             name: String::from_str(env, "90-Day Retention"),
@@ -77,6 +82,7 @@ fn build_milestones(env: &Env) -> Vec<Milestone> {
             status: MilestoneStatus::Locked,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: vec![env, 1u32],
         },
     ]
 }
@@ -97,6 +103,7 @@ fn create_standard_engagement(
         &ArbiterSetup {
             arbiters: vec![env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         token_id,
         &1_000_000_000,
@@ -202,6 +209,7 @@ fn test_create_engagement_invalid_percentages() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
         Milestone {
             name: String::from_str(&env, "Retention"),
@@ -212,6 +220,7 @@ fn test_create_engagement_invalid_percentages() {
             status: MilestoneStatus::Locked,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -222,6 +231,7 @@ fn test_create_engagement_invalid_percentages() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -621,6 +631,7 @@ fn test_two_milestone_engagement_50_50() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
         Milestone {
             name: String::from_str(&env, "30-Day Retention"),
@@ -631,6 +642,7 @@ fn test_two_milestone_engagement_50_50() {
             status: MilestoneStatus::Locked,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -642,6 +654,7 @@ fn test_two_milestone_engagement_50_50() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &2_000_000_000,
@@ -1129,6 +1142,7 @@ fn test_arbiter_successor_cannot_double_vote_mid_dispute() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1183,6 +1197,7 @@ fn test_arbiter_successor_seat_migrated_not_duplicated() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1336,6 +1351,7 @@ fn test_metadata_hash_present() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1390,6 +1406,7 @@ fn test_metadata_hash_empty_string_rejected() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1438,6 +1455,7 @@ fn test_co_recruiter_60_40_split() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1526,6 +1544,7 @@ fn test_split_bps_over_10000_rejected() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1562,6 +1581,7 @@ fn test_co_recruiter_gets_remainder() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1613,6 +1633,7 @@ fn test_co_recruiter_summary_fields() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1653,6 +1674,7 @@ fn test_split_bps_10000_accepted() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1895,6 +1917,7 @@ fn test_quorum_2_of_3_approve() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1942,6 +1965,7 @@ fn test_quorum_2_of_3_reject() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -1989,6 +2013,7 @@ fn test_duplicate_vote_rejected() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2063,6 +2088,7 @@ fn test_quorum_unanimous_requires_all_approvals() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2119,6 +2145,7 @@ fn test_quorum_unanimous_single_reject_resets_milestone() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2162,6 +2189,7 @@ fn test_quorum_unanimous_2_of_2_approve() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2209,6 +2237,7 @@ fn test_quorum_unanimous_4_of_4_approve() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone(), a4.clone()],
             quorum: 4,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2260,6 +2289,7 @@ fn test_quorum_unanimous_mixed_votes_reject_wins() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2308,6 +2338,7 @@ fn test_quorum_unanimous_non_arbiter_cannot_vote() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2350,6 +2381,7 @@ fn test_quorum_unanimous_vote_record_cleared_after_reset() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2414,6 +2446,7 @@ fn test_quorum_unanimous_duplicate_vote_panics() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2457,6 +2490,7 @@ fn test_quorum_unanimous_vote_after_resolution_panics() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2504,6 +2538,7 @@ fn test_quorum_unanimous_vote_without_dispute_panics() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2545,6 +2580,7 @@ fn test_quorum_unanimous_fee_paid_only_to_deciding_arbiter() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2595,6 +2631,7 @@ fn test_quorum_unanimous_final_milestone_completes_engagement() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 3,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -2610,6 +2647,7 @@ fn test_quorum_unanimous_final_milestone_completes_engagement() {
                 status: MilestoneStatus::Pending,
                 proof_submitted_at: 0,
                 replacement_paid_out: 0,
+                prerequisites: Vec::new(&env),
             },
         ],
         &vec![&env],
@@ -3222,6 +3260,7 @@ fn test_get_engagements_by_company_insertion_order() {
             &ArbiterSetup {
                 arbiters: vec![&env, arbiter.clone()],
                 quorum: 1,
+                weights: None,
             },
             &token_id,
             &1_000_000_000,
@@ -3322,6 +3361,7 @@ fn test_get_engagements_first_page_ten() {
             &ArbiterSetup {
                 arbiters: vec![&env, arbiter.clone()],
                 quorum: 1,
+                weights: None,
             },
             &token_id,
             &1_000_000_000,
@@ -3369,6 +3409,7 @@ fn test_get_engagements_by_recruiter_insertion_order() {
             &ArbiterSetup {
                 arbiters: vec![&env, arbiter.clone()],
                 quorum: 1,
+                weights: None,
             },
             &token_id,
             &1_000_000_000,
@@ -3432,6 +3473,7 @@ fn test_get_engagements_by_recruiter_multi_recruiter() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -3447,6 +3489,7 @@ fn test_get_engagements_by_recruiter_multi_recruiter() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -4072,6 +4115,7 @@ fn test_force_confirm_last_milestone_completes_engagement() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -4083,6 +4127,7 @@ fn test_force_confirm_last_milestone_completes_engagement() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -4340,6 +4385,7 @@ fn create_engagement_with_id(
         &ArbiterSetup {
             arbiters: vec![env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         token_id,
         &1_000_000_000,
@@ -4736,6 +4782,7 @@ fn test_milestone_cap_at_cap() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         });
     }
 
@@ -4746,6 +4793,7 @@ fn test_milestone_cap_at_cap() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -4791,6 +4839,7 @@ fn test_milestone_cap_over_cap() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         });
     }
 
@@ -4801,6 +4850,7 @@ fn test_milestone_cap_over_cap() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -4824,6 +4874,7 @@ fn test_milestone_cap_zero_milestones() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -4859,6 +4910,7 @@ fn test_milestone_name_64_char_accepted() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -4869,6 +4921,7 @@ fn test_milestone_name_64_char_accepted() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -4900,6 +4953,7 @@ fn test_milestone_name_65_char_rejected() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -4910,6 +4964,7 @@ fn test_milestone_name_65_char_rejected() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -4937,6 +4992,7 @@ fn test_milestone_name_empty_rejected() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -4947,6 +5003,7 @@ fn test_milestone_name_empty_rejected() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -4978,6 +5035,7 @@ fn test_milestone_name_multi_milestone_partial_failure() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
         Milestone {
             name: name_65,
@@ -4988,6 +5046,7 @@ fn test_milestone_name_multi_milestone_partial_failure() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -4998,6 +5057,7 @@ fn test_milestone_name_multi_milestone_partial_failure() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5028,6 +5088,7 @@ fn test_milestone_name_uniqueness_happy_path() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
         Milestone {
             name: String::from_str(&env, "Second Milestone"),
@@ -5038,6 +5099,7 @@ fn test_milestone_name_uniqueness_happy_path() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -5048,6 +5110,7 @@ fn test_milestone_name_uniqueness_happy_path() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5075,6 +5138,7 @@ fn test_milestone_name_uniqueness_duplicate_detection() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
         Milestone {
             name: String::from_str(&env, "Duplicate Milestone"),
@@ -5085,6 +5149,7 @@ fn test_milestone_name_uniqueness_duplicate_detection() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -5095,6 +5160,7 @@ fn test_milestone_name_uniqueness_duplicate_detection() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5121,6 +5187,7 @@ fn test_milestone_name_uniqueness_case_sensitivity() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
         Milestone {
             name: String::from_str(&env, "placement"),
@@ -5131,6 +5198,7 @@ fn test_milestone_name_uniqueness_case_sensitivity() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -5141,6 +5209,7 @@ fn test_milestone_name_uniqueness_case_sensitivity() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5168,6 +5237,7 @@ fn test_job_title_empty_rejected() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5195,6 +5265,7 @@ fn test_job_title_64_char_accepted() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5223,6 +5294,7 @@ fn test_job_title_65_char_rejected() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5424,6 +5496,7 @@ fn test_cap_is_per_company_isolated() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id2,
         &1_000_000_000,
@@ -5458,6 +5531,7 @@ fn test_completion_frees_slot() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -5469,6 +5543,7 @@ fn test_completion_frees_slot() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5504,6 +5579,7 @@ fn test_completion_frees_slot() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5519,6 +5595,7 @@ fn test_completion_frees_slot() {
                 status: MilestoneStatus::Pending,
                 proof_submitted_at: 0,
                 replacement_paid_out: 0,
+                prerequisites: Vec::new(&env),
             },
         ],
         &vec![&env],
@@ -5646,6 +5723,7 @@ fn test_admin_decreasing_cap_blocks_new_while_over() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5798,6 +5876,7 @@ fn test_create_engagement_rejects_company_as_recruiter() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5821,6 +5900,7 @@ fn test_create_engagement_rejects_company_as_arbiter() {
         &ArbiterSetup {
             arbiters: vec![&env, company.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5844,6 +5924,7 @@ fn test_create_engagement_rejects_recruiter_as_arbiter() {
         &ArbiterSetup {
             arbiters: vec![&env, recruiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5868,6 +5949,7 @@ fn test_create_engagement_rejects_recruiter_as_one_of_several_arbiters() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone(), recruiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -5956,6 +6038,7 @@ fn test_engagement_payout_math_is_decimal_agnostic_for_18_decimal_token() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &mock_token_id,
         &total_amount,
@@ -6006,6 +6089,7 @@ fn test_min_amount_is_raw_units_not_scaled_per_token_decimals() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &mock_token_id,
         &min_amount,
@@ -6040,6 +6124,7 @@ fn test_request_replacement_clears_in_flight_dispute_on_retention_milestone() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -6276,6 +6361,7 @@ fn test_create_engagement_below_updated_min_amount_rejected() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &(new_min - 1),
@@ -6664,6 +6750,7 @@ fn test_multi_arbiter_quorum_with_three_arbiters_and_quorum_two() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -6879,6 +6966,7 @@ fn test_arbiter_fee_deducted_on_dispute_approval() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -7050,6 +7138,7 @@ fn test_multiple_companies_independent_active_counts() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id2,
         &1_000_000_000,
@@ -7141,6 +7230,7 @@ fn test_co_recruiter_split_with_platform_fee() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -7416,6 +7506,7 @@ fn test_token_allowlist_rejects_second_token_when_only_first_allowed() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id2,
         &1_000_000_000,
@@ -7490,6 +7581,7 @@ fn test_arbiter_votes_reach_quorum_in_different_order() {
         &ArbiterSetup {
             arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
             quorum: 2,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -7548,6 +7640,7 @@ fn test_co_recruiter_split_with_odd_percentage_remainder() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
@@ -7713,6 +7806,7 @@ fn test_create_engagement_rejects_99_percent_total() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
         Milestone {
             name: String::from_str(&env, "M2"),
@@ -7723,6 +7817,7 @@ fn test_create_engagement_rejects_99_percent_total() {
             status: MilestoneStatus::Pending,
             proof_submitted_at: 0,
             replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
         },
     ];
 
@@ -7733,6 +7828,7 @@ fn test_create_engagement_rejects_99_percent_total() {
         &ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 1,
+            weights: None,
         },
         &token_id,
         &1_000_000_000,
