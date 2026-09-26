@@ -340,3 +340,38 @@ pub struct ArbiterStats {
     /// Sum over all cast votes of `vote_ledger - dispute_raised_ledger`.
     pub total_response_ledgers: u64,
 }
+/// Running total of star ratings a recruiter has received (issue #470).
+/// The average rating is `total_stars / rating_count`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RatingSummary {
+    /// Sum of every star rating (1–5) received.
+    pub total_stars: u64,
+    /// Number of ratings received; always ≥ 1 once a summary exists.
+    pub rating_count: u32,
+}
+/// Admin-configured curve for the rating-based proof cooldown discount
+/// (issue #470). See `get_effective_proof_cooldown`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProofCooldownDiscount {
+    /// Ledgers removed from the base cooldown per average rating star.
+    pub discount_per_star_ledgers: u32,
+    /// Floor the discounted cooldown can never drop below.
+    pub min_cooldown_ledgers: u32,
+}
+/// A pending proposal to override one engagement's dispute window
+/// (issue #469). Only the counterparty of `proposer` may accept or reject it.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisputeWindowProposal {
+    /// Address that made the proposal (a party or its co-signer).
+    pub proposer: Address,
+    /// `true` if the proposal came from the company side, `false` if from
+    /// the recruiter side; decides which side may accept or reject.
+    pub proposed_by_company: bool,
+    /// Proposed dispute window in ledgers.
+    pub ledgers: u32,
+    /// Last ledger at which the proposal can still be accepted.
+    pub expires_at_ledger: u32,
+}

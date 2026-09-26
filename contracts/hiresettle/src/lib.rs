@@ -46,6 +46,7 @@ pub(crate) use constants::*;
 pub(crate) use errors::*;
 pub use types::*;
 pub use enums::*;
+pub use payout::{SwapAdapter, SwapAdapterClient};
 
 // ============================================================
 // CONTRACT

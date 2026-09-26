@@ -118,7 +118,9 @@ impl HireSettleContract {
     /// - The engagement must be `Active` or `ReplacementRequested`.
     /// - The target milestone must be in `Pending` status (i.e. already unlocked).
     /// - If a proof was previously submitted and rejected, the caller must wait
-    ///   `proof_cooldown` ledgers (default 2 880 ≈ 4 hours) before resubmitting.
+    ///   `proof_cooldown` ledgers (default 2 880 ≈ 4 hours) before resubmitting,
+    ///   reduced by the recruiter's rating discount (see
+    ///   [`Self::get_effective_proof_cooldown`], issue #470).
     /// - After successful submission the milestone moves to `ProofSubmitted`.
     /// - If the engagement was `ReplacementRequested` and this is the placement milestone,
     ///   the engagement reverts to `Active`.
@@ -176,10 +178,11 @@ impl HireSettleContract {
         }
 
         // Rate-limit resubmissions — first submission (no stored ledger) is always allowed.
+        // Issue #470: well-rated recruiters get a shorter, rating-discounted cooldown.
         let last_key = DataKey::LastProofAt(engagement_id.clone(), milestone_index);
         let current_ledger = env.ledger().sequence();
         if let Some(last_at) = env.storage().persistent().get::<DataKey, u32>(&last_key) {
-            let cooldown = Self::get_proof_cooldown(&env);
+            let cooldown = Self::effective_proof_cooldown_internal(&env, &engagement.recruiter);
             if current_ledger < last_at + cooldown {
                 panic!("ResubmitTooSoon");
             }
