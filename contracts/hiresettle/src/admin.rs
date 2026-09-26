@@ -461,7 +461,7 @@ impl HireSettleContract {
         // record that later blocks a legitimately created engagement.
         let _ = Self::get_engagement_internal(&env, &engagement_id);
 
-        if reason.len() == 0 {
+        if reason.is_empty() {
             panic!("EmptyPauseReason");
         }
         if reason.len() > MAX_PAUSE_REASON_LEN {
@@ -832,6 +832,7 @@ impl HireSettleContract {
         );
 
         Self::decrement_company_active_count(&env, &engagement.company);
+        Self::settle_recruiter_bond(&env, &engagement);
 
         env.events().publish(
             (
