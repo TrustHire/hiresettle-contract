@@ -143,6 +143,7 @@ fn default_config() -> EngagementConfig {
         referrer: None,
         tags: None,
         is_public: false,
+        stream_duration_ledgers: None,
     }
 }
 
@@ -1349,6 +1350,7 @@ fn test_metadata_hash_present() {
             referrer: None,
             tags: None,
             is_public: false,
+            stream_duration_ledgers: None,
         },
     );
 
@@ -1402,6 +1404,7 @@ fn test_metadata_hash_empty_string_rejected() {
             referrer: None,
             tags: None,
             is_public: false,
+            stream_duration_ledgers: None,
         },
     );
 }
@@ -1425,6 +1428,7 @@ fn test_co_recruiter_60_40_split() {
         referrer: None,
         tags: None,
         is_public: false,
+        stream_duration_ledgers: None,
     };
 
     client.create_engagement(
@@ -1512,6 +1516,7 @@ fn test_split_bps_over_10000_rejected() {
         referrer: None,
         tags: None,
         is_public: false,
+        stream_duration_ledgers: None,
     };
 
     client.create_engagement(
@@ -1547,6 +1552,7 @@ fn test_co_recruiter_gets_remainder() {
         referrer: None,
         tags: None,
         is_public: false,
+        stream_duration_ledgers: None,
     };
 
     client.create_engagement(
@@ -1597,6 +1603,7 @@ fn test_co_recruiter_summary_fields() {
         referrer: None,
         tags: None,
         is_public: false,
+        stream_duration_ledgers: None,
     };
 
     client.create_engagement(
@@ -1636,6 +1643,7 @@ fn test_split_bps_10000_accepted() {
         referrer: None,
         tags: None,
         is_public: false,
+        stream_duration_ledgers: None,
     };
 
     client.create_engagement(
@@ -7123,6 +7131,7 @@ fn test_co_recruiter_split_with_platform_fee() {
         referrer: None,
         tags: None,
         is_public: false,
+        stream_duration_ledgers: None,
     };
 
     client.create_engagement(
@@ -7529,6 +7538,7 @@ fn test_co_recruiter_split_with_odd_percentage_remainder() {
         referrer: None,
         tags: None,
         is_public: false,
+        stream_duration_ledgers: None,
     };
 
     client.create_engagement(
@@ -7853,4 +7863,508 @@ fn test_remove_fee_tier_from_empty_list_panics() {
 
     // No tiers set - try to remove one
     client.remove_fee_tier(&company, &1_000_000);
+}
+
+// ============================================================
+// ISSUE #465 — RECRUITER NO-SHOW PENALTY
+// ============================================================
+
+fn create_short_retention_engagement(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    arbiter: &Address,
+    id: &str,
+    config: &EngagementConfig,
+) -> String {
+    client.create_engagement(
+        &String::from_str(env, id),
+        company,
+        recruiter,
+        &ArbiterSetup {
+            arbiters: vec![env, arbiter.clone()],
+            quorum: 1,
+        },
+        token_id,
+        &1_000_000_000,
+        &String::from_str(env, "Engineer"),
+        &build_milestones(env),
+        &vec![env, 1u32, 2u32],
+        config,
+    )
+}
+
+#[test]
+#[should_panic(expected = "NoShowDisabled")]
+fn test_no_show_disabled_by_default() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let id = create_short_retention_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "NS-1", &default_config(),
+    );
+    assert_eq!(client.get_no_show_deadline_ledgers(), 0);
+    advance_ledger(&env, 1_000_000);
+    client.trigger_no_show(&id, &0);
+}
+
+#[test]
+#[should_panic(expected = "NoShowDeadlineNotReached")]
+fn test_no_show_panics_before_deadline() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_no_show_deadline_ledgers(&company, &100);
+    assert_eq!(client.get_no_show_deadline_ledgers(), 100);
+    let id = create_short_retention_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "NS-2", &default_config(),
+    );
+    // Exactly at unlocked_at + deadline is still too early.
+    advance_ledger(&env, 100);
+    client.trigger_no_show(&id, &0);
+}
+
+#[test]
+#[should_panic(expected = "milestone is not pending")]
+fn test_no_show_panics_on_submitted_milestone() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_no_show_deadline_ledgers(&company, &100);
+    let id = create_short_retention_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "NS-3", &default_config(),
+    );
+    client.submit_proof(&recruiter, &id, &0, &String::from_str(&env, "QmProof"));
+    advance_ledger(&env, 101);
+    client.trigger_no_show(&id, &0);
+}
+
+#[test]
+#[should_panic(expected = "only placement milestones can be forfeited")]
+fn test_no_show_panics_on_retention_milestone() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_no_show_deadline_ledgers(&company, &100);
+    let id = create_short_retention_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "NS-4", &default_config(),
+    );
+    advance_ledger(&env, LEDGERS_PER_DAY + 101);
+    client.unlock_milestone(&id, &1);
+    client.trigger_no_show(&id, &1);
+}
+
+#[test]
+fn test_no_show_forfeits_share_to_company_refund_path() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    client.set_no_show_deadline_ledgers(&company, &100);
+    let id = create_short_retention_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "NS-5", &default_config(),
+    );
+    let company_before = token_client.balance(&company);
+
+    advance_ledger(&env, 101);
+    client.trigger_no_show(&id, &0);
+
+    assert!(has_event(&env, "milestone_no_show"));
+    assert_eq!(client.get_milestone(&id, &0).status, MilestoneStatus::Resolved);
+    // Nothing was paid to the recruiter or counted as released.
+    assert_eq!(client.get_total_released(&id), 0);
+    assert_eq!(client.get_unlock_progress(&id), (1, 3));
+    assert_eq!(token_client.balance(&recruiter), 0);
+
+    // Cancelling returns the full escrow, forfeited share included.
+    client.cancel_engagement(&company, &recruiter, &id);
+    assert_eq!(token_client.balance(&company), company_before + 1_000_000_000);
+    assert_eq!(token_client.balance(&contract_id), 0);
+}
+
+#[test]
+fn test_no_show_share_excluded_from_recruiter_payout_on_completion() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    client.set_no_show_deadline_ledgers(&company, &100);
+    let id = create_short_retention_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "NS-6", &default_config(),
+    );
+    let company_before = token_client.balance(&company);
+
+    advance_ledger(&env, 101);
+    client.trigger_no_show(&id, &0);
+
+    // A forfeited milestone does not block later milestones.
+    advance_ledger(&env, LEDGERS_PER_DAY);
+    client.unlock_milestone(&id, &1);
+    client.submit_proof(&recruiter, &id, &1, &String::from_str(&env, "QmRet1"));
+    client.confirm_milestone(&company, &id, &1);
+    advance_ledger(&env, LEDGERS_PER_DAY);
+    client.unlock_milestone(&id, &2);
+    client.submit_proof(&recruiter, &id, &2, &String::from_str(&env, "QmRet2"));
+    client.confirm_milestone(&company, &id, &2);
+
+    assert_eq!(client.get_engagement(&id).status, EngagementStatus::Completed);
+    assert_eq!(client.get_total_released(&id), 700_000_000);
+    assert_eq!(token_client.balance(&recruiter), 700_000_000);
+    // The forfeited 30% came back to the company on completion.
+    assert_eq!(token_client.balance(&company), company_before + 300_000_000);
+    assert_eq!(token_client.balance(&contract_id), 0);
+}
+
+#[test]
+fn test_no_show_clock_restarts_after_rejected_dispute() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_no_show_deadline_ledgers(&company, &100);
+    let id = create_short_retention_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "NS-7", &default_config(),
+    );
+    advance_ledger(&env, 90);
+    client.submit_proof(&recruiter, &id, &0, &String::from_str(&env, "QmProof"));
+    client.raise_dispute(&company, &id, &0, &String::from_str(&env, "bad"));
+    client.cast_arbiter_vote(&arbiter, &id, &0, &false);
+    assert_eq!(client.get_milestone(&id, &0).status, MilestoneStatus::Pending);
+
+    // Past the original deadline but not the restarted one.
+    advance_ledger(&env, 50);
+    let early = client.try_trigger_no_show(&id, &0);
+    assert!(early.is_err());
+
+    advance_ledger(&env, 51);
+    client.trigger_no_show(&id, &0);
+    assert_eq!(client.get_milestone(&id, &0).status, MilestoneStatus::Resolved);
+}
+
+// ============================================================
+// ISSUE #466 — STREAMING MILESTONE PAYOUT
+// ============================================================
+
+fn stream_config(duration: u32) -> EngagementConfig {
+    let mut config = default_config();
+    config.stream_duration_ledgers = Some(duration);
+    config
+}
+
+#[test]
+fn test_unstreamed_milestone_pays_lump_sum() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let id = create_short_retention_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ST-1", &default_config(),
+    );
+    client.submit_proof(&recruiter, &id, &0, &String::from_str(&env, "QmProof"));
+    client.confirm_milestone(&company, &id, &0);
+
+    assert_eq!(token_client.balance(&recruiter), 300_000_000);
+    assert_eq!(client.get_streamed_payout_status(&id, &0), (0, 0));
+}
+
+#[test]
+fn test_streamed_milestone_vests_linearly() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let id = create_short_retention_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ST-2", &stream_config(1_000),
+    );
+    client.submit_proof(&recruiter, &id, &0, &String::from_str(&env, "QmProof"));
+    client.confirm_milestone(&company, &id, &0);
+
+    // Confirmed and counted as released, but nothing transferred yet.
+    assert_eq!(client.get_total_released(&id), 300_000_000);
+    assert_eq!(token_client.balance(&recruiter), 0);
+    assert_eq!(client.get_streamed_payout_status(&id, &0), (0, 300_000_000));
+
+    // No ledgers elapsed: zero, no panic.
+    assert_eq!(client.claim_streamed_payout(&recruiter, &id, &0), 0);
+
+    advance_ledger(&env, 500);
+    assert_eq!(client.claim_streamed_payout(&recruiter, &id, &0), 150_000_000);
+    assert_eq!(token_client.balance(&recruiter), 150_000_000);
+
+    advance_ledger(&env, 600);
+    assert_eq!(client.claim_streamed_payout(&recruiter, &id, &0), 150_000_000);
+    assert_eq!(token_client.balance(&recruiter), 300_000_000);
+    assert_eq!(
+        client.get_streamed_payout_status(&id, &0),
+        (300_000_000, 300_000_000)
+    );
+    assert_eq!(client.claim_streamed_payout(&recruiter, &id, &0), 0);
+}
+
+#[test]
+fn test_streamed_payout_rounds_down_and_pays_exact_remainder() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let id = create_short_retention_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ST-3", &stream_config(7),
+    );
+    client.submit_proof(&recruiter, &id, &0, &String::from_str(&env, "QmProof"));
+    client.confirm_milestone(&company, &id, &0);
+
+    // 300_000_000 * 3 / 7 = 128_571_428.57… → rounds down.
+    advance_ledger(&env, 3);
+    assert_eq!(client.claim_streamed_payout(&recruiter, &id, &0), 128_571_428);
+
+    advance_ledger(&env, 4);
+    assert_eq!(client.claim_streamed_payout(&recruiter, &id, &0), 171_428_572);
+    assert_eq!(token_client.balance(&recruiter), 300_000_000);
+}
+
+#[test]
+fn test_streamed_payout_is_permissionless_but_pays_recruiter() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let id = create_short_retention_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ST-4", &stream_config(10),
+    );
+    client.submit_proof(&recruiter, &id, &0, &String::from_str(&env, "QmProof"));
+    client.confirm_milestone(&company, &id, &0);
+    advance_ledger(&env, 10);
+
+    env.set_auths(&[]);
+    client.claim_streamed_payout(&recruiter, &id, &0);
+    assert_eq!(token_client.balance(&recruiter), 300_000_000);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_streamed_payout_rejects_non_recruiter() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let id = create_short_retention_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ST-5", &stream_config(10),
+    );
+    client.submit_proof(&recruiter, &id, &0, &String::from_str(&env, "QmProof"));
+    client.confirm_milestone(&company, &id, &0);
+    client.claim_streamed_payout(&arbiter, &id, &0);
+}
+
+#[test]
+#[should_panic(expected = "InvalidStreamDuration")]
+fn test_zero_stream_duration_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_short_retention_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ST-6", &stream_config(0),
+    );
+}
+
+// ============================================================
+// ISSUE #467 — RANDOM ARBITER PANEL FROM POOL
+// ============================================================
+
+fn create_random_panel_engagement(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    id: &str,
+    panel_size: u32,
+    quorum: u32,
+) -> String {
+    client.create_engagement_random_panel(
+        &String::from_str(env, id),
+        company,
+        recruiter,
+        &RandomArbiterSetup { panel_size, quorum },
+        token_id,
+        &1_000_000_000,
+        &String::from_str(env, "Engineer"),
+        &build_milestones(env),
+        &vec![env, 30u32, 90u32],
+        &default_config(),
+    )
+}
+
+#[test]
+fn test_arbiter_pool_add_remove() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let a = Address::generate(&env);
+    let b = Address::generate(&env);
+    client.add_arbiter_pool_member(&company, &a);
+    client.add_arbiter_pool_member(&company, &b);
+    assert_eq!(client.get_arbiter_pool(), vec![&env, a.clone(), b.clone()]);
+    client.remove_arbiter_pool_member(&company, &a);
+    assert_eq!(client.get_arbiter_pool(), vec![&env, b]);
+    assert!(client.try_add_arbiter_pool_member(&company, &Address::generate(&env)).is_ok());
+    assert!(client.try_remove_arbiter_pool_member(&company, &a).is_err());
+}
+
+#[test]
+#[should_panic(expected = "AlreadyInPool")]
+fn test_arbiter_pool_rejects_duplicate() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let a = Address::generate(&env);
+    client.add_arbiter_pool_member(&company, &a);
+    client.add_arbiter_pool_member(&company, &a);
+}
+
+#[test]
+fn test_random_panel_is_distinct_and_drawn_from_pool() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    for _ in 0..6 {
+        client.add_arbiter_pool_member(&company, &Address::generate(&env));
+    }
+    // A removed member must never be drawn afterwards.
+    let removed = client.get_arbiter_pool().get(0).unwrap();
+    client.remove_arbiter_pool_member(&company, &removed);
+    let pool = client.get_arbiter_pool();
+
+    for n in 0..10u32 {
+        let id = std::format!("RP-{}", n);
+        let id = create_random_panel_engagement(
+            &env, &client, &token_id, &company, &recruiter, &id, 3, 2,
+        );
+        assert!(has_event(&env, "arbiters_drawn"));
+        let engagement = client.get_engagement(&id);
+        assert_eq!(engagement.arbiters.len(), 3);
+        assert_eq!(engagement.quorum, 2);
+        for i in 0..engagement.arbiters.len() {
+            let a = engagement.arbiters.get(i).unwrap();
+            assert!(pool.contains(&a));
+            assert!(a != removed);
+            for j in (i + 1)..engagement.arbiters.len() {
+                assert!(a != engagement.arbiters.get(j).unwrap());
+            }
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "ArbiterPoolTooSmall")]
+fn test_random_panel_panics_when_pool_too_small() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.add_arbiter_pool_member(&company, &Address::generate(&env));
+    client.add_arbiter_pool_member(&company, &Address::generate(&env));
+    create_random_panel_engagement(&env, &client, &token_id, &company, &recruiter, "RP-X", 3, 1);
+}
+
+#[test]
+fn test_random_panel_never_draws_engagement_parties() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let a = Address::generate(&env);
+    client.add_arbiter_pool_member(&company, &company);
+    client.add_arbiter_pool_member(&company, &a);
+    client.add_arbiter_pool_member(&company, &recruiter);
+
+    let id = create_random_panel_engagement(&env, &client, &token_id, &company, &recruiter, "RP-P", 1, 1);
+    assert_eq!(client.get_engagement(&id).arbiters, vec![&env, a]);
+
+    let too_big = client.try_create_engagement_random_panel(
+        &String::from_str(&env, "RP-Q"),
+        &company,
+        &recruiter,
+        &RandomArbiterSetup { panel_size: 2, quorum: 1 },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+    assert!(too_big.is_err());
+}
+
+// ============================================================
+// ISSUE #468 — RESPONSE-TIME-WEIGHTED PANEL BIAS
+// ============================================================
+
+/// Gives `good` a fast, complete voting record and `bad` a dispute it never
+/// voted on.
+fn build_arbiter_track_records(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    good: &Address,
+    bad: &Address,
+) {
+    let id = String::from_str(env, "TRACK-1");
+    client.create_engagement(
+        &id,
+        company,
+        recruiter,
+        &ArbiterSetup {
+            arbiters: vec![env, good.clone(), bad.clone()],
+            quorum: 1,
+        },
+        token_id,
+        &1_000_000_000,
+        &String::from_str(env, "Engineer"),
+        &build_milestones(env),
+        &vec![env, 30u32, 90u32],
+        &default_config(),
+    );
+    client.submit_proof(recruiter, &id, &0, &String::from_str(env, "QmProof"));
+    client.raise_dispute(company, &id, &0, &String::from_str(env, "check"));
+    advance_ledger(env, 10);
+    client.cast_arbiter_vote(good, &id, &0, &true);
+}
+
+#[test]
+fn test_arbiter_selection_weight_reflects_track_record() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let good = Address::generate(&env);
+    let bad = Address::generate(&env);
+    let newbie = Address::generate(&env);
+
+    assert_eq!(client.get_arbiter_selection_weight(&newbie), 50);
+    build_arbiter_track_records(&env, &client, &token_id, &company, &recruiter, &good, &bad);
+
+    let good_stats = client.get_arbiter_stats(&good).unwrap();
+    assert_eq!(good_stats.disputes_assigned, 1);
+    assert_eq!(good_stats.votes_cast, 1);
+    assert_eq!(good_stats.total_response_ledgers, 10);
+    // completion 100, speed 100 * 17_280 / 17_290 = 99.
+    assert_eq!(client.get_arbiter_selection_weight(&good), 99);
+    // Never voted: floored at 1, still eligible.
+    assert_eq!(client.get_arbiter_selection_weight(&bad), 1);
+    assert_eq!(client.get_arbiter_selection_weight(&newbie), 50);
+}
+
+#[test]
+fn test_weighted_draw_favours_strong_track_record() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let good = Address::generate(&env);
+    let bad = Address::generate(&env);
+    let newbie = Address::generate(&env);
+    build_arbiter_track_records(&env, &client, &token_id, &company, &recruiter, &good, &bad);
+
+    let pool = vec![&env, bad.clone(), newbie.clone(), good.clone()];
+    let (mut good_n, mut bad_n, mut newbie_n) = (0u32, 0u32, 0u32);
+    env.cost_estimate().budget().reset_unlimited();
+    // The test Env seeds its PRNG with a fixed seed, so this is deterministic.
+    env.as_contract(&contract_id, || {
+        for _ in 0..1_500 {
+            let panel =
+                HireSettleContract::draw_arbiter_panel(&env, &pool, 1, &company, &recruiter);
+            let drawn = panel.get(0).unwrap();
+            if drawn == good {
+                good_n += 1;
+            } else if drawn == bad {
+                bad_n += 1;
+            } else {
+                newbie_n += 1;
+            }
+        }
+    });
+
+    // Weights 99 / 50 / 1 → expected ≈ 990 / 500 / 10 of 1 500.
+    assert!(good_n > 850, "good drawn {} times", good_n);
+    assert!(newbie_n > 350, "newbie drawn {} times", newbie_n);
+    assert!(bad_n < 50, "bad drawn {} times", bad_n);
+    assert!(good_n > newbie_n && newbie_n > bad_n);
 }

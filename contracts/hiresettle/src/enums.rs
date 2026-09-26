@@ -113,6 +113,9 @@ pub enum ConfigKey {
     /// Addresses this decimals-agnostic gap without a new `DataKey` variant
     /// per token (see the note on `add_allowed_token`, issue #175).
     TokenMinAmounts,
+    /// Admin-configurable recruiter no-show deadline in ledgers (issue #465).
+    /// `0` (the default) disables `trigger_no_show` entirely.
+    NoShowDeadline,
 }
 /// Contract storage key space. Instance keys reset between transactions;
 /// persistent keys survive across ledgers.
@@ -212,4 +215,20 @@ pub enum DataKey {
     /// engagement by the admin (issue #335). When `true`, every milestone
     /// payout on this engagement skips platform-fee collection entirely.
     FeeWaived(String),
+    /// Ledger at which a Placement milestone last (re-)entered `Pending` for
+    /// (engagement_id, milestone_index) after creation — set when a
+    /// replacement resets it or a dispute rejects its proof (issue #465).
+    /// Absent means it has been `Pending` since `created_at_ledger`.
+    MilestonePendingSince(String, u32),
+    /// Running total of milestone shares forfeited by `trigger_no_show` on an
+    /// engagement and not yet refunded to the company (issue #465).
+    NoShowForfeited(String),
+    /// Vesting record for a streamed milestone payout on
+    /// (engagement_id, milestone_index) (issue #466).
+    StreamedPayout(String, u32),
+    /// Admin-curated pool of arbiters that
+    /// `create_engagement_with_random_arbiters` draws panels from (issue #467).
+    ArbiterPool,
+    /// Historical dispute-response record for an arbiter address (issue #468).
+    ArbiterStats(Address),
 }
