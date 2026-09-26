@@ -8464,3 +8464,138 @@ fn test_weighted_draw_favours_strong_track_record() {
     assert!(bad_n < 50, "bad drawn {} times", bad_n);
     assert!(good_n > newbie_n && newbie_n > bad_n);
 }
+
+// ============================================================
+// ADMIN CONFIG — VERSION, FEE WAIVER, TOKEN MIN AMOUNT, REFERRERS
+// ============================================================
+
+#[test]
+fn test_get_version_returns_default_when_unset() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_version(), String::from_str(&env, "0.2.0"));
+}
+
+#[test]
+fn test_set_version_updates_version_and_emits_event() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.set_version(&company, &String::from_str(&env, "1.0.0"));
+
+    assert!(has_event(&env, "version_set"));
+    assert_eq!(client.get_version(), String::from_str(&env, "1.0.0"));
+}
+
+#[test]
+#[should_panic(expected = "VersionTooLong")]
+fn test_set_version_rejects_string_over_32_chars() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // 33 characters — one over MAX_VERSION_LENGTH.
+    client.set_version(
+        &company,
+        &String::from_str(&env, "123456789012345678901234567890123"),
+    );
+}
+
+#[test]
+fn test_waive_platform_fee_marks_engagement_waived() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-WAIVE",
+    );
+    let id = String::from_str(&env, "ENG-WAIVE");
+
+    assert!(!client.is_fee_waived(&id));
+    client.waive_platform_fee(&company, &id);
+
+    assert!(has_event(&env, "platform_fee_waived"));
+    assert!(client.is_fee_waived(&id));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_waive_platform_fee_non_admin_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-WAIVE-2",
+    );
+
+    client.waive_platform_fee(&recruiter, &String::from_str(&env, "ENG-WAIVE-2"));
+}
+
+#[test]
+fn test_token_min_amount_override_takes_precedence_over_global() {
+    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let other_token = Address::generate(&env);
+
+    assert_eq!(client.get_token_min_amount(&token_id), None);
+    assert_eq!(client.get_effective_min_amount(&token_id), client.get_min_amount());
+
+    client.set_token_min_amount(&company, &token_id, &5_000_000);
+
+    assert_eq!(client.get_token_min_amount(&token_id), Some(5_000_000));
+    assert_eq!(client.get_effective_min_amount(&token_id), 5_000_000);
+    // A token without an override still falls back to the global floor.
+    assert_eq!(
+        client.get_effective_min_amount(&other_token),
+        client.get_min_amount()
+    );
+}
+
+#[test]
+#[should_panic(expected = "InvalidMinAmount")]
+fn test_set_token_min_amount_rejects_non_positive() {
+    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.set_token_min_amount(&company, &token_id, &0);
+}
+
+#[test]
+fn test_remove_token_min_amount_falls_back_to_global() {
+    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.set_token_min_amount(&company, &token_id, &5_000_000);
+    client.remove_token_min_amount(&company, &token_id);
+
+    assert!(has_event(&env, "token_min_amount_removed"));
+    assert_eq!(client.get_token_min_amount(&token_id), None);
+    assert_eq!(client.get_effective_min_amount(&token_id), client.get_min_amount());
+}
+
+#[test]
+fn test_add_and_remove_referrer() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let ref_a = Address::generate(&env);
+    let ref_b = Address::generate(&env);
+
+    assert_eq!(client.get_referrers().len(), 0);
+
+    client.add_referrer(&company, &ref_a);
+    client.add_referrer(&company, &ref_b);
+    assert_eq!(client.get_referrers(), vec![&env, ref_a.clone(), ref_b.clone()]);
+
+    client.remove_referrer(&company, &ref_a);
+    assert!(has_event(&env, "referrer_removed"));
+    assert_eq!(client.get_referrers(), vec![&env, ref_b]);
+}
+
+#[test]
+#[should_panic(expected = "referrer already exists")]
+fn test_add_referrer_rejects_duplicate() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let referrer = Address::generate(&env);
+
+    client.add_referrer(&company, &referrer);
+    client.add_referrer(&company, &referrer);
+}
