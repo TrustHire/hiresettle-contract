@@ -29,6 +29,32 @@ cd contracts/hiresettle
 cargo build
 ```
 
+### Build the Deployable WASM Artifact
+
+The command above runs on your host target and is only useful for local development and editor tooling. To produce the artifact that actually gets deployed to Stellar, build for the `wasm32v1-none` target:
+
+```bash
+rustup target add wasm32v1-none   # one-time setup
+cargo build --target wasm32v1-none --release
+```
+
+This is equivalent to the Stellar CLI invocation used in CI and the Makefile:
+
+```bash
+stellar contract build
+```
+
+The resulting WASM binary is emitted at `target/wasm32v1-none/release/hiresettle.wasm`. To optimize it for deployment:
+
+```bash
+stellar contract optimize --wasm target/wasm32v1-none/release/hiresettle.wasm
+# or simply: make optimize
+```
+
+The optimized artifact is `target/wasm32v1-none/release/hiresettle.optimized.wasm`.
+
+Because Soroban runs contracts inside the Stellar WASM VM, the contract must compile to a freestanding WASM binary with no reliance on the host OS — hence the crate is annotated `#![no_std]` and built with the `wasm32v1-none` target, which ships no standard library and no OS interface. By contrast, `cargo build` and `cargo test` (the host-target commands above) compile natively so the tests can run in a normal process with the Soroban host emulated by the SDK.
+
 ### Run the Tests
 
 ```bash
