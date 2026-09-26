@@ -118,7 +118,9 @@ impl HireSettleContract {
     /// - The engagement must be `Active` or `ReplacementRequested`.
     /// - The target milestone must be in `Pending` status (i.e. already unlocked).
     /// - If a proof was previously submitted and rejected, the caller must wait
-    ///   `proof_cooldown` ledgers (default 2 880 ≈ 4 hours) before resubmitting.
+    ///   `proof_cooldown` ledgers (default 2 880 ≈ 4 hours) before resubmitting,
+    ///   reduced by the recruiter's rating discount (see
+    ///   [`Self::get_effective_proof_cooldown`], issue #470).
     /// - After successful submission the milestone moves to `ProofSubmitted`.
     /// - If the engagement was `ReplacementRequested` and this is the placement milestone,
     ///   the engagement reverts to `Active`.
@@ -176,10 +178,11 @@ impl HireSettleContract {
         }
 
         // Rate-limit resubmissions — first submission (no stored ledger) is always allowed.
+        // Issue #470: well-rated recruiters get a shorter, rating-discounted cooldown.
         let last_key = DataKey::LastProofAt(engagement_id.clone(), milestone_index);
         let current_ledger = env.ledger().sequence();
         if let Some(last_at) = env.storage().persistent().get::<DataKey, u32>(&last_key) {
-            let cooldown = Self::get_proof_cooldown(&env);
+            let cooldown = Self::effective_proof_cooldown_internal(&env, &engagement.recruiter);
             if current_ledger < last_at + cooldown {
                 panic!("ResubmitTooSoon");
             }
@@ -284,6 +287,8 @@ impl HireSettleContract {
     /// was previously paid out before a replacement reset (issue #183), only the
     /// difference between the current share and `replacement_paid_out` is released.
     /// Platform fee is deducted from the payment before transfer to the recruiter.
+    /// The recruiter's net share is then swapped into their preferred payout
+    /// token when one is set and a swap adapter is configured (issue #458).
     ///
     /// # Panics
     /// - `"engagement is not active"` — engagement status is not `Active`.
@@ -375,7 +380,7 @@ impl HireSettleContract {
                     (milestone_index, fee_amount, platform_fee.treasury),
                 );
             }
-            Self::distribute_recruiter_payout(&env, &engagement, net_payment, &token_client);
+            Self::distribute_recruiter_payout(&env, &engagement, net_payment, &token_client, true);
         }
 
         let old_status = milestone.status.clone();

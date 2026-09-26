@@ -229,31 +229,33 @@ impl HireSettleContract {
     /// When `co_recruiter` is `Some`, the primary receives
     /// `net * split_bps / 10_000` and the co-recruiter receives the remainder.
     /// When `co_recruiter` is `None` the full net amount goes to the recruiter.
+    ///
+    /// When `apply_payout_preference` is `true`, each payee's share is routed
+    /// through `pay_recruiter_share`, swapping it into their preferred payout
+    /// token if one is set and a swap adapter is configured (issue #458).
     pub(crate) fn distribute_recruiter_payout(
         env: &Env,
         engagement: &Engagement,
         net_payment: i128,
         token_client: &token::Client,
+        apply_payout_preference: bool,
     ) {
+        let pay = |recipient: &Address, amount: i128| {
+            if apply_payout_preference {
+                Self::pay_recruiter_share(env, token_client, recipient, amount);
+            } else {
+                token_client.transfer(&env.current_contract_address(), recipient, &amount);
+            }
+        };
         match &engagement.co_recruiter {
             Some(co_recruiter) => {
                 let split = engagement.recruiter_split_bps as i128;
                 let primary_payment = (net_payment * split) / (FULL_SPLIT_BPS as i128);
                 let co_payment = net_payment - primary_payment;
-                token_client.transfer(
-                    &env.current_contract_address(),
-                    &engagement.recruiter,
-                    &primary_payment,
-                );
-                token_client.transfer(&env.current_contract_address(), co_recruiter, &co_payment);
+                pay(&engagement.recruiter, primary_payment);
+                pay(co_recruiter, co_payment);
             }
-            None => {
-                token_client.transfer(
-                    &env.current_contract_address(),
-                    &engagement.recruiter,
-                    &net_payment,
-                );
-            }
+            None => pay(&engagement.recruiter, net_payment),
         }
     }
 }

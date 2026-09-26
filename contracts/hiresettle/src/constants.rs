@@ -33,3 +33,10 @@ pub(crate) const DEFAULT_SUPER_ARBITER_RESPONSE_WINDOW_LEDGERS: u32 = 51_840;
 pub(crate) const MAX_TAGS: u32 = 10;
 /// Maximum length, in characters, of a single engagement tag (issue #248).
 pub(crate) const MAX_TAG_LENGTH: u32 = 32;
+/// Lowest star rating a company may give a recruiter (issue #470).
+pub(crate) const MIN_RATING_STARS: u32 = 1;
+/// Highest star rating a company may give a recruiter (issue #470).
+pub(crate) const MAX_RATING_STARS: u32 = 5;
+/// Ledgers a dispute window override proposal stays open for acceptance
+/// before it expires and is treated as cleared (issue #469, ~3 days).
+pub(crate) const DISPUTE_WINDOW_PROPOSAL_TTL_LEDGERS: u32 = 51_840;

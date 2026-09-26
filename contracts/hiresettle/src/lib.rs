@@ -40,11 +40,14 @@ mod disputes;
 mod transfers;
 mod queries;
 mod helpers;
+mod ratings;
+mod payout;
 
 pub(crate) use constants::*;
 pub(crate) use errors::*;
 pub use types::*;
 pub use enums::*;
+pub use payout::{SwapAdapter, SwapAdapterClient};
 
 // ============================================================
 // CONTRACT

@@ -19,7 +19,8 @@ impl HireSettleContract {
     /// - The engagement must be `Active`.
     /// - The target milestone must be in `ProofSubmitted` status.
     /// - The dispute must be raised within the dispute window
-    ///   (default 51 840 ledgers ≈ 3 days) counted from
+    ///   (default 51 840 ledgers ≈ 3 days, or the engagement's agreed
+    ///   override — see [`Self::get_engagement_dispute_window`]) counted from
     ///   `proof_submitted_at`.
     /// - The milestone transitions to `Disputed` and the supplied `reason`
     ///   (max 128 bytes) is stored for arbiter review.
@@ -76,11 +77,7 @@ impl HireSettleContract {
         }
 
         let current_ledger = env.ledger().sequence();
-        let dispute_window = env
-            .storage()
-            .instance()
-            .get(&DataKey::Config(ConfigKey::DisputeWindow))
-            .unwrap_or(DEFAULT_DISPUTE_WINDOW_LEDGERS);
+        let dispute_window = Self::engagement_dispute_window_internal(&env, &engagement_id);
 
         if current_ledger > milestone.proof_submitted_at + dispute_window {
             panic!("DisputeWindowClosed");
@@ -238,7 +235,7 @@ impl HireSettleContract {
                     &arbiter_fee_amount,
                 );
             }
-            Self::distribute_recruiter_payout(&env, &engagement, net_payment, &token_client);
+            Self::distribute_recruiter_payout(&env, &engagement, net_payment, &token_client, false);
 
             let old_status = milestone.status.clone();
             milestone.status = MilestoneStatus::Resolved;
@@ -410,11 +407,7 @@ impl HireSettleContract {
             ))
             .unwrap_or_else(|| panic!("no dispute in progress"));
 
-        let dispute_window = env
-            .storage()
-            .instance()
-            .get(&DataKey::Config(ConfigKey::DisputeWindow))
-            .unwrap_or(DEFAULT_DISPUTE_WINDOW_LEDGERS);
+        let dispute_window = Self::engagement_dispute_window_internal(&env, &engagement_id);
 
         let current_ledger = env.ledger().sequence();
         if current_ledger <= raised_at + dispute_window {
@@ -579,7 +572,7 @@ impl HireSettleContract {
                     &arbiter_fee_amount,
                 );
             }
-            Self::distribute_recruiter_payout(&env, &engagement, net_payment, &token_client);
+            Self::distribute_recruiter_payout(&env, &engagement, net_payment, &token_client, false);
 
             let old_status = milestone.status.clone();
             milestone.status = MilestoneStatus::Resolved;
@@ -791,7 +784,7 @@ impl HireSettleContract {
                 (milestone_index, platform_fee_amount, platform_fee.treasury),
             );
         }
-        Self::distribute_recruiter_payout(&env, &engagement, net_payment, &token_client);
+        Self::distribute_recruiter_payout(&env, &engagement, net_payment, &token_client, false);
 
         let old_status = milestone.status.clone();
         milestone.status = MilestoneStatus::Resolved;
@@ -918,6 +911,209 @@ impl HireSettleContract {
             .unwrap_or(DEFAULT_DISPUTE_WINDOW_LEDGERS)
     }
 
+    // ----------------------------------------------------------
+    // ISSUE #469 — PER-ENGAGEMENT DISPUTE WINDOW OVERRIDE
+    // ----------------------------------------------------------
+
+    /// Either party (or its co-signer) proposes a dispute window, in ledgers,
+    /// for this engagement only. The counterparty must accept it within
+    /// `DISPUTE_WINDOW_PROPOSAL_TTL_LEDGERS` ledgers or it expires and is
+    /// treated as cleared. A new proposal can be made once the previous one
+    /// has been accepted, rejected, or has expired.
+    ///
+    /// # Panics
+    /// - `"ContractPaused"` / `"EngagementPaused"` — contract or engagement is paused.
+    /// - `"InvalidDisputeWindow"` — `ledgers` is 0.
+    /// - `"engagement is not active"` — engagement is not `Active`.
+    /// - `"unauthorized"` — caller is neither party nor a party's co-signer.
+    /// - `"DisputeWindowProposalPending"` — an unexpired proposal already exists.
+    ///
+    /// # Events
+    /// Emits `("dispute_window_proposed", engagement_id)` with
+    /// `(proposer, ledgers, expires_at_ledger)`.
+    pub fn propose_dispute_window_override(
+        env: Env,
+        proposer: Address,
+        engagement_id: String,
+        ledgers: u32,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        proposer.require_auth();
+
+        if ledgers == 0 {
+            panic!("InvalidDisputeWindow");
+        }
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::Active {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+
+        let proposed_by_company =
+            Self::is_authorized_company(&env, &proposer, &engagement.company);
+        if !proposed_by_company
+            && !Self::is_authorized_recruiter(&env, &proposer, &engagement.recruiter)
+        {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        if Self::pending_dispute_window_proposal(&env, &engagement_id).is_some() {
+            panic!("DisputeWindowProposalPending");
+        }
+
+        let expires_at_ledger = env
+            .ledger()
+            .sequence()
+            .saturating_add(DISPUTE_WINDOW_PROPOSAL_TTL_LEDGERS);
+        let key = DataKey::DisputeWindowProposal(engagement_id.clone());
+        env.storage().persistent().set(
+            &key,
+            &DisputeWindowProposal {
+                proposer: proposer.clone(),
+                proposed_by_company,
+                ledgers,
+                expires_at_ledger,
+            },
+        );
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (Symbol::new(&env, "dispute_window_proposed"), engagement_id),
+            (proposer, ledgers, expires_at_ledger),
+        );
+    }
+
+    /// The counterparty of the proposer (or its co-signer) accepts a pending
+    /// dispute window proposal. From then on, dispute-eligibility checks for
+    /// this engagement use the agreed window instead of the global default.
+    ///
+    /// # Panics
+    /// - `"ContractPaused"` / `"EngagementPaused"` — contract or engagement is paused.
+    /// - `"engagement is not active"` — engagement is not `Active`.
+    /// - `"NoPendingDisputeWindowProposal"` — no proposal, or it has expired.
+    /// - `"unauthorized"` — caller is not the proposer's counterparty.
+    ///
+    /// # Events
+    /// Emits `("dispute_window_accepted", engagement_id)` with `(acceptor, ledgers)`.
+    pub fn accept_dispute_window_override(env: Env, acceptor: Address, engagement_id: String) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        acceptor.require_auth();
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::Active {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+
+        let proposal = Self::pending_dispute_window_proposal(&env, &engagement_id)
+            .unwrap_or_else(|| panic!("NoPendingDisputeWindowProposal"));
+        Self::assert_dispute_window_counterparty(&env, &acceptor, &engagement, &proposal);
+
+        let override_key = DataKey::DisputeWindowOverride(engagement_id.clone());
+        env.storage()
+            .persistent()
+            .set(&override_key, &proposal.ledgers);
+        env.storage()
+            .persistent()
+            .extend_ttl(&override_key, 100_000, 6_300_000);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DisputeWindowProposal(engagement_id.clone()));
+
+        env.events().publish(
+            (Symbol::new(&env, "dispute_window_accepted"), engagement_id),
+            (acceptor, proposal.ledgers),
+        );
+    }
+
+    /// The counterparty of the proposer (or its co-signer) rejects a pending
+    /// dispute window proposal, clearing it. Any previously accepted override
+    /// stays in effect.
+    ///
+    /// # Panics
+    /// - `"NoPendingDisputeWindowProposal"` — no proposal, or it has expired.
+    /// - `"unauthorized"` — caller is not the proposer's counterparty.
+    ///
+    /// # Events
+    /// Emits `("dispute_window_rejected", engagement_id)` with `(acceptor, ledgers)`.
+    pub fn reject_dispute_window_override(env: Env, acceptor: Address, engagement_id: String) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        acceptor.require_auth();
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        let proposal = Self::pending_dispute_window_proposal(&env, &engagement_id)
+            .unwrap_or_else(|| panic!("NoPendingDisputeWindowProposal"));
+        Self::assert_dispute_window_counterparty(&env, &acceptor, &engagement, &proposal);
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DisputeWindowProposal(engagement_id.clone()));
+
+        env.events().publish(
+            (Symbol::new(&env, "dispute_window_rejected"), engagement_id),
+            (acceptor, proposal.ledgers),
+        );
+    }
+
+    /// Return the pending dispute window proposal, or `None` if there is none
+    /// or it has expired.
+    pub fn get_dispute_window_proposal(
+        env: Env,
+        engagement_id: String,
+    ) -> Option<DisputeWindowProposal> {
+        Self::pending_dispute_window_proposal(&env, &engagement_id)
+    }
+
+    /// Return the dispute window that applies to this engagement: the
+    /// mutually agreed override if one was accepted, else `get_dispute_window()`.
+    pub fn get_engagement_dispute_window(env: Env, engagement_id: String) -> u32 {
+        Self::engagement_dispute_window_internal(&env, &engagement_id)
+    }
+
+    pub(crate) fn engagement_dispute_window_internal(env: &Env, engagement_id: &String) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeWindowOverride(engagement_id.clone()))
+            .unwrap_or_else(|| Self::get_dispute_window(env.clone()))
+    }
+
+    fn pending_dispute_window_proposal(
+        env: &Env,
+        engagement_id: &String,
+    ) -> Option<DisputeWindowProposal> {
+        let proposal: DisputeWindowProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeWindowProposal(engagement_id.clone()))?;
+        if env.ledger().sequence() > proposal.expires_at_ledger {
+            return None;
+        }
+        Some(proposal)
+    }
+
+    fn assert_dispute_window_counterparty(
+        env: &Env,
+        caller: &Address,
+        engagement: &Engagement,
+        proposal: &DisputeWindowProposal,
+    ) {
+        let is_counterparty = if proposal.proposed_by_company {
+            Self::is_authorized_recruiter(env, caller, &engagement.recruiter)
+        } else {
+            Self::is_authorized_company(env, caller, &engagement.company)
+        };
+        if !is_counterparty {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+    }
+
     /// Force-confirm a milestone after the company has taken no action within the
     /// configured confirm window.  Callable by anyone once the window has elapsed.
     ///
@@ -926,7 +1122,8 @@ impl HireSettleContract {
     ///   - milestone status is exactly `ProofSubmitted`
     ///
     /// Releases payment to the recruiter (with platform fee) and emits
-    /// `milestone_force_confirmed`.
+    /// `milestone_force_confirmed`. The recruiter's net share honours their
+    /// payout token preference (issue #458).
     pub fn force_confirm_milestone(
         env: Env,
         caller: Address,
@@ -988,7 +1185,7 @@ impl HireSettleContract {
                 (milestone_index, fee_amount, platform_fee.treasury),
             );
         }
-        Self::distribute_recruiter_payout(&env, &engagement, net_payment, &token_client);
+        Self::distribute_recruiter_payout(&env, &engagement, net_payment, &token_client, true);
 
         let old_status = milestone.status.clone();
         milestone.status = MilestoneStatus::Confirmed;

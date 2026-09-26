@@ -113,6 +113,13 @@ pub enum ConfigKey {
     /// Addresses this decimals-agnostic gap without a new `DataKey` variant
     /// per token (see the note on `add_allowed_token`, issue #175).
     TokenMinAmounts,
+    /// Admin-configured rating-based proof cooldown discount curve and floor
+    /// (issue #470), stored as a single `ProofCooldownDiscount` struct.
+    ProofCooldownDiscount,
+    /// Admin-registered trusted swap-adapter contract used to convert a
+    /// recruiter's net payout into their preferred token (issue #458).
+    /// Unset means no swap is attempted.
+    SwapAdapter,
 }
 /// Contract storage key space. Instance keys reset between transactions;
 /// persistent keys survive across ledgers.
@@ -212,4 +219,19 @@ pub enum DataKey {
     /// engagement by the admin (issue #335). When `true`, every milestone
     /// payout on this engagement skips platform-fee collection entirely.
     FeeWaived(String),
+    /// Accumulated star ratings received by a recruiter across all of their
+    /// completed engagements (issue #470). Backs `get_recruiter_rating`.
+    RecruiterRating(Address),
+    /// Set once the company has rated the recruiter of a completed engagement,
+    /// so each engagement contributes at most one rating (issue #470).
+    EngagementRated(String),
+    /// Pending, not-yet-accepted dispute window override proposal for an
+    /// engagement (issue #469). Treated as absent once it has expired.
+    DisputeWindowProposal(String),
+    /// Mutually agreed dispute window, in ledgers, that replaces the
+    /// contract-wide `DisputeWindow` for one engagement (issue #469).
+    DisputeWindowOverride(String),
+    /// Token a recruiter wants their net milestone payouts delivered in,
+    /// independent of any single engagement (issue #458).
+    RecruiterPayoutToken(Address),
 }

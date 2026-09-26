@@ -7854,3 +7854,1028 @@ fn test_remove_fee_tier_from_empty_list_panics() {
     // No tiers set - try to remove one
     client.remove_fee_tier(&company, &1_000_000);
 }
+
+// ============================================================
+// ISSUE #470 — RATING-BASED PROOF COOLDOWN DISCOUNT
+// ============================================================
+
+fn single_placement_milestone(env: &Env) -> Vec<Milestone> {
+    vec![
+        env,
+        Milestone {
+            name: String::from_str(env, "Placement"),
+            payment_percent: 100,
+            kind: MilestoneKind::Placement,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(env, ""),
+            status: MilestoneStatus::Pending,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+        },
+    ]
+}
+
+fn create_single_milestone_engagement(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    arbiters: Vec<Address>,
+    quorum: u32,
+    id: &str,
+) -> String {
+    let eng_id = String::from_str(env, id);
+    client.create_engagement(
+        &eng_id,
+        company,
+        recruiter,
+        &ArbiterSetup { arbiters, quorum },
+        token_id,
+        &1_000_000_000,
+        &String::from_str(env, "Engineer"),
+        &single_placement_milestone(env),
+        &vec![env],
+        &default_config(),
+    );
+    eng_id
+}
+
+/// Create, complete and rate a single-milestone engagement.
+fn complete_and_rate(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    arbiter: &Address,
+    id: &str,
+    stars: u32,
+) {
+    let eng_id = create_single_milestone_engagement(
+        env,
+        client,
+        token_id,
+        company,
+        recruiter,
+        vec![env, arbiter.clone()],
+        1,
+        id,
+    );
+    client.submit_proof(recruiter, &eng_id, &0, &String::from_str(env, id));
+    client.confirm_milestone(company, &eng_id, &0);
+    client.rate_recruiter(company, &eng_id, &stars);
+}
+
+/// Simulate an earlier proof submission on `milestone_index` at the current
+/// ledger, so the next `submit_proof` is subject to the cooldown. Every public
+/// path back to `Pending` clears `LastProofAt`, so it is seeded directly.
+fn seed_last_proof_at(env: &Env, contract_id: &Address, eng_id: &String, milestone_index: u32) {
+    let ledger = env.ledger().sequence();
+    env.as_contract(contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::LastProofAt(eng_id.clone(), milestone_index), &ledger);
+    });
+}
+
+#[test]
+fn test_rate_recruiter_accumulates_summary() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_recruiter_rating(&recruiter), None);
+
+    complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-R1", 5);
+    complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-R2", 4);
+    assert!(has_event(&env, "recruiter_rated"));
+
+    assert_eq!(
+        client.get_recruiter_rating(&recruiter),
+        Some(RatingSummary {
+            total_stars: 9,
+            rating_count: 2,
+        })
+    );
+}
+
+#[test]
+#[should_panic(expected = "EngagementNotCompleted")]
+fn test_rate_recruiter_before_completion_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = create_single_milestone_engagement(
+        &env, &client, &token_id, &company, &recruiter, vec![&env, arbiter], 1, "ENG-R-ACTIVE",
+    );
+    client.rate_recruiter(&company, &eng_id, &5);
+}
+
+#[test]
+#[should_panic(expected = "AlreadyRated")]
+fn test_rate_recruiter_twice_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-R-TWICE", 5);
+    client.rate_recruiter(&company, &String::from_str(&env, "ENG-R-TWICE"), &5);
+}
+
+#[test]
+#[should_panic(expected = "InvalidRating")]
+fn test_rate_recruiter_out_of_range_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-R-SIX", 6);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_rate_recruiter_non_company_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = create_single_milestone_engagement(
+        &env, &client, &token_id, &company, &recruiter, vec![&env, arbiter], 1, "ENG-R-AUTH",
+    );
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p"));
+    client.confirm_milestone(&company, &eng_id, &0);
+    client.rate_recruiter(&recruiter, &eng_id, &5);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_set_cooldown_rating_discount_non_admin_rejected() {
+    let (env, contract_id, _token_id, _company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_cooldown_rating_discount(&recruiter, &400, &1_000);
+}
+
+#[test]
+fn test_set_cooldown_rating_discount_admin() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    assert_eq!(
+        client.get_cooldown_rating_discount(),
+        ProofCooldownDiscount {
+            discount_per_star_ledgers: 0,
+            min_cooldown_ledgers: 0,
+        }
+    );
+    client.set_cooldown_rating_discount(&company, &400, &1_000);
+    assert_eq!(
+        client.get_cooldown_rating_discount(),
+        ProofCooldownDiscount {
+            discount_per_star_ledgers: 400,
+            min_cooldown_ledgers: 1_000,
+        }
+    );
+}
+
+#[test]
+fn test_effective_cooldown_unrated_recruiter_uses_full_base() {
+    let (env, contract_id, _token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_cooldown_rating_discount(&company, &400, &1_000);
+    assert_eq!(client.get_effective_proof_cooldown(&recruiter), 2_880);
+}
+
+#[test]
+fn test_effective_cooldown_without_discount_config_uses_full_base() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-NOCFG", 5);
+    assert_eq!(client.get_effective_proof_cooldown(&recruiter), 2_880);
+}
+
+#[test]
+fn test_effective_cooldown_discounted_by_average_rating() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_cooldown_rating_discount(&company, &400, &0);
+
+    complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AVG1", 3);
+    // 2 880 - 3 * 400
+    assert_eq!(client.get_effective_proof_cooldown(&recruiter), 1_680);
+
+    complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-AVG2", 4);
+    // Average 3.5 stars: 2 880 - 3.5 * 400
+    assert_eq!(client.get_effective_proof_cooldown(&recruiter), 1_480);
+}
+
+#[test]
+fn test_effective_cooldown_clamped_to_floor() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_cooldown_rating_discount(&company, &400, &1_000);
+    complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-FLOOR", 5);
+    // 2 880 - 5 * 400 = 880, below the 1 000 floor.
+    assert_eq!(client.get_effective_proof_cooldown(&recruiter), 1_000);
+
+    // A discount larger than the base cooldown still stops at the floor.
+    client.set_cooldown_rating_discount(&company, &10_000, &1_000);
+    assert_eq!(client.get_effective_proof_cooldown(&recruiter), 1_000);
+}
+
+#[test]
+fn test_effective_cooldown_never_exceeds_base() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_cooldown_rating_discount(&company, &400, &5_000);
+    complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-CAP", 5);
+    assert_eq!(client.get_effective_proof_cooldown(&recruiter), 2_880);
+}
+
+#[test]
+fn test_effective_cooldown_follows_base_cooldown_changes() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_cooldown_rating_discount(&company, &100, &0);
+    complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BASE", 5);
+    assert_eq!(client.get_effective_proof_cooldown(&recruiter), 2_380);
+
+    client.set_proof_cooldown(&company, &1_000);
+    assert_eq!(client.get_effective_proof_cooldown(&recruiter), 500);
+}
+
+#[test]
+fn test_submit_proof_uses_discounted_cooldown_for_rated_recruiter() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_cooldown_rating_discount(&company, &400, &0);
+    complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-RATED", 3);
+    let effective = client.get_effective_proof_cooldown(&recruiter);
+    assert_eq!(effective, 1_680);
+
+    let eng_id = create_single_milestone_engagement(
+        &env, &client, &token_id, &company, &recruiter, vec![&env, arbiter], 1, "ENG-CD-RATED",
+    );
+    seed_last_proof_at(&env, &contract_id, &eng_id, 0);
+
+    advance_ledger(&env, effective - 1);
+    assert!(client
+        .try_submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p1"))
+        .is_err());
+
+    // Well before the 2 880 base cooldown, but the discounted cooldown has elapsed.
+    advance_ledger(&env, 1);
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p1"));
+    assert_eq!(
+        client.get_milestone(&eng_id, &0).status,
+        MilestoneStatus::ProofSubmitted
+    );
+}
+
+#[test]
+#[should_panic(expected = "ResubmitTooSoon")]
+fn test_submit_proof_unrated_recruiter_needs_full_base_cooldown() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_cooldown_rating_discount(&company, &400, &0);
+
+    let eng_id = create_single_milestone_engagement(
+        &env, &client, &token_id, &company, &recruiter, vec![&env, arbiter], 1, "ENG-CD-UNRATED",
+    );
+    seed_last_proof_at(&env, &contract_id, &eng_id, 0);
+
+    // A rated 3-star recruiter could resubmit here; an unrated one cannot.
+    advance_ledger(&env, 1_680);
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p1"));
+}
+
+// ============================================================
+// ISSUE #469 — PER-ENGAGEMENT DISPUTE WINDOW OVERRIDE
+// ============================================================
+
+fn setup_dispute_window_engagement(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    arbiter: &Address,
+    id: &str,
+) -> String {
+    create_single_milestone_engagement(
+        env,
+        client,
+        token_id,
+        company,
+        recruiter,
+        vec![env, arbiter.clone()],
+        1,
+        id,
+    )
+}
+
+#[test]
+fn test_engagement_dispute_window_defaults_to_global() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-DEF");
+
+    assert_eq!(client.get_engagement_dispute_window(&eng_id), client.get_dispute_window());
+    client.set_dispute_window(&company, &200);
+    assert_eq!(client.get_engagement_dispute_window(&eng_id), 200);
+    assert_eq!(client.get_dispute_window_proposal(&eng_id), None);
+}
+
+#[test]
+#[should_panic(expected = "DisputeWindowClosed")]
+fn test_no_override_uses_global_window_regression() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_dispute_window(&company, &200);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-REG");
+
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p"));
+    advance_ledger(&env, 201);
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "late"));
+}
+
+#[test]
+fn test_company_proposes_recruiter_accepts_override() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_dispute_window(&company, &200);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-ACC");
+
+    client.propose_dispute_window_override(&company, &eng_id, &500);
+    let proposal = client.get_dispute_window_proposal(&eng_id).unwrap();
+    assert_eq!(proposal.proposer, company);
+    assert!(proposal.proposed_by_company);
+    assert_eq!(proposal.ledgers, 500);
+    assert_eq!(
+        proposal.expires_at_ledger,
+        env.ledger().sequence() + DISPUTE_WINDOW_PROPOSAL_TTL_LEDGERS
+    );
+    // Not applied until accepted.
+    assert_eq!(client.get_engagement_dispute_window(&eng_id), 200);
+
+    client.accept_dispute_window_override(&recruiter, &eng_id);
+    assert!(has_event(&env, "dispute_window_accepted"));
+    assert_eq!(client.get_engagement_dispute_window(&eng_id), 500);
+    assert_eq!(client.get_dispute_window_proposal(&eng_id), None);
+
+    // The override is per-engagement and independent of later global changes.
+    client.set_dispute_window(&company, &100);
+    assert_eq!(client.get_engagement_dispute_window(&eng_id), 500);
+}
+
+#[test]
+fn test_recruiter_proposes_company_accepts_override() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-REC");
+
+    client.propose_dispute_window_override(&recruiter, &eng_id, &300);
+    assert!(!client.get_dispute_window_proposal(&eng_id).unwrap().proposed_by_company);
+    client.accept_dispute_window_override(&company, &eng_id);
+    assert_eq!(client.get_engagement_dispute_window(&eng_id), 300);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_proposer_cannot_accept_own_override() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-SELF");
+    client.propose_dispute_window_override(&company, &eng_id, &300);
+    client.accept_dispute_window_override(&company, &eng_id);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_proposer_cannot_reject_own_override() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-SELFREJ");
+    client.propose_dispute_window_override(&recruiter, &eng_id, &300);
+    client.reject_dispute_window_override(&recruiter, &eng_id);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_third_party_cannot_propose_override() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-3P");
+    client.propose_dispute_window_override(&arbiter, &eng_id, &300);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_third_party_cannot_accept_override() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-3PA");
+    client.propose_dispute_window_override(&company, &eng_id, &300);
+    client.accept_dispute_window_override(&arbiter, &eng_id);
+}
+
+#[test]
+#[should_panic(expected = "InvalidDisputeWindow")]
+fn test_zero_ledger_override_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-ZERO");
+    client.propose_dispute_window_override(&company, &eng_id, &0);
+}
+
+#[test]
+#[should_panic(expected = "DisputeWindowProposalPending")]
+fn test_second_override_proposal_while_pending_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-DUP");
+    client.propose_dispute_window_override(&company, &eng_id, &300);
+    client.propose_dispute_window_override(&recruiter, &eng_id, &400);
+}
+
+#[test]
+fn test_reject_override_clears_proposal_and_keeps_window() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_dispute_window(&company, &200);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-REJ");
+
+    client.propose_dispute_window_override(&company, &eng_id, &500);
+    client.reject_dispute_window_override(&recruiter, &eng_id);
+    assert!(has_event(&env, "dispute_window_rejected"));
+    assert_eq!(client.get_dispute_window_proposal(&eng_id), None);
+    assert_eq!(client.get_engagement_dispute_window(&eng_id), 200);
+
+    // A fresh proposal can follow a rejection.
+    client.propose_dispute_window_override(&recruiter, &eng_id, &400);
+    assert!(client.get_dispute_window_proposal(&eng_id).is_some());
+}
+
+#[test]
+fn test_expired_override_proposal_auto_clears() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_dispute_window(&company, &200);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-EXP");
+
+    client.propose_dispute_window_override(&company, &eng_id, &500);
+
+    // Still acceptable on its last ledger.
+    advance_ledger(&env, DISPUTE_WINDOW_PROPOSAL_TTL_LEDGERS);
+    assert!(client.get_dispute_window_proposal(&eng_id).is_some());
+
+    advance_ledger(&env, 1);
+    assert_eq!(client.get_dispute_window_proposal(&eng_id), None);
+    assert!(client
+        .try_accept_dispute_window_override(&recruiter, &eng_id)
+        .is_err());
+    assert!(client
+        .try_reject_dispute_window_override(&recruiter, &eng_id)
+        .is_err());
+    assert_eq!(client.get_engagement_dispute_window(&eng_id), 200);
+
+    // An expired proposal no longer blocks a new one.
+    client.propose_dispute_window_override(&company, &eng_id, &600);
+    client.accept_dispute_window_override(&recruiter, &eng_id);
+    assert_eq!(client.get_engagement_dispute_window(&eng_id), 600);
+}
+
+#[test]
+#[should_panic(expected = "NoPendingDisputeWindowProposal")]
+fn test_accept_override_without_proposal_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-NONE");
+    client.accept_dispute_window_override(&recruiter, &eng_id);
+}
+
+#[test]
+fn test_raise_dispute_respects_shorter_override() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_dispute_window(&company, &200);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-SHORT");
+    client.propose_dispute_window_override(&company, &eng_id, &50);
+    client.accept_dispute_window_override(&recruiter, &eng_id);
+
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p"));
+    // Inside the 200-ledger global window but past the 50-ledger override.
+    advance_ledger(&env, 51);
+    assert!(client
+        .try_raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "late"))
+        .is_err());
+}
+
+#[test]
+fn test_raise_dispute_at_shorter_override_boundary_accepted() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_dispute_window(&company, &200);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-SHORTB");
+    client.propose_dispute_window_override(&company, &eng_id, &50);
+    client.accept_dispute_window_override(&recruiter, &eng_id);
+
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p"));
+    advance_ledger(&env, 50);
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "on time"));
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Disputed);
+}
+
+#[test]
+fn test_raise_dispute_respects_longer_override() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_dispute_window(&company, &200);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-LONG");
+    client.propose_dispute_window_override(&recruiter, &eng_id, &500);
+    client.accept_dispute_window_override(&company, &eng_id);
+
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p"));
+    // Past the 200-ledger global window but within the 500-ledger override.
+    advance_ledger(&env, 400);
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "complex"));
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Disputed);
+}
+
+#[test]
+#[should_panic(expected = "DisputeWindowClosed")]
+fn test_raise_dispute_past_longer_override_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_dispute_window(&company, &200);
+    let eng_id =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-LONGX");
+    client.propose_dispute_window_override(&recruiter, &eng_id, &500);
+    client.accept_dispute_window_override(&company, &eng_id);
+
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p"));
+    advance_ledger(&env, 501);
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "too late"));
+}
+
+#[test]
+fn test_override_does_not_affect_other_engagements() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_dispute_window(&company, &200);
+    let eng_a =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-A");
+    let eng_b =
+        setup_dispute_window_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-DWO-B");
+    client.propose_dispute_window_override(&company, &eng_a, &500);
+    client.accept_dispute_window_override(&recruiter, &eng_a);
+
+    assert_eq!(client.get_engagement_dispute_window(&eng_a), 500);
+    assert_eq!(client.get_engagement_dispute_window(&eng_b), 200);
+}
+
+// ============================================================
+// ISSUE #444 — ESCALATE_DISPUTE PRECONDITIONS
+// ============================================================
+
+/// Dispute window used by the escalation fixture.
+const ESCALATION_WINDOW: u32 = 100;
+
+/// Build an engagement whose single milestone is `Disputed` with a hung vote
+/// (1 approve, 1 reject, quorum 2 of 3). The dispute window has not yet
+/// elapsed; tests advance the ledger themselves. Each flag switches one
+/// escalation precondition off.
+fn setup_escalation(
+    configure_super_arbiter: bool,
+    raise_dispute: bool,
+) -> (Env, Address, String, Address, Address) {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_dispute_window(&company, &ESCALATION_WINDOW);
+    if configure_super_arbiter {
+        client.set_super_arbiter(&company, &Address::generate(&env));
+    }
+
+    let arbiter_b = Address::generate(&env);
+    let arbiter_c = Address::generate(&env);
+    let eng_id = create_single_milestone_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        vec![&env, arbiter.clone(), arbiter_b.clone(), arbiter_c],
+        2,
+        "ENG-ESC",
+    );
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p"));
+
+    if raise_dispute {
+        client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "disputed"));
+        client.cast_arbiter_vote(&arbiter, &eng_id, &0, &true);
+        client.cast_arbiter_vote(&arbiter_b, &eng_id, &0, &false);
+        assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Disputed);
+    }
+
+    (env, contract_id, eng_id, company, recruiter)
+}
+
+#[test]
+fn test_escalate_dispute_succeeds_when_all_preconditions_hold() {
+    let (env, contract_id, eng_id, _company, _recruiter) = setup_escalation(true, true);
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    advance_ledger(&env, ESCALATION_WINDOW + 1);
+    client.escalate_dispute(&eng_id, &0);
+    assert!(has_event(&env, "dispute_escalated"));
+    assert!(client.is_dispute_escalated(&eng_id, &0));
+}
+
+#[test]
+#[should_panic(expected = "ContractPaused")]
+fn test_escalate_dispute_blocked_when_contract_paused() {
+    let (env, contract_id, eng_id, company, _recruiter) = setup_escalation(true, true);
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    advance_ledger(&env, ESCALATION_WINDOW + 1);
+    client.pause(&company);
+    client.escalate_dispute(&eng_id, &0);
+}
+
+#[test]
+#[should_panic(expected = "engagement is not active")]
+fn test_escalate_dispute_blocked_when_engagement_not_active() {
+    let (env, contract_id, eng_id, company, recruiter) = setup_escalation(true, true);
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.cancel_engagement(&company, &recruiter, &eng_id);
+    assert_eq!(client.get_engagement(&eng_id).status, EngagementStatus::Cancelled);
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Disputed);
+
+    advance_ledger(&env, ESCALATION_WINDOW + 1);
+    client.escalate_dispute(&eng_id, &0);
+}
+
+#[test]
+#[should_panic(expected = "milestone is not in disputed status")]
+fn test_escalate_dispute_blocked_when_milestone_not_disputed() {
+    let (env, contract_id, eng_id, _company, _recruiter) = setup_escalation(true, false);
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    assert_eq!(
+        client.get_milestone(&eng_id, &0).status,
+        MilestoneStatus::ProofSubmitted
+    );
+
+    advance_ledger(&env, ESCALATION_WINDOW + 1);
+    client.escalate_dispute(&eng_id, &0);
+}
+
+#[test]
+#[should_panic(expected = "DisputeWindowNotElapsed")]
+fn test_escalate_dispute_blocked_when_window_not_elapsed() {
+    let (env, contract_id, eng_id, _company, _recruiter) = setup_escalation(true, true);
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Exactly at the window boundary — not yet elapsed.
+    advance_ledger(&env, ESCALATION_WINDOW);
+    client.escalate_dispute(&eng_id, &0);
+}
+
+#[test]
+#[should_panic(expected = "dispute already resolvable without escalation")]
+fn test_escalate_dispute_blocked_when_vote_not_hung() {
+    let (env, contract_id, eng_id, _company, _recruiter) = setup_escalation(true, true);
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // `cast_arbiter_vote` resolves the dispute as soon as quorum is reached,
+    // so a quorum-reaching tally on a still-Disputed milestone is seeded
+    // directly to isolate this precondition.
+    let arbiters = client.get_engagement(&eng_id).arbiters;
+    env.as_contract(&contract_id, || {
+        env.storage().persistent().set(
+            &DataKey::ArbiterVotes(eng_id.clone(), 0),
+            &ArbiterVoteRecord {
+                approve_votes: 2,
+                reject_votes: 0,
+                voted: vec![&env, arbiters.get(0).unwrap(), arbiters.get(1).unwrap()],
+            },
+        );
+    });
+
+    advance_ledger(&env, ESCALATION_WINDOW + 1);
+    client.escalate_dispute(&eng_id, &0);
+}
+
+#[test]
+#[should_panic(expected = "no super arbiter configured")]
+fn test_escalate_dispute_blocked_when_no_super_arbiter() {
+    let (env, contract_id, eng_id, _company, _recruiter) = setup_escalation(false, true);
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    assert_eq!(client.get_super_arbiter(), None);
+
+    advance_ledger(&env, ESCALATION_WINDOW + 1);
+    client.escalate_dispute(&eng_id, &0);
+}
+
+#[test]
+fn test_escalate_dispute_uses_engagement_dispute_window_override() {
+    let (env, contract_id, eng_id, company, recruiter) = setup_escalation(true, true);
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.propose_dispute_window_override(&company, &eng_id, &(ESCALATION_WINDOW * 3));
+    client.accept_dispute_window_override(&recruiter, &eng_id);
+
+    // Past the global window, but not the 300-ledger override.
+    advance_ledger(&env, ESCALATION_WINDOW + 1);
+    assert!(client.try_escalate_dispute(&eng_id, &0).is_err());
+
+    advance_ledger(&env, ESCALATION_WINDOW * 2);
+    client.escalate_dispute(&eng_id, &0);
+    assert!(client.is_dispute_escalated(&eng_id, &0));
+}
+
+// ============================================================
+// ISSUE #458 — RECRUITER PAYOUT TOKEN PREFERENCE
+// ============================================================
+
+/// Mock swap adapter: pays out `amount_in * 2` of `to_token` from its own
+/// pre-funded balance, or panics when `set_fail(true)` has been called.
+#[contract]
+struct MockSwapAdapter;
+
+#[contractimpl]
+impl MockSwapAdapter {
+    pub fn set_fail(env: Env, fail: bool) {
+        env.storage().instance().set(&Symbol::new(&env, "fail"), &fail);
+    }
+
+    pub fn swap(
+        env: Env,
+        _from_token: Address,
+        to_token: Address,
+        amount_in: i128,
+        recipient: Address,
+    ) -> i128 {
+        if env
+            .storage()
+            .instance()
+            .get(&Symbol::new(&env, "fail"))
+            .unwrap_or(false)
+        {
+            panic!("swap failed");
+        }
+        let amount_out = amount_in * 2;
+        token::Client::new(&env, &to_token).transfer(
+            &env.current_contract_address(),
+            &recipient,
+            &amount_out,
+        );
+        amount_out
+    }
+}
+
+/// Registers a second token and a mock adapter pre-funded with it.
+/// Returns `(adapter, target_token)`.
+fn setup_swap_adapter(env: &Env) -> (Address, Address) {
+    let adapter = env.register(MockSwapAdapter, ());
+    let target_token = env
+        .register_stellar_asset_contract_v2(Address::generate(env))
+        .address();
+    token::StellarAssetClient::new(env, &target_token).mint(&adapter, &100_000_000_000);
+    (adapter, target_token)
+}
+
+// Standard engagement: milestone 0 is 30% of 1 000 000 000; with a 5% platform
+// fee the recruiter's net share is 285 000 000.
+const SWAP_GROSS: i128 = 300_000_000;
+const SWAP_FEE: i128 = 15_000_000;
+const SWAP_NET: i128 = SWAP_GROSS - SWAP_FEE;
+
+#[test]
+fn test_set_get_clear_recruiter_payout_token() {
+    let (env, contract_id, token_id, _company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    assert_eq!(client.get_recruiter_payout_token(&recruiter), None);
+    client.set_recruiter_payout_token(&recruiter, &token_id);
+    assert!(has_event(&env, "payout_token_set"));
+    assert_eq!(client.get_recruiter_payout_token(&recruiter), Some(token_id));
+
+    client.clear_recruiter_payout_token(&recruiter);
+    assert_eq!(client.get_recruiter_payout_token(&recruiter), None);
+}
+
+#[test]
+fn test_set_get_clear_swap_adapter() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let (adapter, _target) = setup_swap_adapter(&env);
+
+    assert_eq!(client.get_swap_adapter(), None);
+    client.set_swap_adapter(&company, &adapter);
+    assert_eq!(client.get_swap_adapter(), Some(adapter));
+    client.clear_swap_adapter(&company);
+    assert_eq!(client.get_swap_adapter(), None);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_set_swap_adapter_non_admin_rejected() {
+    let (env, contract_id, _token_id, _company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let (adapter, _target) = setup_swap_adapter(&env);
+    client.set_swap_adapter(&recruiter, &adapter);
+}
+
+#[test]
+fn test_confirm_milestone_swaps_into_preferred_token() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let escrow_token = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+    let (adapter, target_token) = setup_swap_adapter(&env);
+    let target = token::Client::new(&env, &target_token);
+
+    client.set_platform_fee(&company, &500, &treasury);
+    client.set_swap_adapter(&company, &adapter);
+    client.set_recruiter_payout_token(&recruiter, &target_token);
+
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-SWAP");
+    let eng_id = String::from_str(&env, "ENG-SWAP");
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p"));
+    client.confirm_milestone(&company, &eng_id, &0);
+    assert!(has_event(&env, "payout_swapped"));
+
+    // Recruiter is paid only in the target token.
+    assert_eq!(escrow_token.balance(&recruiter), 0);
+    assert_eq!(target.balance(&recruiter), SWAP_NET * 2);
+    // Platform fee is still taken in the escrow token, before the swap.
+    assert_eq!(escrow_token.balance(&treasury), SWAP_FEE);
+    assert_eq!(escrow_token.balance(&adapter), SWAP_NET);
+    assert_eq!(client.get_engagement(&eng_id).released_amount, SWAP_GROSS);
+}
+
+#[test]
+fn test_confirm_milestone_without_adapter_falls_back_to_escrow_token() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let escrow_token = token::Client::new(&env, &token_id);
+    let (_adapter, target_token) = setup_swap_adapter(&env);
+
+    client.set_platform_fee(&company, &500, &Address::generate(&env));
+    client.set_recruiter_payout_token(&recruiter, &target_token);
+
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-NOSWAP");
+    let eng_id = String::from_str(&env, "ENG-NOSWAP");
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p"));
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    assert_eq!(escrow_token.balance(&recruiter), SWAP_NET);
+    assert_eq!(token::Client::new(&env, &target_token).balance(&recruiter), 0);
+}
+
+#[test]
+fn test_confirm_milestone_without_preference_pays_escrow_token() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let escrow_token = token::Client::new(&env, &token_id);
+    let (adapter, _target_token) = setup_swap_adapter(&env);
+
+    client.set_platform_fee(&company, &500, &Address::generate(&env));
+    client.set_swap_adapter(&company, &adapter);
+
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-NOPREF");
+    let eng_id = String::from_str(&env, "ENG-NOPREF");
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p"));
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    assert_eq!(escrow_token.balance(&recruiter), SWAP_NET);
+    assert_eq!(escrow_token.balance(&adapter), 0);
+}
+
+#[test]
+fn test_preference_matching_escrow_token_skips_swap() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let escrow_token = token::Client::new(&env, &token_id);
+    let (adapter, _target_token) = setup_swap_adapter(&env);
+
+    client.set_platform_fee(&company, &500, &Address::generate(&env));
+    client.set_swap_adapter(&company, &adapter);
+    client.set_recruiter_payout_token(&recruiter, &token_id);
+
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-SAME");
+    let eng_id = String::from_str(&env, "ENG-SAME");
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p"));
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    assert_eq!(escrow_token.balance(&recruiter), SWAP_NET);
+    assert_eq!(escrow_token.balance(&adapter), 0);
+}
+
+#[test]
+fn test_adapter_failure_reverts_whole_confirmation() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let escrow_token = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+    let (adapter, target_token) = setup_swap_adapter(&env);
+    MockSwapAdapterClient::new(&env, &adapter).set_fail(&true);
+
+    client.set_platform_fee(&company, &500, &treasury);
+    client.set_swap_adapter(&company, &adapter);
+    client.set_recruiter_payout_token(&recruiter, &target_token);
+
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-SWAPFAIL");
+    let eng_id = String::from_str(&env, "ENG-SWAPFAIL");
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p"));
+    let escrow_before = escrow_token.balance(&contract_id);
+
+    assert!(client.try_confirm_milestone(&company, &eng_id, &0).is_err());
+
+    // No fee, no partial payout, no state change.
+    assert_eq!(escrow_token.balance(&treasury), 0);
+    assert_eq!(escrow_token.balance(&recruiter), 0);
+    assert_eq!(escrow_token.balance(&adapter), 0);
+    assert_eq!(escrow_token.balance(&contract_id), escrow_before);
+    assert_eq!(token::Client::new(&env, &target_token).balance(&recruiter), 0);
+    let eng = client.get_engagement(&eng_id);
+    assert_eq!(eng.released_amount, 0);
+    assert_eq!(
+        eng.milestones.get(0).unwrap().status,
+        MilestoneStatus::ProofSubmitted
+    );
+}
+
+#[test]
+fn test_force_confirm_milestone_swaps_into_preferred_token() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let escrow_token = token::Client::new(&env, &token_id);
+    let (adapter, target_token) = setup_swap_adapter(&env);
+
+    client.set_platform_fee(&company, &500, &Address::generate(&env));
+    client.set_swap_adapter(&company, &adapter);
+    client.set_recruiter_payout_token(&recruiter, &target_token);
+    client.set_confirm_window(&company, &100);
+
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-FCSWAP");
+    let eng_id = String::from_str(&env, "ENG-FCSWAP");
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p"));
+    advance_ledger(&env, 101);
+    client.force_confirm_milestone(&arbiter, &eng_id, &0);
+
+    assert_eq!(escrow_token.balance(&recruiter), 0);
+    assert_eq!(
+        token::Client::new(&env, &target_token).balance(&recruiter),
+        SWAP_NET * 2
+    );
+}
+
+#[test]
+fn test_co_recruiter_without_preference_keeps_escrow_token() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let escrow_token = token::Client::new(&env, &token_id);
+    let co_recruiter = Address::generate(&env);
+    let (adapter, target_token) = setup_swap_adapter(&env);
+
+    client.set_swap_adapter(&company, &adapter);
+    client.set_recruiter_payout_token(&recruiter, &target_token);
+
+    let eng_id = String::from_str(&env, "ENG-COSWAP");
+    let mut config = default_config();
+    config.co_recruiter = Some(co_recruiter.clone());
+    config.recruiter_split_bps = 6_000;
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &config,
+    );
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "p"));
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    // No platform fee: 300 000 000 split 60/40.
+    assert_eq!(
+        token::Client::new(&env, &target_token).balance(&recruiter),
+        180_000_000 * 2
+    );
+    assert_eq!(escrow_token.balance(&recruiter), 0);
+    assert_eq!(escrow_token.balance(&co_recruiter), 120_000_000);
+}
