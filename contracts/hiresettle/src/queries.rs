@@ -1,4 +1,4 @@
-use soroban_sdk::{contractimpl, Address, Env, Map, String, Vec};
+use soroban_sdk::{contractimpl, Address, BytesN, Env, Map, String, Vec};
 use crate::*;
 
 #[contractimpl]
@@ -717,5 +717,70 @@ impl HireSettleContract {
             }
         }
         (unlocked, total)
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #486 — PROOF MERKLE ROOT QUERIES
+    // ----------------------------------------------------------
+
+    /// Return the Merkle root committed by `submit_proof_root` for a
+    /// milestone, or `None` if its current proof is not a root.
+    ///
+    /// A root only counts while it is still the milestone's proof: once the
+    /// proof is replaced by a plain `submit_proof`, or cleared by a rejection
+    /// or a replacement request, this returns `None` even though an old root
+    /// may still be in storage.
+    ///
+    /// Read-only and permissionless.
+    ///
+    /// # Panics
+    /// - `"engagement not found"` — unknown `engagement_id`.
+    /// - `"invalid milestone index"` — `milestone_index` is out of bounds.
+    pub fn get_proof_merkle_root(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Option<BytesN<32>> {
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        let root: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::ProofMerkleRoot(engagement_id, milestone_index))?;
+        if milestone.proof_hash == Self::merkle_root_proof_hash(&env, &root) {
+            Some(root)
+        } else {
+            None
+        }
+    }
+
+    /// Check that `leaf` is one of the evidence items committed in the
+    /// milestone's Merkle root (issue #486).
+    ///
+    /// `leaf` is the 32-byte hash of one evidence item and `proof` its sibling
+    /// hashes from the leaf level up to the root. Each level is hashed as
+    /// `sha256(min(a, b) || max(a, b))`, so no left/right flags are needed.
+    /// A single-item tree has the leaf itself as its root and an empty proof.
+    ///
+    /// Returns `false` when the milestone has no committed root (see
+    /// [`Self::get_proof_merkle_root`]), when the recomputed root does not
+    /// match, or when `proof` is longer than 32 hashes.
+    ///
+    /// Read-only and permissionless.
+    ///
+    /// # Panics
+    /// - `"engagement not found"` — unknown `engagement_id`.
+    /// - `"invalid milestone index"` — `milestone_index` is out of bounds.
+    pub fn verify_proof_inclusion(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+        leaf: BytesN<32>,
+        proof: Vec<BytesN<32>>,
+    ) -> bool {
+        match Self::get_proof_merkle_root(env.clone(), engagement_id, milestone_index) {
+            Some(root) => Self::merkle_verify(&env, &root, &leaf, &proof),
+            None => false,
+        }
     }
 }
