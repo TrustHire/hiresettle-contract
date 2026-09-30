@@ -1,4 +1,4 @@
-use soroban_sdk::{contractimpl, token, Address, Env, String, Vec};
+use soroban_sdk::{contractimpl, token, Address, Bytes, BytesN, Env, String, Vec};
 use crate::*;
 
 #[contractimpl]
@@ -443,5 +443,59 @@ impl HireSettleContract {
             }
             None => pay(&engagement.recruiter, net_payment),
         }
+    }
+
+    // ----------------------------------------------------------
+    // MERKLE PROOF HELPERS (issue #486)
+    // ----------------------------------------------------------
+
+    /// Hash one Merkle tree level: `sha256(min(a, b) || max(a, b))`.
+    ///
+    /// Pairs are sorted before hashing (the OpenZeppelin `MerkleProof`
+    /// convention), so a proof is just the list of sibling hashes and needs
+    /// no left/right position flags.
+    pub(crate) fn merkle_hash_pair(env: &Env, a: &BytesN<32>, b: &BytesN<32>) -> BytesN<32> {
+        let a_arr = a.to_array();
+        let b_arr = b.to_array();
+        let (first, second) = if a_arr <= b_arr { (a_arr, b_arr) } else { (b_arr, a_arr) };
+        let mut data = Bytes::from_array(env, &first);
+        data.extend_from_array(&second);
+        env.crypto().sha256(&data).to_bytes()
+    }
+
+    /// Recompute a Merkle root from `leaf` and its sibling path and compare it
+    /// with `root` (issue #486). Returns `false` for a path longer than
+    /// [`MAX_MERKLE_PROOF_DEPTH`] rather than hashing an unbounded input.
+    pub(crate) fn merkle_verify(
+        env: &Env,
+        root: &BytesN<32>,
+        leaf: &BytesN<32>,
+        proof: &Vec<BytesN<32>>,
+    ) -> bool {
+        if proof.len() > MAX_MERKLE_PROOF_DEPTH {
+            return false;
+        }
+        let mut computed = leaf.clone();
+        for sibling in proof.iter() {
+            computed = Self::merkle_hash_pair(env, &computed, &sibling);
+        }
+        computed == *root
+    }
+
+    /// Render a Merkle root as the `proof_hash` string stored on the milestone:
+    /// [`MERKLE_ROOT_PROOF_PREFIX`] followed by 64 lowercase hex characters
+    /// (issue #486). Keeping `proof_hash` non-empty means every downstream
+    /// check that keys off it (resubmission detection, duplicate detection,
+    /// disputes, views) treats a root exactly like a single hash.
+    pub(crate) fn merkle_root_proof_hash(env: &Env, root: &BytesN<32>) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        const PREFIX_LEN: usize = MERKLE_ROOT_PROOF_PREFIX.len();
+        let mut buf = [0u8; PREFIX_LEN + 64];
+        buf[..PREFIX_LEN].copy_from_slice(MERKLE_ROOT_PROOF_PREFIX.as_bytes());
+        for (i, byte) in root.to_array().iter().enumerate() {
+            buf[PREFIX_LEN + i * 2] = HEX[(byte >> 4) as usize];
+            buf[PREFIX_LEN + i * 2 + 1] = HEX[(byte & 0x0f) as usize];
+        }
+        String::from_bytes(env, &buf)
     }
 }

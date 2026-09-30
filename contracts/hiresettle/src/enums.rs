@@ -385,5 +385,9 @@ pub enum DataKey2 {
     SuperArbiterPanel,
     /// Panel votes on an escalated dispute: `(approvers, rejecters)` (issue #483).
     SuperArbiterVotes(String, u32),
+    /// Merkle root committed by `submit_proof_root` for an
+    /// (engagement_id, milestone_index) (issue #486). Present only while the
+    /// milestone's current proof is a root; a plain `submit_proof` clears it.
+    ProofMerkleRoot(String, u32),
 }
 
