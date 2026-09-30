@@ -1,4 +1,4 @@
-use soroban_sdk::{contractimpl, token, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{contractimpl, token, Address, BytesN, Env, String, Symbol, Vec};
 use crate::*;
 
 #[contractimpl]
@@ -157,6 +157,83 @@ impl HireSettleContract {
             panic!("ProofHashTooLong");
         }
 
+        Self::submit_proof_internal(env, recruiter, engagement_id, milestone_index, proof_hash, None);
+    }
+
+    /// Submit a Merkle root over several evidence items as a milestone's proof
+    /// (issue #486) — the multi-item alternative to [`Self::submit_proof`].
+    ///
+    /// The recruiter builds a Merkle tree off-chain whose leaves are the
+    /// 32-byte hashes of each evidence item, with every level hashed as
+    /// `sha256(min(a, b) || max(a, b))`, and commits only the root. Anyone can
+    /// later check that one item was part of the committed set with
+    /// [`Self::verify_proof_inclusion`] without the contract storing the items.
+    ///
+    /// # Caller
+    /// `recruiter` — must match the engagement's recruiter address and sign the transaction.
+    ///
+    /// # Behaviour
+    /// Identical to [`Self::submit_proof`]: same engagement/milestone status
+    /// checks, same resubmission cooldown, same duplicate check and the same
+    /// `Pending → ProofSubmitted` transition. The milestone's `proof_hash` is
+    /// set to `"merkle:"` followed by the root in lowercase hex, so every
+    /// downstream flow (confirmation, disputes, replacements) treats the root
+    /// like a single hash. The root is a fixed 32 bytes, so the configurable
+    /// max proof hash length does not apply to it.
+    ///
+    /// Resubmitting with plain `submit_proof` replaces the root; resubmitting
+    /// with another root replaces it too.
+    ///
+    /// # Panics
+    /// Same as [`Self::submit_proof`], except `"InvalidProofHash"` and
+    /// `"ProofHashTooLong"`, which cannot occur for a fixed-size root.
+    ///
+    /// # Events
+    /// Emits the same `proof_submitted` / `proof_resubmitted` event as
+    /// `submit_proof`, followed by `("proof_root_submitted", engagement_id)`
+    /// with `(milestone_index, merkle_root)`.
+    pub fn submit_proof_root(
+        env: Env,
+        recruiter: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        merkle_root: BytesN<32>,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+
+        let proof_hash = Self::merkle_root_proof_hash(&env, &merkle_root);
+        Self::submit_proof_internal(
+            env.clone(),
+            recruiter,
+            engagement_id.clone(),
+            milestone_index,
+            proof_hash,
+            Some(merkle_root.clone()),
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "proof_root_submitted"),
+                engagement_id,
+            ),
+            (milestone_index, merkle_root),
+        );
+    }
+
+    /// Shared body of [`Self::submit_proof`] and [`Self::submit_proof_root`]
+    /// (issue #486), run after the caller-specific pause and format checks.
+    /// `merkle_root` is `Some` only for a root submission; it is recorded under
+    /// `DataKey2::ProofMerkleRoot`, and a plain submission clears any root left
+    /// by an earlier root submission on the same milestone.
+    fn submit_proof_internal(
+        env: Env,
+        recruiter: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        proof_hash: String,
+        merkle_root: Option<BytesN<32>>,
+    ) {
         recruiter.require_auth();
 
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
@@ -227,6 +304,20 @@ impl HireSettleContract {
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
         Self::extend_engagement_ttl(&env, &engagement_id);
+
+        // Issue #486: keep the committed Merkle root (if any) alongside the
+        // milestone; a plain single-hash submission drops a stale root.
+        let root_key = DataKey2::ProofMerkleRoot(engagement_id.clone(), milestone_index);
+        match merkle_root {
+            Some(root) => {
+                env.storage().persistent().set(&root_key, &root);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&root_key, 100_000, 6_300_000);
+            }
+            None => env.storage().persistent().remove(&root_key),
+        }
+
         Self::emit_milestone_status_changed(
             &env,
             &engagement_id,
