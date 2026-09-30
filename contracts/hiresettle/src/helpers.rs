@@ -78,6 +78,29 @@ impl HireSettleContract {
         }
     }
 
+    pub(crate) fn is_milestone_on_hold_internal(
+        env: &Env,
+        engagement_id: &String,
+        milestone_index: u32,
+    ) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey2::MilestoneHold(engagement_id.clone(), milestone_index))
+    }
+
+    /// Per-milestone compliance-hold guard (issue #492). Layered under — not a
+    /// replacement for — `assert_not_paused` and `assert_engagement_not_paused`:
+    /// callers check all three, and none of them clears another.
+    pub(crate) fn assert_milestone_not_on_hold(
+        env: &Env,
+        engagement_id: &String,
+        milestone_index: u32,
+    ) {
+        if Self::is_milestone_on_hold_internal(env, engagement_id, milestone_index) {
+            panic!("{}", ERR_MILESTONE_ON_HOLD);
+        }
+    }
+
 
     /// Terminal engagement states — no further state transitions are possible.
     pub(crate) fn is_terminal_status(status: &EngagementStatus) -> bool {

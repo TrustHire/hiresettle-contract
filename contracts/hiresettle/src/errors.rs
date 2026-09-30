@@ -72,6 +72,7 @@
 //! | `EngagementPaused` | `ERR_ENGAGEMENT_PAUSED` | `helpers::assert_engagement_not_paused` | 1 |
 //! | `fee tier not found` | — | `admin::remove_fee_tier` | 1 |
 //! | `FeeTooHigh` | — | `admin::set_platform_fee`, `features::set_fee_rebate_bps` | 2 |
+//! | `HoldReasonTooLong` | — | `admin::hold_milestone` | 1 |
 //! | `Inactivity timeout not reached` | — | `admin::expire_engagement` | 1 |
 //! | `InsufficientCompanyBalance` | — | `features::debit_company_pool`, `features::withdraw_company_balance` | 2 |
 //! | `InsufficientRebateBalance` | — | `features::redeem_company_rebate` | 1 |
@@ -109,6 +110,7 @@
 //! | `milestone proof not yet submitted` | — | `milestones::batch_confirm_milestones`, `milestones::confirm_milestone` | 2 |
 //! | `MilestoneNameEmpty` | — | `engagement::create_engagement_impl` | 1 |
 //! | `MilestoneNameTooLong` | — | `engagement::create_engagement_impl` | 1 |
+//! | `MilestoneOnHold` | `ERR_MILESTONE_ON_HOLD` | `helpers::assert_milestone_not_on_hold` | 1 |
 //! | `missing treasury` | — | `features::apply_pending_config_change` | 1 |
 //! | `MixedVoteModes` | — | `disputes::cast_arbiter_split_vote`, `disputes::cast_arbiter_vote` | 2 |
 //! | `no co_recruiter` | — | `engagement::assert_split_amendment_counterparty`, `engagement::propose_split_amendment` | 2 |
@@ -139,7 +141,7 @@
 //! | `ProofHashTooLong` | — | `milestones::submit_proof` | 1 |
 //! | `QuorumBelowMinRatio` | — | `engagement::create_engagement_impl` | 1 |
 //! | `ReasonTooLong` | — | `disputes::raise_dispute` | 1 |
-//! | `RecruiterArbiterCollision` | — | `engagement::create_engagement_impl` | 1 |
+//! | `RecruiterArbiterCollision` | — | `engagement::create_engagement_impl`, `transfers::admin_add_arbiter` | 2 |
 //! | `referrer already exists` | — | `admin::add_referrer` | 1 |
 //! | `referrer not found` | — | `admin::remove_referrer` | 1 |
 //! | `replacement reason too long` | — | `engagement::request_replacement` | 1 |
@@ -180,3 +182,8 @@ pub(crate) const ERR_INVALID_MILESTONE_INDEX: &str = "invalid milestone index";
 /// via `pause_engagement` (issue #239). Distinct from `"ContractPaused"` so
 /// off-chain callers can tell a single-engagement freeze from a global halt.
 pub(crate) const ERR_ENGAGEMENT_PAUSED: &str = "EngagementPaused";
+/// Raised when an operation targets a single milestone the admin has frozen
+/// via `hold_milestone` (issue #492). Distinct from `"EngagementPaused"` so
+/// callers can tell a one-milestone compliance hold from an engagement-wide
+/// quarantine.
+pub(crate) const ERR_MILESTONE_ON_HOLD: &str = "MilestoneOnHold";

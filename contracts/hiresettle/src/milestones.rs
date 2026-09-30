@@ -32,6 +32,7 @@ impl HireSettleContract {
     pub fn unlock_milestone(env: Env, engagement_id: String, milestone_index: u32) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
 
         if engagement.status != EngagementStatus::Active {
@@ -147,6 +148,7 @@ impl HireSettleContract {
     ) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
 
         // Issue #20: Proof hash format validation (before require_auth for fail-fast)
         if proof_hash.is_empty() {
@@ -316,6 +318,7 @@ impl HireSettleContract {
     ) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         company.require_auth();
 
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
@@ -505,6 +508,11 @@ impl HireSettleContract {
     ) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        // Issue #492: a held index rejects the whole batch.
+        for i in 0..milestone_indices.len() {
+            let idx = milestone_indices.get(i).unwrap();
+            Self::assert_milestone_not_on_hold(&env, &engagement_id, idx);
+        }
         company.require_auth();
 
         if milestone_indices.is_empty() {
@@ -722,6 +730,7 @@ impl HireSettleContract {
     pub fn trigger_no_show(env: Env, engagement_id: String, milestone_index: u32) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
 
         let deadline = Self::get_no_show_deadline_ledgers(env.clone());
         if deadline == 0 {
@@ -899,6 +908,7 @@ impl HireSettleContract {
     ) -> i128 {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
 
         let engagement = Self::get_engagement_internal(&env, &engagement_id);
         if recruiter != engagement.recruiter {

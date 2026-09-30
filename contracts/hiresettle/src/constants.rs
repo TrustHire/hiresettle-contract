@@ -19,6 +19,8 @@ pub(crate) const DEFAULT_VERSION: &str = "0.2.0";
 pub(crate) const MAX_REPLACEMENT_REASON_LEN: u32 = 128;
 /// Maximum length (in characters) of a `pause_engagement` reason string (issue #327).
 pub(crate) const MAX_PAUSE_REASON_LEN: u32 = 128;
+/// Maximum length (in characters) of a `hold_milestone` reason string (issue #492).
+pub(crate) const MAX_HOLD_REASON_LEN: u32 = 128;
 pub(crate) const DEFAULT_MIN_ENGAGEMENT_AMOUNT: i128 = 100_000; // 0.01 USDC
 pub(crate) const DEFAULT_CONFIRM_WINDOW_LEDGERS: u32 = 86_400; // ~5 days
 pub(crate) const DEFAULT_DISPUTE_WINDOW_LEDGERS: u32 = 51_840; // ~3 days
