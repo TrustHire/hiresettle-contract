@@ -1227,6 +1227,7 @@ engagement is quarantined.
 | I want to… | Call |
 |---|---|
 | Submit proof that a milestone is done | `submit_proof` |
+| Submit several evidence items as one proof | `submit_proof_root` (Merkle root) |
 | Withdraw the vested part of a streamed milestone payout | `claim_streamed_payout` |
 | Get paid in a different token | `set_recruiter_payout_token` / `clear_recruiter_payout_token` |
 | Hand the engagement to another recruiter address | `propose_recruiter_transfer` (then the company calls `accept_recruiter_transfer`) |
@@ -1328,7 +1329,31 @@ and verify an explicit migration before deploying such a change. Deployment and
 upgrade procedures will be documented in `DEPLOYMENT.md` when that guide exists.
 
 ### Engagement Lifecycle
-`create_engagement`, `unlock_milestone`, `notify_milestone_due_soon`, `submit_proof`, `confirm_milestone`, `batch_confirm_milestones`, `force_confirm_milestone`, `raise_dispute`, `cast_arbiter_vote`, `request_replacement`, `cancel_engagement`, `top_up_escrow`, `request_early_exit`, `accept_early_exit`, `reject_early_exit`, `expire_engagement`, `propose_recruiter_transfer`, `accept_recruiter_transfer`
+`create_engagement`, `unlock_milestone`, `notify_milestone_due_soon`, `submit_proof`, `submit_proof_root`, `confirm_milestone`, `batch_confirm_milestones`, `force_confirm_milestone`, `raise_dispute`, `cast_arbiter_vote`, `request_replacement`, `cancel_engagement`, `top_up_escrow`, `request_early_exit`, `accept_early_exit`, `reject_early_exit`, `expire_engagement`, `propose_recruiter_transfer`, `accept_recruiter_transfer`
+
+### Multi-Item Proof (Merkle Root)
+
+`submit_proof` records one proof hash per milestone. When a milestone is backed
+by several documents, the recruiter can instead call
+`submit_proof_root(recruiter, engagement_id, milestone_index, merkle_root)` with
+the root of a Merkle tree built off-chain over those documents (issue #486).
+
+- **Tree format.** Each leaf is the 32-byte `sha256` of one evidence item. Each
+  parent is `sha256(min(a, b) || max(a, b))`: the two children are sorted
+  before hashing, so a proof is just the list of sibling hashes, with no
+  left/right flags. A one-item set has the leaf itself as its root.
+- **Same lifecycle.** `submit_proof_root` goes through the same checks,
+  resubmission cooldown and `Pending → ProofSubmitted` transition as
+  `submit_proof`. The milestone's `proof_hash` becomes `"merkle:"` followed by
+  the root in hex, so confirmation, disputes and replacements work unchanged.
+- **Verification.** `verify_proof_inclusion(engagement_id, milestone_index, leaf, proof)`
+  is permissionless and read-only. It returns `true` only if `leaf` plus the
+  sibling path `proof` (at most 32 hashes) recomputes the milestone's committed
+  root. `get_proof_merkle_root` returns that root.
+- **Replacement.** A root stops counting as soon as the milestone's proof
+  changes. That happens on a plain `submit_proof` resubmission, a rejected
+  dispute or a replacement request. After that, both queries return
+  `None` / `false`.
 
 ### Recruiter Transfer
 
@@ -1692,6 +1717,7 @@ argument and return-type details.
 | Show amendment history for a milestone | `get_amendment_log` |
 | Show arbiter vote tally on a dispute | `get_arbiter_votes` |
 | Show why a milestone is in dispute | `get_dispute_reason` |
+| Check that one evidence item is in a milestone's committed proof set | `verify_proof_inclusion` / `get_proof_merkle_root` |
 | Show replacement history / reason | `get_replacement_count` / `get_replacement_reason` / `get_replacement_record` |
 | Show everything that happened on an engagement, in order | `get_engagement_timeline` |
 | Show past disputes / status transitions | `get_dispute_history` / `get_status_history` |
@@ -2101,8 +2127,9 @@ The contract emits Soroban events for all state transitions. Events are grouped 
 |---|---|---|---|
 | `milestone_unlocked` | `engagement_id` | `(milestone_index, valid_after_ledger, unlocked_at_ledger)` | `unlock_milestone` |
 | `milestone_due_soon` | `engagement_id` | `(milestone_index, valid_after_ledger, ledgers_remaining, window)` | `notify_milestone_due_soon` (permissionless keeper) |
-| `proof_submitted` | `engagement_id` | `milestone_index` | `submit_proof` (first submission) |
-| `proof_resubmitted` | `engagement_id` | `(milestone_index, old_hash, proof_hash)` | `submit_proof` (resubmission) |
+| `proof_submitted` | `engagement_id` | `milestone_index` | `submit_proof` / `submit_proof_root` (first submission) |
+| `proof_resubmitted` | `engagement_id` | `(milestone_index, old_hash, proof_hash)` | `submit_proof` / `submit_proof_root` (resubmission) |
+| `proof_root_submitted` | `engagement_id` | `(milestone_index, merkle_root)` | `submit_proof_root` (after `proof_submitted` / `proof_resubmitted`) |
 | `milestone_confirmed` | `engagement_id` | `(milestone_index, payment)` | `confirm_milestone` / `batch_confirm_milestones` |
 | `milestone_force_confirmed` | `engagement_id` | `(milestone_index, payment)` | `force_confirm_milestone` (permissionless after window) |
 | `milestone_status_changed` | `engagement_id` | `(milestone_index, old_status, new_status)` | Any milestone status transition |

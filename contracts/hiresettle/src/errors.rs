@@ -27,6 +27,7 @@
 //! | `already voted` | — | `disputes::recuse_arbiter`, `features::cast_emergency_pause_vote` | 2 |
 //! | `AlreadyInPool` | — | `arbiter_pool::add_arbiter_pool_member` | 1 |
 //! | `AlreadyRated` | — | `ratings::rate_recruiter` | 1 |
+//! | `AlreadyVoted` | — | `disputes::super_arbiter_resolve` | 1 |
 //! | `amendment_expired` | — | `engagement::accept_split_amendment`, `engagement::reject_split_amendment` | 2 |
 //! | `AmendmentCooldownActive` | — | `engagement::propose_split_amendment` | 1 |
 //! | `amount must be greater than zero` | — | 5 functions in `engagement`, `features` | 5 |
@@ -99,13 +100,15 @@
 //! | `InvalidSplitBps` | — | `engagement::create_engagement_impl`, `engagement::propose_split_amendment` | 2 |
 //! | `InvalidSplitPercent` | — | `disputes::cast_arbiter_split_vote` | 1 |
 //! | `InvalidStreamDuration` | — | `engagement::create_engagement_impl` | 1 |
+//! | `InvalidSuperArbiterPanel` | — | `disputes::set_super_arbiter_panel` | 2 |
 //! | `InvalidSuperArbiterResponseWindow` | — | `disputes::set_super_arbiter_deadline` | 1 |
 //! | `JobTitleEmpty` | — | `engagement::create_engagement_impl` | 1 |
 //! | `JobTitleTooLong` | — | `engagement::create_engagement_impl` | 1 |
+//! | `MaxDisputeCyclesReached` | — | `disputes::raise_dispute` | 1 |
 //! | `milestone is not in disputed status` | — | 6 functions in `disputes` | 6 |
 //! | `milestone is not in ProofSubmitted status` | — | `disputes::force_confirm_milestone` | 1 |
 //! | `milestone is not locked` | — | `milestones::unlock_milestone` | 1 |
-//! | `milestone is not pending` | — | `milestones::submit_proof`, `milestones::trigger_no_show` | 2 |
+//! | `milestone is not pending` | — | `milestones::submit_proof_internal`, `milestones::trigger_no_show` | 2 |
 //! | `milestone percentages must sum to 100` | — | `engagement::create_engagement_impl` | 1 |
 //! | `milestone proof not yet submitted` | — | `milestones::batch_confirm_milestones`, `milestones::confirm_milestone` | 2 |
 //! | `MilestoneNameEmpty` | — | `engagement::create_engagement_impl` | 1 |
@@ -146,7 +149,7 @@
 //! | `referrer not found` | — | `admin::remove_referrer` | 1 |
 //! | `replacement reason too long` | — | `engagement::request_replacement` | 1 |
 //! | `ReplacementLimitReached` | — | `engagement::request_replacement` | 1 |
-//! | `ResubmitTooSoon` | — | `milestones::submit_proof` | 1 |
+//! | `ResubmitTooSoon` | — | `milestones::submit_proof_internal` | 1 |
 //! | `retention window has not elapsed yet` | — | `milestones::unlock_milestone` | 1 |
 //! | `retention window has not elapsed — cannot confirm yet` | — | `milestones::batch_confirm_milestones`, `milestones::confirm_milestone` | 2 |
 //! | `RetentionDaysTooLarge` | — | `engagement::create_engagement_impl` | 1 |

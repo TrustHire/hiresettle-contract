@@ -55,6 +55,13 @@ pub(crate) const MAX_AMENDMENT_LOG_ENTRIES: u32 = 20;
 pub(crate) const MAX_DISPUTE_HISTORY_ENTRIES: u32 = 50;
 /// FIFO cap on per-engagement status history entries (issue #501).
 pub(crate) const MAX_STATUS_HISTORY_ENTRIES: u32 = 50;
+/// Maximum number of sibling hashes accepted by `verify_proof_inclusion`
+/// (issue #486). 32 levels covers 2^32 evidence items, far beyond any real
+/// milestone, and bounds the hashing cost of the read-only helper.
+pub(crate) const MAX_MERKLE_PROOF_DEPTH: u32 = 32;
+/// Prefix of the `proof_hash` string recorded on a milestone when its proof
+/// is committed as a Merkle root (issue #486), followed by the root in hex.
+pub(crate) const MERKLE_ROOT_PROOF_PREFIX: &str = "merkle:";
 
 /// Minimum stars accepted by `rate_recruiter` (issue #470).
 pub(crate) const MIN_RATING_STARS: u32 = 1;

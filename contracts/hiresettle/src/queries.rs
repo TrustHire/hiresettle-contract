@@ -1,4 +1,4 @@
-use soroban_sdk::{contractimpl, Address, Env, Map, String, Vec};
+use soroban_sdk::{contractimpl, Address, BytesN, Env, Map, String, Vec};
 use crate::*;
 
 #[contractimpl]

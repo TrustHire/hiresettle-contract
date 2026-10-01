@@ -5,7 +5,7 @@
 //! funds to the company, and calls `init` with the company as admin. Tests
 //! are grouped under `// ====` section banners, mostly one per GitHub issue.
 //!
-//! 346 tests, 135 of them `#[should_panic]` cases asserting on an exact panic
+//! 368 tests, 142 of them `#[should_panic]` cases asserting on an exact panic
 //! message (see the errors reference in `errors.rs`). Recount with
 //! `grep -c '^#\[test\]' src/test.rs` or `cargo test`.
 //!
@@ -21,6 +21,7 @@
 //! | Pooled escrow, config cosigner, emergency multisig & rebates | 14 | issues #472–#475 |
 //! | Cross-cutting edge cases | 17 | the `ADDITIONAL COMPREHENSIVE TEST COVERAGE` section |
 //! | Timeline, fee snapshot, co-recruiter bond & panel resize | 33 | issues #501 and #505–#507 |
+//! | Proof Merkle roots | 22 | issue #486: `submit_proof_root` vs `submit_proof` parity, root storage and replacement, `verify_proof_inclusion` valid / tampered / wrong-path cases |
 
 #![cfg(test)]
 extern crate std;
@@ -28,7 +29,8 @@ extern crate std;
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger},
-    contract, contractimpl, token, vec, Address, Env, String, Symbol, TryIntoVal, Vec,
+    contract, contractimpl, token, vec, Address, Bytes, BytesN, Env, String, Symbol, TryIntoVal,
+    Vec,
 };
 
 // ============================================================
