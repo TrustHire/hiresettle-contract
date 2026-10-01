@@ -78,6 +78,29 @@ impl HireSettleContract {
         }
     }
 
+    pub(crate) fn is_milestone_on_hold_internal(
+        env: &Env,
+        engagement_id: &String,
+        milestone_index: u32,
+    ) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey2::MilestoneHold(engagement_id.clone(), milestone_index))
+    }
+
+    /// Per-milestone compliance-hold guard (issue #492). Layered under — not a
+    /// replacement for — `assert_not_paused` and `assert_engagement_not_paused`:
+    /// callers check all three, and none of them clears another.
+    pub(crate) fn assert_milestone_not_on_hold(
+        env: &Env,
+        engagement_id: &String,
+        milestone_index: u32,
+    ) {
+        if Self::is_milestone_on_hold_internal(env, engagement_id, milestone_index) {
+            panic!("{}", ERR_MILESTONE_ON_HOLD);
+        }
+    }
+
 
     /// Terminal engagement states — no further state transitions are possible.
     pub(crate) fn is_terminal_status(status: &EngagementStatus) -> bool {
@@ -166,6 +189,49 @@ impl HireSettleContract {
     }
 
 
+
+    /// Base platform-fee bps for an engagement's token: the per-token
+    /// override if configured (issue #479), else the global `global_bps`.
+    /// Fee tiers and referral discounts are applied on top by the caller.
+    pub(crate) fn token_base_bps(env: &Env, token: &Address, global_bps: u32) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::TokenPlatformFee(token.clone()))
+            .unwrap_or(global_bps)
+    }
+
+    /// Platform fee owed on `payment` at `bps` (issue #478): the bps-derived
+    /// amount raised to the admin fee floor, but never above `payment`
+    /// itself. Waived engagements always pay zero, floor or not.
+    pub(crate) fn platform_fee_amount(
+        env: &Env,
+        engagement_id: &String,
+        payment: i128,
+        bps: u32,
+    ) -> i128 {
+        if Self::is_fee_waived_internal(env, engagement_id) {
+            return 0;
+        }
+        let floor: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::PlatformFeeFloor)
+            .unwrap_or(0);
+        let fee = (payment * bps as i128) / 10_000;
+        fee.max(floor).min(payment.max(0))
+    }
+
+    /// Risk score weights, falling back to the documented defaults.
+    pub(crate) fn risk_score_weights_internal(env: &Env) -> RiskScoreWeights {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::RiskScoreWeights)
+            .unwrap_or(RiskScoreWeights {
+                dispute_weight: DEFAULT_RISK_DISPUTE_WEIGHT,
+                replacement_weight: DEFAULT_RISK_REPLACEMENT_WEIGHT,
+                extension_weight: DEFAULT_RISK_EXTENSION_WEIGHT,
+            })
+    }
 
     /// Whether `referrer` is on the admin-configured recognised referral list.
     pub(crate) fn is_recognised_referrer(env: &Env, referrer: &Address) -> bool {

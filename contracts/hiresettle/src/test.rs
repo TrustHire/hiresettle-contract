@@ -10057,6 +10057,12 @@ fn test_create_engagement_duplicate_id_rejected() {
 }
 
 // ============================================================
+// ISSUE #502 — MINIMUM QUORUM RATIO AT create_engagement
+// ============================================================
+
+/// Create an engagement with `panel_size` fresh arbiters and the given
+/// `quorum` / optional `weights`, returning the engagement id.
+fn create_engagement_with_panel(
 // ISSUE #501 — ENGAGEMENT TIMELINE
 // ============================================================
 
@@ -10076,6 +10082,60 @@ fn build_timeline_history(
     token_id: &Address,
     company: &Address,
     recruiter: &Address,
+    id: &str,
+    panel_size: u32,
+    quorum: u32,
+    weights: Option<Vec<u32>>,
+) -> String {
+    let mut arbiters = Vec::new(env);
+    for _ in 0..panel_size {
+        arbiters.push_back(Address::generate(env));
+    }
+    client.create_engagement(
+        &String::from_str(env, id),
+        company,
+        recruiter,
+        &ArbiterSetup {
+            arbiters,
+            quorum,
+            weights,
+        },
+        token_id,
+        &1_000_000_000,
+        &String::from_str(env, "Senior Engineer"),
+        &build_milestones(env),
+        &vec![env, 30u32, 90u32],
+        &default_config(),
+    )
+}
+
+#[test]
+fn test_min_quorum_ratio_defaults_to_zero() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    assert_eq!(client.get_min_quorum_ratio_bps(), 0);
+}
+
+#[test]
+fn test_min_quorum_ratio_default_allows_single_arbiter_quorum_on_large_panel() {
+    // Regression: with the default ratio of 0, today's behaviour is unchanged —
+    // quorum 1 on a 7-arbiter panel is still accepted.
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let id = create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-DEFAULT", 7, 1, None,
+    );
+    assert_eq!(client.get_engagement(&id).quorum, 1);
+}
+
+#[test]
+#[should_panic(expected = "invalid quorum")]
+fn test_min_quorum_ratio_default_still_rejects_zero_quorum() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-ZERO", 3, 0, None,
     arbiter: &Address,
 ) -> (String, Address) {
     let co = Address::generate(env);
@@ -10242,6 +10302,12 @@ fn test_timeline_empty_for_fresh_and_unknown_engagements() {
 }
 
 #[test]
+#[should_panic(expected = "invalid quorum")]
+fn test_min_quorum_ratio_default_still_rejects_quorum_above_panel() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-OVER", 3, 4, None,
 fn test_timeline_pagination() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
@@ -10271,6 +10337,139 @@ fn test_timeline_pagination() {
 }
 
 #[test]
+fn test_set_min_quorum_ratio_bps_stores_value_and_emits_event() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.set_min_quorum_ratio_bps(&company, &5_000);
+    assert_eq!(client.get_min_quorum_ratio_bps(), 5_000);
+    assert!(has_event(&env, "min_quorum_ratio_set"));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_set_min_quorum_ratio_bps_rejects_non_admin() {
+    let (env, contract_id, _token_id, _company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_min_quorum_ratio_bps(&recruiter, &5_000);
+}
+
+#[test]
+#[should_panic(expected = "InvalidQuorumRatio")]
+fn test_set_min_quorum_ratio_bps_rejects_above_10000() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_min_quorum_ratio_bps(&company, &10_001);
+}
+
+#[test]
+#[should_panic(expected = "QuorumBelowMinRatio")]
+fn test_min_quorum_ratio_rejects_quorum_below_fraction() {
+    // 50 % of a 6-arbiter panel requires quorum >= 3; quorum 2 must fail.
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_min_quorum_ratio_bps(&company, &5_000);
+    create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-LOW", 6, 2, None,
+    );
+}
+
+#[test]
+fn test_min_quorum_ratio_accepts_minimum_passing_quorum() {
+    // 50 % of a 6-arbiter panel: exactly 3 is the minimum passing quorum.
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_min_quorum_ratio_bps(&company, &5_000);
+    let id = create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-MIN", 6, 3, None,
+    );
+    assert_eq!(client.get_engagement(&id).quorum, 3);
+}
+
+#[test]
+#[should_panic(expected = "QuorumBelowMinRatio")]
+fn test_min_quorum_ratio_odd_panel_rounds_up_rejects_floor() {
+    // Rounding rule: required quorum = ceil(N * bps / 10_000).
+    // 50 % of 5 = 2.5 → 3, so quorum 2 (the floor) must be rejected.
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_min_quorum_ratio_bps(&company, &5_000);
+    create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-ODD-LOW", 5, 2, None,
+    );
+}
+
+#[test]
+fn test_min_quorum_ratio_odd_panel_rounds_up_accepts_ceiling() {
+    // 50 % of 5 = 2.5 → 3 is the minimum passing quorum.
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_min_quorum_ratio_bps(&company, &5_000);
+    let id = create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-ODD-OK", 5, 3, None,
+    );
+    assert_eq!(client.get_engagement(&id).quorum, 3);
+}
+
+#[test]
+fn test_min_quorum_ratio_non_round_ratio_boundary() {
+    // 6 667 bps of 3 = 2.0001 → ceil = 3, so a 3-arbiter panel needs
+    // unanimity; 6 666 bps of 3 = 1.9998 → ceil = 2.
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.set_min_quorum_ratio_bps(&company, &6_666);
+    create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-6666", 3, 2, None,
+    );
+
+    client.set_min_quorum_ratio_bps(&company, &6_667);
+    let result = client.try_create_engagement(
+        &String::from_str(&env, "ENG-Q-6667"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![
+                &env,
+                Address::generate(&env),
+                Address::generate(&env),
+                Address::generate(&env),
+            ],
+            quorum: 2,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Senior Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_min_quorum_ratio_full_requires_unanimity() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_min_quorum_ratio_bps(&company, &10_000);
+
+    let id = create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-UNAN", 4, 4, None,
+    );
+    assert_eq!(client.get_engagement(&id).quorum, 4);
+}
+
+#[test]
+#[should_panic(expected = "QuorumBelowMinRatio")]
+fn test_min_quorum_ratio_weighted_panel_uses_total_weight() {
+    // Weighted panel: weights [3, 1, 1] → total weight 5. At 50 % the
+    // required quorum is ceil(2.5) = 3 in weight units, so quorum 2 fails
+    // even though it is >= half the headcount (3 arbiters → 1.5).
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_min_quorum_ratio_bps(&company, &5_000);
+    create_engagement_with_panel(
 fn test_status_history_records_completion() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
@@ -10797,6 +10996,24 @@ fn test_admin_add_arbiter_on_weighted_panel_gets_weight_one() {
         &token_id,
         &company,
         &recruiter,
+        "ENG-Q-WEIGHT",
+        3,
+        2,
+        Some(vec![&env, 3u32, 1u32, 1u32]),
+    );
+}
+
+#[test]
+fn test_min_quorum_ratio_reset_to_zero_restores_default_behaviour() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    client.set_min_quorum_ratio_bps(&company, &5_000);
+    client.set_min_quorum_ratio_bps(&company, &0);
+    let id = create_engagement_with_panel(
+        &env, &client, &token_id, &company, &recruiter, "ENG-Q-RESET", 7, 1, None,
+    );
+    assert_eq!(client.get_engagement(&id).quorum, 1);
         ArbiterSetup {
             arbiters: vec![&env, arbiter.clone()],
             quorum: 3,
@@ -10987,445 +11204,328 @@ fn test_admin_remove_arbiter_clears_its_nomination_and_delegate() {
 }
 
 // ============================================================
-// #486 — milestone proof Merkle root + inclusion proofs
+// ISSUE #498 — BATCH RAISE DISPUTE
 // ============================================================
 
-/// Which proof submission path a shared #486 test body exercises.
-#[derive(Clone, Copy)]
-enum ProofMode {
-    Hash,
-    Root,
+/// Three independent placement milestones (no prerequisites) so all of them
+/// can sit in `ProofSubmitted` at once.
+fn build_parallel_milestones(env: &Env) -> Vec<Milestone> {
+    let mut milestones = Vec::new(env);
+    for (name, pct) in [("Deliverable A", 30u32), ("Deliverable B", 30), ("Deliverable C", 40)] {
+        milestones.push_back(Milestone {
+            name: String::from_str(env, name),
+            payment_percent: pct,
+            kind: MilestoneKind::Placement,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(env, ""),
+            status: MilestoneStatus::Pending,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+            prerequisites: Vec::new(env),
+        });
+    }
+    milestones
 }
 
-/// Hash an evidence item into a Merkle leaf, as a recruiter would off-chain.
-fn merkle_leaf(env: &Env, item: &str) -> BytesN<32> {
-    env.crypto()
-        .sha256(&Bytes::from_slice(env, item.as_bytes()))
-        .to_bytes()
+fn create_parallel_engagement(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    arbiter: &Address,
+    id: &str,
+) -> String {
+    client.create_engagement(
+        &String::from_str(env, id),
+        company,
+        recruiter,
+        &ArbiterSetup {
+            arbiters: vec![env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        token_id,
+        &1_000_000_000,
+        &String::from_str(env, "Senior Engineer"),
+        &build_parallel_milestones(env),
+        &Vec::new(env),
+        &default_config(),
+    )
 }
 
-/// Independent re-implementation of the contract's sorted-pair level hash,
-/// so the tests do not just check the contract against itself.
-fn merkle_parent(env: &Env, a: &BytesN<32>, b: &BytesN<32>) -> BytesN<32> {
-    let (a, b) = (a.to_array(), b.to_array());
-    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-    let mut data = Bytes::from_array(env, &lo);
-    data.extend_from_array(&hi);
-    env.crypto().sha256(&data).to_bytes()
-}
-
-/// Four-leaf tree `root = H(H(l0, l1), H(l2, l3))`. Returns the leaves,
-/// the two level-one nodes and the root.
-fn four_leaf_tree(env: &Env) -> (Vec<BytesN<32>>, BytesN<32>, BytesN<32>, BytesN<32>) {
-    let leaves = vec![
-        env,
-        merkle_leaf(env, "offer-letter.pdf"),
-        merkle_leaf(env, "signed-contract.pdf"),
-        merkle_leaf(env, "payroll-entry.csv"),
-        merkle_leaf(env, "badge-photo.jpg"),
-    ];
-    let n01 = merkle_parent(env, &leaves.get(0).unwrap(), &leaves.get(1).unwrap());
-    let n23 = merkle_parent(env, &leaves.get(2).unwrap(), &leaves.get(3).unwrap());
-    let root = merkle_parent(env, &n01, &n23);
-    (leaves, n01, n23, root)
-}
-
-/// Submit proof for `milestone_index` through the path `mode` selects, using
-/// `tag` to derive a distinct hash or root per call.
-fn submit_proof_via(
+/// Submit a distinct proof hash for `index` (proof hashes must be unique).
+fn submit_parallel_proof(
     env: &Env,
     client: &HireSettleContractClient,
     recruiter: &Address,
     eng_id: &String,
-    milestone_index: u32,
-    mode: ProofMode,
+    index: u32,
     tag: &str,
 ) {
-    match mode {
-        ProofMode::Hash => {
-            client.submit_proof(recruiter, eng_id, &milestone_index, &String::from_str(env, tag))
-        }
-        ProofMode::Root => {
-            client.submit_proof_root(recruiter, eng_id, &milestone_index, &merkle_leaf(env, tag))
+    let hashes = ["ipfs://p0", "ipfs://p1", "ipfs://p2"];
+    let alt = ["ipfs://q0", "ipfs://q1", "ipfs://q2"];
+    let hash = if tag == "q" { alt[index as usize] } else { hashes[index as usize] };
+    client.submit_proof(recruiter, eng_id, &index, &String::from_str(env, hash));
+}
+
+fn count_events(env: &Env, event_name: &str) -> u32 {
+    let expected = Symbol::new(env, event_name);
+    let mut n = 0;
+    for (_, topics, _) in env.events().all().iter() {
+        let matches = topics
+            .get(0)
+            .and_then(|v| v.try_into_val(env).ok())
+            .map(|s: Symbol| s == expected)
+            .unwrap_or(false);
+        if matches {
+            n += 1;
         }
     }
+    n
 }
 
-fn assert_submission_transitions_milestone(mode: ProofMode) {
+#[test]
+fn test_batch_raise_dispute_disputes_all_listed_milestones() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-SUBMIT");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-SUBMIT",
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-ALL",
     );
+    for i in 0..3u32 {
+        submit_parallel_proof(&env, &client, &recruiter, &eng_id, i, "p");
+    }
 
-    submit_proof_via(&env, &client, &recruiter, &eng_id, 0, mode, "proof-a");
+    let reason = String::from_str(&env, "same flawed evidence");
+    client.batch_raise_dispute(&company, &eng_id, &vec![&env, 0u32, 2u32], &reason);
 
-    let m0 = client.get_milestone(&eng_id, &0);
-    assert_eq!(m0.status, MilestoneStatus::ProofSubmitted);
-    assert_eq!(m0.proof_submitted_at, env.ledger().sequence());
-    assert!(!m0.proof_hash.is_empty());
-    assert!(has_event(&env, "proof_submitted"));
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Disputed);
+    assert_eq!(client.get_milestone(&eng_id, &1).status, MilestoneStatus::ProofSubmitted);
+    assert_eq!(client.get_milestone(&eng_id, &2).status, MilestoneStatus::Disputed);
+    assert_eq!(client.get_dispute_reason(&eng_id, &0), Some(reason.clone()));
+    assert_eq!(client.get_dispute_reason(&eng_id, &1), None);
+    assert_eq!(client.get_dispute_reason(&eng_id, &2), Some(reason));
 }
 
-fn assert_rejected_proof_resubmits_and_confirms(mode: ProofMode) {
+#[test]
+fn test_batch_raise_dispute_emits_per_milestone_and_aggregate_events() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-RESUB");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-RESUB",
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-EVT",
+    );
+    for i in 0..3u32 {
+        submit_parallel_proof(&env, &client, &recruiter, &eng_id, i, "p");
+    }
+
+    client.batch_raise_dispute(
+        &company,
+        &eng_id,
+        &vec![&env, 0u32, 1u32, 2u32],
+        &String::from_str(&env, "bad evidence"),
     );
 
-    submit_proof_via(&env, &client, &recruiter, &eng_id, 0, mode, "proof-a");
-    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "dispute"));
-    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &false);
-    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Pending);
-
-    submit_proof_via(&env, &client, &recruiter, &eng_id, 0, mode, "proof-b");
-    assert_eq!(
-        client.get_milestone(&eng_id, &0).status,
-        MilestoneStatus::ProofSubmitted
-    );
-    assert!(has_event(&env, "proof_resubmitted"));
-
-    client.confirm_milestone(&company, &eng_id, &0);
-    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Confirmed);
+    assert_eq!(count_events(&env, "dispute_raised"), 3);
+    assert_eq!(count_events(&env, "disputes_batch_raised"), 1);
 }
 
-fn submit_on_locked_milestone(mode: ProofMode) {
+#[test]
+fn test_batch_raise_dispute_matches_individual_raise_dispute_state() {
+    // Same scenario on two engagements: one disputed via the batch call, the
+    // other via a sequence of individual raise_dispute calls. Per-milestone
+    // stored state must be identical.
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-LOCKED");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-LOCKED",
+    let arbiter_b = Address::generate(&env);
+
+    let batch_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-BATCH",
     );
-    submit_proof_via(&env, &client, &recruiter, &eng_id, 1, mode, "proof-a");
-}
-
-fn submit_by_wrong_recruiter(mode: ProofMode) {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-AUTH");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-AUTH",
+    let single_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter_b, "ENG-BD-SINGLE",
     );
-    let stranger = Address::generate(&env);
-    submit_proof_via(&env, &client, &stranger, &eng_id, 0, mode, "proof-a");
-}
+    for i in 0..2u32 {
+        submit_parallel_proof(&env, &client, &recruiter, &batch_id, i, "p");
+        submit_parallel_proof(&env, &client, &recruiter, &single_id, i, "q");
+    }
 
-fn submit_while_paused(mode: ProofMode) {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-PAUSED");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-PAUSED",
-    );
-    client.pause(&company);
-    submit_proof_via(&env, &client, &recruiter, &eng_id, 0, mode, "proof-a");
-}
+    let reason = String::from_str(&env, "shared reason");
+    client.batch_raise_dispute(&company, &batch_id, &vec![&env, 0u32, 1u32], &reason);
+    client.raise_dispute(&company, &single_id, &0, &reason);
+    client.raise_dispute(&company, &single_id, &1, &reason);
 
-#[test]
-fn test_submit_proof_transitions_milestone() {
-    assert_submission_transitions_milestone(ProofMode::Hash);
-}
-
-#[test]
-fn test_submit_proof_root_transitions_milestone() {
-    assert_submission_transitions_milestone(ProofMode::Root);
-}
-
-#[test]
-fn test_submit_proof_rejected_resubmit_and_confirm() {
-    assert_rejected_proof_resubmits_and_confirms(ProofMode::Hash);
-}
-
-#[test]
-fn test_submit_proof_root_rejected_resubmit_and_confirm() {
-    assert_rejected_proof_resubmits_and_confirms(ProofMode::Root);
-}
-
-#[test]
-#[should_panic(expected = "milestone is not pending")]
-fn test_submit_proof_locked_milestone_rejected() {
-    submit_on_locked_milestone(ProofMode::Hash);
-}
-
-#[test]
-#[should_panic(expected = "milestone is not pending")]
-fn test_submit_proof_root_locked_milestone_rejected() {
-    submit_on_locked_milestone(ProofMode::Root);
-}
-
-#[test]
-#[should_panic(expected = "unauthorized")]
-fn test_submit_proof_wrong_recruiter_rejected() {
-    submit_by_wrong_recruiter(ProofMode::Hash);
-}
-
-#[test]
-#[should_panic(expected = "unauthorized")]
-fn test_submit_proof_root_wrong_recruiter_rejected() {
-    submit_by_wrong_recruiter(ProofMode::Root);
-}
-
-#[test]
-#[should_panic(expected = "ContractPaused")]
-fn test_submit_proof_rejected_while_paused() {
-    submit_while_paused(ProofMode::Hash);
-}
-
-#[test]
-#[should_panic(expected = "ContractPaused")]
-fn test_submit_proof_root_rejected_while_paused() {
-    submit_while_paused(ProofMode::Root);
-}
-
-#[test]
-fn test_submit_proof_root_stores_root_and_hex_proof_hash() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-STORE");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-STORE",
-    );
-    let (_, _, _, root) = four_leaf_tree(&env);
-
-    client.submit_proof_root(&recruiter, &eng_id, &0, &root);
-
-    assert_eq!(client.get_proof_merkle_root(&eng_id, &0), Some(root.clone()));
-    // "merkle:" + 64 hex characters.
-    let proof_hash = client.get_milestone(&eng_id, &0).proof_hash;
-    assert_eq!(proof_hash.len(), 7 + 64);
-    let mut buf = [0u8; 71];
-    proof_hash.copy_into_slice(&mut buf);
-    assert!(buf.starts_with(b"merkle:"));
-    assert!(buf[7..]
-        .iter()
-        .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(c)));
-    assert!(has_event(&env, "proof_root_submitted"));
-}
-
-#[test]
-fn test_get_proof_merkle_root_none_for_single_hash_proof() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-NONE");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-NONE",
-    );
-    assert_eq!(client.get_proof_merkle_root(&eng_id, &0), None);
-
-    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://p"));
-
-    assert_eq!(client.get_proof_merkle_root(&eng_id, &0), None);
-    let (leaves, _, _, _) = four_leaf_tree(&env);
-    assert!(!client.verify_proof_inclusion(&eng_id, &0, &leaves.get(0).unwrap(), &Vec::new(&env)));
-}
-
-#[test]
-fn test_verify_proof_inclusion_accepts_every_valid_leaf() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-VALID");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-VALID",
-    );
-    let (leaves, n01, n23, root) = four_leaf_tree(&env);
-    client.submit_proof_root(&recruiter, &eng_id, &0, &root);
-
-    let paths = [
-        vec![&env, leaves.get(1).unwrap(), n23.clone()],
-        vec![&env, leaves.get(0).unwrap(), n23.clone()],
-        vec![&env, leaves.get(3).unwrap(), n01.clone()],
-        vec![&env, leaves.get(2).unwrap(), n01.clone()],
-    ];
-    for (i, path) in paths.iter().enumerate() {
-        assert!(
-            client.verify_proof_inclusion(&eng_id, &0, &leaves.get(i as u32).unwrap(), path),
-            "leaf {} should verify",
-            i
+    for i in 0..2u32 {
+        assert_eq!(
+            client.get_milestone(&batch_id, &i).status,
+            client.get_milestone(&single_id, &i).status,
+        );
+        assert_eq!(
+            client.get_dispute_reason(&batch_id, &i),
+            client.get_dispute_reason(&single_id, &i),
         );
     }
+
+    // Dispute timeline entries match field for field.
+    let batch_history = client.get_dispute_history(&batch_id);
+    let single_history = client.get_dispute_history(&single_id);
+    assert_eq!(batch_history.len(), 2);
+    assert_eq!(batch_history, single_history);
+
+    // Each panel member was assigned one dispute per milestone.
+    assert_eq!(
+        client.get_arbiter_stats(&arbiter).unwrap().disputes_assigned,
+        client.get_arbiter_stats(&arbiter_b).unwrap().disputes_assigned,
+    );
+    assert_eq!(client.get_arbiter_stats(&arbiter).unwrap().disputes_assigned, 2);
 }
 
 #[test]
-fn test_verify_proof_inclusion_rejects_tampered_leaf() {
+#[should_panic(expected = "EmptyIndices")]
+fn test_batch_raise_dispute_empty_indices_panics() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-TAMPER");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-TAMPER",
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-EMPTY",
     );
-    let (leaves, _, n23, root) = four_leaf_tree(&env);
-    client.submit_proof_root(&recruiter, &eng_id, &0, &root);
-
-    let path = vec![&env, leaves.get(1).unwrap(), n23];
-    let forged = merkle_leaf(&env, "offer-letter-EDITED.pdf");
-    assert!(!client.verify_proof_inclusion(&eng_id, &0, &forged, &path));
-}
-
-#[test]
-fn test_verify_proof_inclusion_rejects_incorrect_path() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-PATH");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-PATH",
-    );
-    let (leaves, n01, n23, root) = four_leaf_tree(&env);
-    client.submit_proof_root(&recruiter, &eng_id, &0, &root);
-    let leaf0 = leaves.get(0).unwrap();
-
-    // Wrong sibling at the second level.
-    let wrong_sibling = vec![&env, leaves.get(1).unwrap(), n01.clone()];
-    assert!(!client.verify_proof_inclusion(&eng_id, &0, &leaf0, &wrong_sibling));
-    // Truncated path.
-    let truncated = vec![&env, leaves.get(1).unwrap()];
-    assert!(!client.verify_proof_inclusion(&eng_id, &0, &leaf0, &truncated));
-    // Empty path for a multi-leaf tree.
-    assert!(!client.verify_proof_inclusion(&eng_id, &0, &leaf0, &Vec::new(&env)));
-    // Extra trailing node.
-    let extended = vec![&env, leaves.get(1).unwrap(), n23.clone(), n23];
-    assert!(!client.verify_proof_inclusion(&eng_id, &0, &leaf0, &extended));
-}
-
-#[test]
-fn test_verify_proof_inclusion_single_leaf_tree() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
-    let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-SINGLE");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-SINGLE",
-    );
-    let only = merkle_leaf(&env, "only-item.pdf");
-    client.submit_proof_root(&recruiter, &eng_id, &0, &only);
-
-    assert!(client.verify_proof_inclusion(&eng_id, &0, &only, &Vec::new(&env)));
-    assert!(!client.verify_proof_inclusion(
+    client.batch_raise_dispute(
+        &company,
         &eng_id,
-        &0,
-        &merkle_leaf(&env, "other-item.pdf"),
-        &Vec::new(&env)
-    ));
+        &Vec::new(&env),
+        &String::from_str(&env, "reason"),
+    );
 }
 
 #[test]
-fn test_verify_proof_inclusion_rejects_overlong_path() {
+#[should_panic(expected = "can only dispute a submitted proof")]
+fn test_batch_raise_dispute_wrong_status_rejects_batch() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-DEEP");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-DEEP",
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-STATUS",
     );
-
-    // Build a genuine 33-level chain so only the depth cap can reject it.
-    let leaf = merkle_leaf(&env, "deep-item");
-    let mut path: Vec<BytesN<32>> = Vec::new(&env);
-    let mut node = leaf.clone();
-    for i in 0..33u32 {
-        let sibling = merkle_leaf(&env, if i % 2 == 0 { "even" } else { "odd" });
-        node = merkle_parent(&env, &node, &sibling);
-        path.push_back(sibling);
-    }
-    client.submit_proof_root(&recruiter, &eng_id, &0, &node);
-
-    assert!(!client.verify_proof_inclusion(&eng_id, &0, &leaf, &path));
+    submit_parallel_proof(&env, &client, &recruiter, &eng_id, 0, "p");
+    // Milestone 2 is still Pending.
+    client.batch_raise_dispute(
+        &company,
+        &eng_id,
+        &vec![&env, 0u32, 2u32],
+        &String::from_str(&env, "reason"),
+    );
 }
 
 #[test]
-fn test_rejected_root_proof_is_no_longer_verifiable() {
+fn test_batch_raise_dispute_wrong_status_leaves_valid_indices_untouched() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-REJECT");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-REJECT",
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-ATOM-S",
     );
-    let (leaves, _, n23, root) = four_leaf_tree(&env);
-    client.submit_proof_root(&recruiter, &eng_id, &0, &root);
+    submit_parallel_proof(&env, &client, &recruiter, &eng_id, 0, "p");
+    submit_parallel_proof(&env, &client, &recruiter, &eng_id, 1, "p");
 
-    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "dispute"));
-    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &false);
+    // Valid indices 0 and 1 listed before invalid (Pending) index 2.
+    let result = client.try_batch_raise_dispute(
+        &company,
+        &eng_id,
+        &vec![&env, 0u32, 1u32, 2u32],
+        &String::from_str(&env, "reason"),
+    );
+    assert!(result.is_err());
 
-    assert_eq!(client.get_proof_merkle_root(&eng_id, &0), None);
-    let path = vec![&env, leaves.get(1).unwrap(), n23];
-    assert!(!client.verify_proof_inclusion(&eng_id, &0, &leaves.get(0).unwrap(), &path));
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::ProofSubmitted);
+    assert_eq!(client.get_milestone(&eng_id, &1).status, MilestoneStatus::ProofSubmitted);
+    assert_eq!(client.get_dispute_reason(&eng_id, &0), None);
+    assert_eq!(client.get_dispute_reason(&eng_id, &1), None);
+    assert_eq!(client.get_dispute_history(&eng_id).len(), 0);
 }
 
 #[test]
-fn test_single_hash_resubmission_replaces_root() {
+fn test_batch_raise_dispute_window_closed_rejects_whole_batch() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-REPLACE");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-REPLACE",
+    client.set_dispute_window(&company, &200u32);
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-ATOM-W",
     );
-    let (leaves, _, n23, root) = four_leaf_tree(&env);
-    client.submit_proof_root(&recruiter, &eng_id, &0, &root);
-    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "dispute"));
-    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &false);
+    // Milestone 0 submitted at ledger 100 → window closes at 300.
+    submit_parallel_proof(&env, &client, &recruiter, &eng_id, 0, "p");
+    advance_ledger(&env, 150);
+    // Milestone 1 submitted at ledger 250 → window closes at 450.
+    submit_parallel_proof(&env, &client, &recruiter, &eng_id, 1, "p");
+    advance_ledger(&env, 100); // ledger 350: 0 is closed, 1 is still open.
 
-    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://single"));
+    let result = client.try_batch_raise_dispute(
+        &company,
+        &eng_id,
+        &vec![&env, 1u32, 0u32],
+        &String::from_str(&env, "reason"),
+    );
+    assert!(result.is_err());
+    assert_eq!(client.get_milestone(&eng_id, &1).status, MilestoneStatus::ProofSubmitted);
+    assert_eq!(client.get_dispute_reason(&eng_id, &1), None);
 
-    assert_eq!(client.get_proof_merkle_root(&eng_id, &0), None);
-    let path = vec![&env, leaves.get(1).unwrap(), n23];
-    assert!(!client.verify_proof_inclusion(&eng_id, &0, &leaves.get(0).unwrap(), &path));
+    // Milestone 1 alone is still disputable.
+    client.raise_dispute(&company, &eng_id, &1, &String::from_str(&env, "reason"));
+    assert_eq!(client.get_milestone(&eng_id, &1).status, MilestoneStatus::Disputed);
 }
 
 #[test]
-fn test_root_resubmission_replaces_root() {
+#[should_panic(expected = "DuplicateMilestoneIndex")]
+fn test_batch_raise_dispute_duplicate_index_panics() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-REROOT");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-REROOT",
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-DUP",
     );
-    let (_, _, _, root) = four_leaf_tree(&env);
-    let new_root = merkle_leaf(&env, "revised-evidence-set");
-    client.submit_proof_root(&recruiter, &eng_id, &0, &root);
-    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "dispute"));
-    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &false);
-
-    client.submit_proof_root(&recruiter, &eng_id, &0, &new_root);
-
-    assert_eq!(client.get_proof_merkle_root(&eng_id, &0), Some(new_root));
+    submit_parallel_proof(&env, &client, &recruiter, &eng_id, 0, "p");
+    client.batch_raise_dispute(
+        &company,
+        &eng_id,
+        &vec![&env, 0u32, 0u32],
+        &String::from_str(&env, "reason"),
+    );
 }
 
 #[test]
-#[should_panic(expected = "DuplicateProofHash")]
-fn test_duplicate_proof_root_rejected_across_milestones() {
+#[should_panic(expected = "unauthorized")]
+fn test_batch_raise_dispute_non_company_rejected() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-DUP");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-DUP",
-    );
-    let (_, _, _, root) = four_leaf_tree(&env);
-    client.submit_proof_root(&recruiter, &eng_id, &0, &root);
 
-    advance_ledger(&env, 31 * 17_280);
-    client.unlock_milestone(&eng_id, &1);
-    client.submit_proof_root(&recruiter, &eng_id, &1, &root);
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-AUTH",
+    );
+    submit_parallel_proof(&env, &client, &recruiter, &eng_id, 0, "p");
+    client.batch_raise_dispute(
+        &recruiter,
+        &eng_id,
+        &vec![&env, 0u32],
+        &String::from_str(&env, "reason"),
+    );
 }
 
 #[test]
-fn test_proof_roots_are_tracked_per_milestone() {
+#[should_panic(expected = "ReasonTooLong")]
+fn test_batch_raise_dispute_reason_too_long_panics() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = String::from_str(&env, "ENG-486-PERMS");
-    create_standard_engagement(
-        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-486-PERMS",
+
+    let eng_id = create_parallel_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-BD-LONG",
     );
-    let (leaves, _, n23, root) = four_leaf_tree(&env);
-    let other_root = merkle_leaf(&env, "retention-evidence-set");
-    client.submit_proof_root(&recruiter, &eng_id, &0, &root);
-
-    advance_ledger(&env, 31 * 17_280);
-    client.unlock_milestone(&eng_id, &1);
-    client.submit_proof_root(&recruiter, &eng_id, &1, &other_root);
-
-    assert_eq!(client.get_proof_merkle_root(&eng_id, &0), Some(root));
-    assert_eq!(client.get_proof_merkle_root(&eng_id, &1), Some(other_root));
-    let path = vec![&env, leaves.get(1).unwrap(), n23];
-    assert!(client.verify_proof_inclusion(&eng_id, &0, &leaves.get(0).unwrap(), &path));
-    assert!(!client.verify_proof_inclusion(&eng_id, &1, &leaves.get(0).unwrap(), &path));
+    submit_parallel_proof(&env, &client, &recruiter, &eng_id, 0, "p");
+    let long = "x".repeat(129);
+    client.batch_raise_dispute(
+        &company,
+        &eng_id,
+        &vec![&env, 0u32],
+        &String::from_str(&env, &long),
+    );
 }

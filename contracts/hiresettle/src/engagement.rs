@@ -40,6 +40,9 @@ impl HireSettleContract {
     ///   is not parallel to `arbiters` or contains a zero weight (issue #460).
     /// - `"invalid quorum"` — quorum is 0 or exceeds the arbiter count (total weight when
     ///   weights are given).
+    /// - `"QuorumBelowMinRatio"` — quorum is below `ceil(N * min_quorum_ratio_bps / 10_000)`
+    ///   where `N` is the arbiter count (total weight when weights are given); see
+    ///   [`Self::set_min_quorum_ratio_bps`] (issue #502). Never raised at the default ratio of 0.
     /// - `"InvalidPrerequisiteIndex"` / `"PrerequisiteCycle"` — a milestone's `prerequisites`
     ///   reference an out-of-range index or form a cycle (issue #461).
     ///
@@ -296,6 +299,18 @@ impl HireSettleContract {
 
         if quorum == 0 || quorum > total_weight {
             panic!("invalid quorum");
+        }
+
+        // Issue #502: enforce the admin-configured minimum quorum ratio.
+        // `quorum * 10_000 < total_weight * bps` is the exact integer form of
+        // `quorum < ceil(total_weight * bps / 10_000)`, so the boundary rounds
+        // up (e.g. 50 % of a 5-arbiter panel requires quorum 3). Widened to
+        // u64 so large weighted panels cannot overflow.
+        let min_ratio_bps = Self::get_min_quorum_ratio_bps(env.clone());
+        if (quorum as u64) * (MAX_MIN_QUORUM_RATIO_BPS as u64)
+            < (total_weight as u64) * (min_ratio_bps as u64)
+        {
+            panic!("QuorumBelowMinRatio");
         }
 
         // Issue #174: reject overlapping company/recruiter/arbiter addresses so a

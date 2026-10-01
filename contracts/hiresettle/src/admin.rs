@@ -96,6 +96,96 @@ impl HireSettleContract {
         (fee.bps, fee.treasury)
     }
 
+    /// Set the minimum absolute platform fee charged per fee-bearing payout
+    /// (issue #478). 0 (the default) disables the floor. The floor never
+    /// raises a fee above the payout itself and does not apply to waived
+    /// engagements.
+    pub fn set_platform_fee_floor(env: Env, admin: Address, floor_amount: i128) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        if floor_amount < 0 {
+            panic!("InvalidFeeFloor");
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey2::PlatformFeeFloor, &floor_amount);
+        env.events()
+            .publish((Symbol::new(&env, "platform_fee_floor_set"),), floor_amount);
+    }
+
+    /// Return the platform fee floor (0 when unset).
+    pub fn get_platform_fee_floor(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::PlatformFeeFloor)
+            .unwrap_or(0)
+    }
+
+    /// Override the base platform-fee bps for engagements in `token`
+    /// (issue #479). Tiers and referral discounts apply on top of this base.
+    /// Capped at 500 bps like `set_platform_fee`.
+    pub fn set_token_platform_fee(env: Env, admin: Address, token: Address, bps: u32) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        if bps > MAX_PLATFORM_FEE_BPS {
+            panic!("FeeTooHigh");
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey2::TokenPlatformFee(token.clone()), &bps);
+        env.events()
+            .publish((Symbol::new(&env, "token_platform_fee_set"),), (token, bps));
+    }
+
+    /// Remove a per-token fee override; the token falls back to the global rate.
+    pub fn remove_token_platform_fee(env: Env, admin: Address, token: Address) {
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .remove(&DataKey2::TokenPlatformFee(token.clone()));
+        env.events()
+            .publish((Symbol::new(&env, "token_platform_fee_removed"),), token);
+    }
+
+    /// Return the per-token base bps override, if any.
+    pub fn get_token_platform_fee(env: Env, token: Address) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::TokenPlatformFee(token))
+    }
+
+    /// Set the weights used by `get_engagement_risk_score` (issue #480).
+    pub fn set_risk_score_weights(
+        env: Env,
+        admin: Address,
+        dispute_weight: u32,
+        replacement_weight: u32,
+        extension_weight: u32,
+    ) {
+        Self::assert_admin(&env, &admin);
+        env.storage().persistent().set(
+            &DataKey2::RiskScoreWeights,
+            &RiskScoreWeights {
+                dispute_weight,
+                replacement_weight,
+                extension_weight,
+            },
+        );
+        env.events().publish(
+            (Symbol::new(&env, "risk_score_weights_set"),),
+            (dispute_weight, replacement_weight, extension_weight),
+        );
+    }
+
+    /// Return the risk score weights as `(dispute, replacement, extension)`.
+    /// Defaults to `(DEFAULT_RISK_DISPUTE_WEIGHT, DEFAULT_RISK_REPLACEMENT_WEIGHT,
+    /// DEFAULT_RISK_EXTENSION_WEIGHT)`.
+    pub fn get_risk_score_weights(env: Env) -> (u32, u32, u32) {
+        let w = Self::risk_score_weights_internal(&env);
+        (w.dispute_weight, w.replacement_weight, w.extension_weight)
+    }
+
 
     /// Admin waives the platform fee for a single engagement (issue #335),
     /// zeroing it for every future milestone payout on that engagement
@@ -390,6 +480,37 @@ impl HireSettleContract {
             .publish((Symbol::new(&env, "min_amount_set"),), amount);
     }
 
+    /// Admin sets the minimum quorum-to-panel-size ratio, in basis points,
+    /// that `create_engagement` enforces (issue #502). A panel of total
+    /// weight `N` (arbiter count when unweighted) must then use a quorum of
+    /// at least `ceil(N * bps / 10_000)`, so a large panel cannot be reduced
+    /// to a single rubber-stamp arbiter. `0` (the default) disables the
+    /// check. Only affects engagements created after the change.
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — caller is not the admin.
+    /// - `"InvalidQuorumRatio"` — `bps` exceeds 10 000.
+    pub fn set_min_quorum_ratio_bps(env: Env, admin: Address, bps: u32) {
+        Self::assert_admin(&env, &admin);
+        if bps > MAX_MIN_QUORUM_RATIO_BPS {
+            panic!("InvalidQuorumRatio");
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::Config(ConfigKey::MinQuorumRatioBps), &bps);
+        env.events()
+            .publish((Symbol::new(&env, "min_quorum_ratio_set"),), bps);
+    }
+
+    /// Return the minimum quorum-to-panel-size ratio in basis points
+    /// (issue #502). `0` means no minimum.
+    pub fn get_min_quorum_ratio_bps(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::MinQuorumRatioBps))
+            .unwrap_or(0u32)
+    }
+
     /// Admin sets a per-token minimum engagement amount override, in that
     /// token's own smallest unit (issue #366). Takes precedence over the
     /// admin-wide `MinEngagementAmount` for `token` specifically, so an
@@ -585,6 +706,128 @@ impl HireSettleContract {
     /// can probe without a prior existence check.
     pub fn is_engagement_paused(env: Env, engagement_id: String) -> bool {
         Self::is_engagement_paused_internal(&env, &engagement_id)
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #492 — MILESTONE COMPLIANCE HOLD
+    // ----------------------------------------------------------
+
+    /// Freeze a single milestone pending an off-chain compliance or legal
+    /// review, leaving the rest of the engagement fully operational.
+    ///
+    /// # Caller
+    /// `admin` — must be the current contract admin.
+    ///
+    /// # Scope
+    /// While held, every call that acts on *this* milestone is rejected with
+    /// `"MilestoneOnHold"`: unlock, proof submission, confirmation (including
+    /// batch — the whole batch is rejected if any listed index is held — and
+    /// force-confirm), no-show triggering, streamed-payout claims, raising a
+    /// dispute, arbiter voting / split voting / recusal, escalation, and
+    /// super-arbiter or timeout resolution. Sibling milestones are unaffected.
+    ///
+    /// Engagement-wide operations (cancellation, expiry, top-ups, transfers,
+    /// amendments, replacement requests) are not milestone-targeted and are
+    /// not blocked; use [`Self::pause_engagement`] to freeze the whole engagement.
+    ///
+    /// Orthogonal to both [`Self::pause`] and [`Self::pause_engagement`], the
+    /// same way those two are orthogonal to each other: all three guards are
+    /// checked independently (global → engagement → milestone), and lifting
+    /// one never lifts another.
+    ///
+    /// Holding an already-held milestone overwrites the stored reason and
+    /// re-emits the event, so the admin can re-assert a hold idempotently.
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — caller is not the contract admin.
+    /// - `"engagement not found"` — no engagement exists with this ID.
+    /// - `"invalid milestone index"` — `milestone_index` is out of range.
+    /// - `"EmptyHoldReason"` — `reason` is an empty string.
+    /// - `"HoldReasonTooLong"` — `reason` exceeds `MAX_HOLD_REASON_LEN` characters.
+    ///
+    /// # Events
+    /// Emits `("milestone_held", engagement_id)` with
+    /// `(milestone_index, admin, reason)`.
+    pub fn hold_milestone(
+        env: Env,
+        admin: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        reason: String,
+    ) {
+        Self::assert_admin(&env, &admin);
+
+        // Reject unknown IDs / indices so a typo cannot leave a stray hold
+        // record that later blocks a legitimately created milestone.
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let _ = Self::get_milestone_or_panic(&engagement, milestone_index);
+
+        if reason.is_empty() {
+            panic!("EmptyHoldReason");
+        }
+        if reason.len() > MAX_HOLD_REASON_LEN {
+            panic!("HoldReasonTooLong");
+        }
+
+        let key = DataKey2::MilestoneHold(engagement_id.clone(), milestone_index);
+        env.storage().persistent().set(&key, &reason);
+        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (Symbol::new(&env, "milestone_held"), engagement_id),
+            (milestone_index, admin, reason),
+        );
+    }
+
+    /// Lift the compliance hold on a single milestone (issue #492), restoring
+    /// normal operation for it. Releasing a milestone that is not held is a
+    /// no-op that still emits the event. Has no bearing on the global or
+    /// per-engagement pause.
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — caller is not the contract admin.
+    /// - `"engagement not found"` — no engagement exists with this ID.
+    /// - `"invalid milestone index"` — `milestone_index` is out of range.
+    ///
+    /// # Events
+    /// Emits `("milestone_hold_released", engagement_id)` with
+    /// `(milestone_index, admin)`.
+    pub fn release_milestone_hold(
+        env: Env,
+        admin: Address,
+        engagement_id: String,
+        milestone_index: u32,
+    ) {
+        Self::assert_admin(&env, &admin);
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let _ = Self::get_milestone_or_panic(&engagement, milestone_index);
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey2::MilestoneHold(engagement_id.clone(), milestone_index));
+
+        env.events().publish(
+            (Symbol::new(&env, "milestone_hold_released"), engagement_id),
+            (milestone_index, admin),
+        );
+    }
+
+    /// Return `true` if this milestone is under a compliance hold (issue #492).
+    pub fn is_milestone_on_hold(env: Env, engagement_id: String, milestone_index: u32) -> bool {
+        Self::is_milestone_on_hold_internal(&env, &engagement_id, milestone_index)
+    }
+
+    /// Return the reason recorded by `hold_milestone`, or `None` if the
+    /// milestone is not currently held (issue #492).
+    pub fn get_milestone_hold_reason(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey2::MilestoneHold(engagement_id, milestone_index))
     }
 
     /// Nominate a new admin. The nominee must call `claim_admin` to complete rotation.

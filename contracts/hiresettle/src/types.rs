@@ -528,3 +528,36 @@ pub struct TimelineEntry {
     /// `get_replacement_reason` / `get_replacement_record`.
     pub source_index: u32,
 }
+
+/// A pending milestone extension proposal, awaiting company approval
+/// (issue #247). Recruiter-initiated: proposes pushing a Locked retention
+/// milestone's `valid_after_ledger` further out. Stored when proposed and
+/// removed once it is accepted, rejected, or expires.
+#[contracttype]
+#[derive(Clone)]
+pub struct MilestoneExtensionProposal {
+    /// The recruiter who proposed the extension. Fixed at proposal time; only
+    /// this address may withdraw the proposal while it is pending.
+    pub proposer: Address,
+    /// Number of ledgers added to the milestone's `valid_after_ledger` if the
+    /// company accepts. Must be non-zero; unused if the proposal lapses.
+    pub additional_ledgers: u32,
+    /// Ledger sequence at which the proposal was created. Never changes after
+    /// creation; used for auditing and ordering proposals.
+    pub proposed_at_ledger: u32,
+    /// Ledger sequence after which the proposal can no longer be accepted.
+    /// Once passed, the proposal is treated as expired and may be cleared.
+    pub expires_at_ledger: u32,
+}
+
+/// Weights applied by `get_engagement_risk_score` (issue #480).
+#[contracttype]
+#[derive(Clone)]
+pub struct RiskScoreWeights {
+    /// Points per milestone currently in `Disputed` status.
+    pub dispute_weight: u32,
+    /// Points per recruiter replacement.
+    pub replacement_weight: u32,
+    /// Points per granted milestone extension.
+    pub extension_weight: u32,
+}

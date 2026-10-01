@@ -32,6 +32,7 @@ impl HireSettleContract {
     pub fn unlock_milestone(env: Env, engagement_id: String, milestone_index: u32) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
 
         if engagement.status != EngagementStatus::Active {
@@ -147,6 +148,7 @@ impl HireSettleContract {
     ) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
 
         // Issue #20: Proof hash format validation (before require_auth for fail-fast)
         if proof_hash.is_empty() {
@@ -407,6 +409,7 @@ impl HireSettleContract {
     ) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         company.require_auth();
 
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
@@ -451,12 +454,13 @@ impl HireSettleContract {
                 let tiered_bps = Self::engagement_tier_bps(
                     &env,
                     &engagement_id,
-                    platform_fee.bps,
+                    Self::token_base_bps(&env, &engagement.token, platform_fee.bps),
                     engagement.total_amount,
                 );
                 Self::apply_referral_discount(&env, tiered_bps, &engagement.referrer)
             };
-            let fee_amount = (payment * effective_bps as i128) / 10_000;
+            let fee_amount =
+                Self::platform_fee_amount(&env, &engagement_id, payment, effective_bps);
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
 
@@ -595,6 +599,11 @@ impl HireSettleContract {
     ) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        // Issue #492: a held index rejects the whole batch.
+        for i in 0..milestone_indices.len() {
+            let idx = milestone_indices.get(i).unwrap();
+            Self::assert_milestone_not_on_hold(&env, &engagement_id, idx);
+        }
         company.require_auth();
 
         if milestone_indices.is_empty() {
@@ -640,7 +649,7 @@ impl HireSettleContract {
         let effective_bps = Self::effective_platform_fee_bps(
             &env,
             &engagement_id,
-            platform_fee.bps,
+            Self::token_base_bps(&env, &engagement.token, platform_fee.bps),
             engagement.total_amount,
         );
         let token_client = token::Client::new(&env, &engagement.token);
@@ -650,7 +659,8 @@ impl HireSettleContract {
             let mut m = engagement.milestones.get(idx).unwrap();
 
             let payment = (engagement.total_amount * m.payment_percent as i128) / 100;
-            let fee_amount = (payment * effective_bps as i128) / 10_000;
+            let fee_amount =
+                Self::platform_fee_amount(&env, &engagement_id, payment, effective_bps);
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
 
@@ -811,6 +821,7 @@ impl HireSettleContract {
     pub fn trigger_no_show(env: Env, engagement_id: String, milestone_index: u32) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
 
         let deadline = Self::get_no_show_deadline_ledgers(env.clone());
         if deadline == 0 {
@@ -988,6 +999,7 @@ impl HireSettleContract {
     ) -> i128 {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
 
         let engagement = Self::get_engagement_internal(&env, &engagement_id);
         if recruiter != engagement.recruiter {

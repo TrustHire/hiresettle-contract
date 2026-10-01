@@ -149,6 +149,9 @@ pub enum ConfigKey {
     FeeRebateBps,
     /// Emergency pause vote window in ledgers (issue #474).
     EmergencyVoteWindow,
+    /// Minimum quorum-to-panel-size ratio, in basis points, enforced by
+    /// `create_engagement` (issue #502). Default 0 (no minimum).
+    MinQuorumRatioBps,
     /// Grace period in ledgers before the same proposer may re-propose on the
     /// same milestone after a rejection (issue #496, default 0 for no cooldown).
     AmendmentReproposalCooldown,

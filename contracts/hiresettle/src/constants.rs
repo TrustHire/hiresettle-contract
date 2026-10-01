@@ -3,6 +3,9 @@
 pub(crate) const MAX_PLATFORM_FEE_BPS: u32 = 500;
 pub(crate) const MAX_ARBITER_FEE_BPS: u32 = 200;
 pub(crate) const FULL_SPLIT_BPS: u32 = 10_000;
+/// Upper bound for `set_min_quorum_ratio_bps` (issue #502): 10 000 bps
+/// (100 %) forces a unanimous panel.
+pub(crate) const MAX_MIN_QUORUM_RATIO_BPS: u32 = 10_000;
 
 pub(crate) const LEDGERS_PER_DAY: u32 = 17_280; // 86 400s ÷ 5s per ledger
 pub(crate) const DEFAULT_PROOF_COOLDOWN: u32 = 2_880; // ~4 hours
@@ -16,6 +19,8 @@ pub(crate) const DEFAULT_VERSION: &str = "0.2.0";
 pub(crate) const MAX_REPLACEMENT_REASON_LEN: u32 = 128;
 /// Maximum length (in characters) of a `pause_engagement` reason string (issue #327).
 pub(crate) const MAX_PAUSE_REASON_LEN: u32 = 128;
+/// Maximum length (in characters) of a `hold_milestone` reason string (issue #492).
+pub(crate) const MAX_HOLD_REASON_LEN: u32 = 128;
 pub(crate) const DEFAULT_MIN_ENGAGEMENT_AMOUNT: i128 = 100_000; // 0.01 USDC
 pub(crate) const DEFAULT_CONFIRM_WINDOW_LEDGERS: u32 = 86_400; // ~5 days
 pub(crate) const DEFAULT_DISPUTE_WINDOW_LEDGERS: u32 = 51_840; // ~3 days
@@ -71,3 +76,10 @@ pub(crate) const FN_SET_REFERRAL_DISCOUNT_BPS: u32 = 3;
 pub(crate) const FN_SET_ARBITER_FEE: u32 = 4;
 pub(crate) const FN_SET_MIN_AMOUNT: u32 = 5;
 pub(crate) const FN_SET_FEE_REBATE_BPS: u32 = 6;
+
+/// Default risk-score points per active dispute (issue #480).
+pub(crate) const DEFAULT_RISK_DISPUTE_WEIGHT: u32 = 30;
+/// Default risk-score points per recruiter replacement (issue #480).
+pub(crate) const DEFAULT_RISK_REPLACEMENT_WEIGHT: u32 = 20;
+/// Default risk-score points per granted milestone extension (issue #480).
+pub(crate) const DEFAULT_RISK_EXTENSION_WEIGHT: u32 = 10;
