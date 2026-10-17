@@ -49,6 +49,99 @@ impl HireSettleContract {
         }
     }
 
+    /// Assert that the caller is authorized as the pauser role.
+    /// Falls back to the main admin if no dedicated pauser is set.
+    pub(crate) fn assert_pauser(env: &Env, caller: &Address) {
+        caller.require_auth();
+        
+        // Check if there's a dedicated pauser role
+        let pauser_opt: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Ext(ExtKey::Pauser));
+        
+        if let Some(pauser) = pauser_opt {
+            if *caller == pauser {
+                return;
+            }
+        }
+        
+        // Fall back to main admin if no dedicated pauser
+        let renounced: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminRenounced)
+            .unwrap_or(false);
+        if renounced {
+            panic!("NoAdmin");
+        }
+        if *caller != Self::get_admin_internal(env) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+    }
+
+    /// Assert that the caller is authorized as the fee manager role.
+    /// Falls back to the main admin if no dedicated fee manager is set.
+    pub(crate) fn assert_fee_manager(env: &Env, caller: &Address) {
+        caller.require_auth();
+        
+        // Check if there's a dedicated fee manager role
+        let fee_manager_opt: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Ext(ExtKey::FeeManager));
+        
+        if let Some(fee_manager) = fee_manager_opt {
+            if *caller == fee_manager {
+                return;
+            }
+        }
+        
+        // Fall back to main admin if no dedicated fee manager
+        let renounced: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminRenounced)
+            .unwrap_or(false);
+        if renounced {
+            panic!("NoAdmin");
+        }
+        if *caller != Self::get_admin_internal(env) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+    }
+
+    /// Assert that the caller is authorized as the arbiter pool manager role.
+    /// Falls back to the main admin if no dedicated arbiter pool manager is set.
+    pub(crate) fn assert_arbiter_pool_manager(env: &Env, caller: &Address) {
+        caller.require_auth();
+        
+        // Check if there's a dedicated arbiter pool manager role
+        let manager_opt: Option<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Ext(ExtKey::ArbiterPoolManager));
+        
+        if let Some(manager) = manager_opt {
+            if *caller == manager {
+                return;
+            }
+        }
+        
+        // Fall back to main admin if no dedicated manager
+        let renounced: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::AdminRenounced)
+            .unwrap_or(false);
+        if renounced {
+            panic!("NoAdmin");
+        }
+        if *caller != Self::get_admin_internal(env) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+    }
+
     pub(crate) fn is_paused_internal(env: &Env) -> bool {
         env.storage()
             .persistent()

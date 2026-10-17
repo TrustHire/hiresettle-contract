@@ -360,6 +360,12 @@ pub enum ExtKey {
     SplitWithheld(String),
     /// Standing vote delegate for (engagement_id, arbiter) (issue #463).
     ArbiterVoteDelegate(String, Address),
+    /// Address authorized to pause/unpause the contract (role-based admin).
+    Pauser,
+    /// Address authorized to manage platform fees and treasuries (role-based admin).
+    FeeManager,
+    /// Address authorized to manage the arbiter pool (role-based admin).
+    ArbiterPoolManager,
 }
 
 /// Overflow storage key space kept under the Soroban 50-variant union limit

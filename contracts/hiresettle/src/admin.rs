@@ -61,9 +61,10 @@ impl HireSettleContract {
     /// When a non-zero fee-change delay is configured (issue #541), the change
     /// is scheduled exactly as by [`Self::schedule_platform_fee`] instead of
     /// applied; with the default delay of 0 it applies immediately.
-    pub fn set_platform_fee(env: Env, admin: Address, bps: u32, treasury: Address) {
+    /// Can be called by the dedicated fee manager role or main admin.
+    pub fn set_platform_fee(env: Env, caller: Address, bps: u32, treasury: Address) {
         Self::assert_not_paused(&env);
-        Self::assert_admin(&env, &admin);
+        Self::assert_fee_manager(&env, &caller);
 
         if bps > MAX_PLATFORM_FEE_BPS {
             panic!("FeeTooHigh");
@@ -110,9 +111,9 @@ impl HireSettleContract {
     ///
     /// # Events
     /// `("fee_change_scheduled",)` with `(bps, treasury, effective_after_ledger)`.
-    pub fn schedule_platform_fee(env: Env, admin: Address, bps: u32, treasury: Address) {
+    pub fn schedule_platform_fee(env: Env, caller: Address, bps: u32, treasury: Address) {
         Self::assert_not_paused(&env);
-        Self::assert_admin(&env, &admin);
+        Self::assert_fee_manager(&env, &caller);
 
         if bps > MAX_PLATFORM_FEE_BPS {
             panic!("FeeTooHigh");
@@ -159,13 +160,13 @@ impl HireSettleContract {
     /// in effect.
     ///
     /// # Panics
-    /// - `"unauthorized"` — caller is not the admin.
+    /// - `"unauthorized"` — caller is not the fee manager or admin.
     /// - `"NoScheduledFee"` — no change is scheduled.
     ///
     /// # Events
     /// `("fee_change_cancelled",)` with `(bps, treasury)` of the cancelled change.
-    pub fn cancel_scheduled_fee(env: Env, admin: Address) {
-        Self::assert_admin(&env, &admin);
+    pub fn cancel_scheduled_fee(env: Env, caller: Address) {
+        Self::assert_fee_manager(&env, &caller);
 
         let scheduled: ScheduledPlatformFee = env
             .storage()
@@ -839,18 +840,20 @@ impl HireSettleContract {
     }
 
     /// Pause state-changing contract operations.
-    pub fn pause(env: Env, admin: Address) {
-        Self::assert_admin(&env, &admin);
+    /// Can be called by the dedicated pauser role or main admin.
+    pub fn pause(env: Env, caller: Address) {
+        Self::assert_pauser(&env, &caller);
         env.storage().persistent().set(&DataKey::Paused, &true);
-        env.events().publish((Symbol::new(&env, "paused"),), admin);
+        env.events().publish((Symbol::new(&env, "paused"),), caller);
     }
 
     /// Resume state-changing contract operations.
-    pub fn unpause(env: Env, admin: Address) {
-        Self::assert_admin(&env, &admin);
+    /// Can be called by the dedicated pauser role or main admin.
+    pub fn unpause(env: Env, caller: Address) {
+        Self::assert_pauser(&env, &caller);
         env.storage().persistent().set(&DataKey::Paused, &false);
         env.events()
-            .publish((Symbol::new(&env, "unpaused"),), admin);
+            .publish((Symbol::new(&env, "unpaused"),), caller);
     }
 
     /// Return true if the contract is currently paused.
@@ -903,8 +906,8 @@ impl HireSettleContract {
     /// # Events
     /// Emits `("engagement_paused", engagement_id)` with the acting admin
     /// and the reason.
-    pub fn pause_engagement(env: Env, admin: Address, engagement_id: String, reason: String) {
-        Self::assert_admin(&env, &admin);
+    pub fn pause_engagement(env: Env, caller: Address, engagement_id: String, reason: String) {
+        Self::assert_pauser(&env, &caller);
 
         // Reject unknown IDs so a typo cannot silently create a quarantine
         // record that later blocks a legitimately created engagement.
@@ -941,7 +944,7 @@ impl HireSettleContract {
                 Symbol::new(&env, "engagement_paused"),
                 engagement_id.clone(),
             ),
-            (admin, reason),
+            (caller, reason),
         );
     }
 
@@ -953,13 +956,13 @@ impl HireSettleContract {
     /// paused, the engagement stays blocked by `"ContractPaused"`.
     ///
     /// # Panics
-    /// - `"unauthorized"` — caller is not the contract admin.
+    /// - `"unauthorized"` — caller is not the contract admin or pauser.
     /// - `"engagement not found"` — no engagement exists with this ID.
     ///
     /// # Events
-    /// Emits `("engagement_unpaused", engagement_id)` with the acting admin.
-    pub fn unpause_engagement(env: Env, admin: Address, engagement_id: String) {
-        Self::assert_admin(&env, &admin);
+    /// Emits `("engagement_unpaused", engagement_id)` with the acting caller.
+    pub fn unpause_engagement(env: Env, caller: Address, engagement_id: String) {
+        Self::assert_pauser(&env, &caller);
 
         let _ = Self::get_engagement_internal(&env, &engagement_id);
 
@@ -972,7 +975,7 @@ impl HireSettleContract {
                 Symbol::new(&env, "engagement_unpaused"),
                 engagement_id.clone(),
             ),
-            admin,
+            caller,
         );
     }
 
@@ -1564,6 +1567,32 @@ impl HireSettleContract {
             .update_current_contract_wasm(proposal.new_wasm_hash);
     }
 
+    /// Admin cancels a pending upgrade proposal (issue #69).
+    /// Removes the pending upgrade from storage before the time-lock expires.
+    /// Panics with `"no pending upgrade"` if no proposal exists.
+    /// Emits `upgrade_cancelled` with `(new_wasm_hash,)` of the cancelled proposal.
+    ///
+    /// # Rationale
+    /// This allows the admin to cancel a pending upgrade if they discover an issue
+    /// with the proposed WASM hash (e.g., wrong hash, vulnerability found) without
+    /// having to wait for the time-lock to expire or re-proposing to overwrite it.
+    pub fn cancel_upgrade(env: Env, admin: Address) {
+        Self::assert_admin(&env, &admin);
+
+        let proposal: UpgradeProposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .unwrap_or_else(|| panic!("no pending upgrade"));
+
+        env.storage().instance().remove(&DataKey::PendingUpgrade);
+
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_cancelled"),),
+            proposal.new_wasm_hash,
+        );
+    }
+
     /// Admin sets the upgrade time-lock duration in ledgers (issue #69).
     pub fn set_upgrade_lock_duration(env: Env, admin: Address, ledgers: u32) {
         Self::assert_admin(&env, &admin);
@@ -1715,6 +1744,109 @@ impl HireSettleContract {
             .persistent()
             .get(&DataKey2::RecruiterVerified(recruiter))
             .unwrap_or(false)
+    }
+
+    // ----------------------------------------------------------
+    // ROLE-BASED ADMIN — SEPARATE PAUSER, FEE MANAGER, AND ARBITER-POOL MANAGER ROLES
+    // ----------------------------------------------------------
+
+    /// Admin sets a dedicated pauser address who can pause/unpause the contract.
+    /// Pass `None` to clear the role (reverting to main admin).
+    ///
+    /// # Events
+    /// Emits `("pauser_set",)` with `(pauser_address,)` or `()` if cleared.
+    pub fn set_pauser(env: Env, admin: Address, pauser: Option<Address>) {
+        Self::assert_admin(&env, &admin);
+        
+        let key = DataKey::Ext(ExtKey::Pauser);
+        if let Some(p) = pauser.clone() {
+            env.storage().persistent().set(&key, &p);
+            env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+            env.events().publish(
+                (Symbol::new(&env, "pauser_set"),),
+                p,
+            );
+        } else {
+            env.storage().persistent().remove(&key);
+            env.events().publish(
+                (Symbol::new(&env, "pauser_cleared"),),
+                (),
+            );
+        }
+    }
+
+    /// Return the current dedicated pauser address, if set.
+    /// Returns `None` if no dedicated pauser is configured (main admin has authority).
+    pub fn get_pauser(env: Env) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Ext(ExtKey::Pauser))
+    }
+
+    /// Admin sets a dedicated fee manager address who can manage platform fees and treasuries.
+    /// Pass `None` to clear the role (reverting to main admin).
+    ///
+    /// # Events
+    /// Emits `("fee_manager_set",)` with `(manager_address,)` or `()` if cleared.
+    pub fn set_fee_manager(env: Env, admin: Address, fee_manager: Option<Address>) {
+        Self::assert_admin(&env, &admin);
+        
+        let key = DataKey::Ext(ExtKey::FeeManager);
+        if let Some(fm) = fee_manager.clone() {
+            env.storage().persistent().set(&key, &fm);
+            env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+            env.events().publish(
+                (Symbol::new(&env, "fee_manager_set"),),
+                fm,
+            );
+        } else {
+            env.storage().persistent().remove(&key);
+            env.events().publish(
+                (Symbol::new(&env, "fee_manager_cleared"),),
+                (),
+            );
+        }
+    }
+
+    /// Return the current dedicated fee manager address, if set.
+    /// Returns `None` if no dedicated fee manager is configured (main admin has authority).
+    pub fn get_fee_manager(env: Env) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Ext(ExtKey::FeeManager))
+    }
+
+    /// Admin sets a dedicated arbiter pool manager address who can manage the arbiter pool.
+    /// Pass `None` to clear the role (reverting to main admin).
+    ///
+    /// # Events
+    /// Emits `("arbiter_pool_manager_set",)` with `(manager_address,)` or `()` if cleared.
+    pub fn set_arbiter_pool_manager(env: Env, admin: Address, manager: Option<Address>) {
+        Self::assert_admin(&env, &admin);
+        
+        let key = DataKey::Ext(ExtKey::ArbiterPoolManager);
+        if let Some(m) = manager.clone() {
+            env.storage().persistent().set(&key, &m);
+            env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+            env.events().publish(
+                (Symbol::new(&env, "arbiter_pool_manager_set"),),
+                m,
+            );
+        } else {
+            env.storage().persistent().remove(&key);
+            env.events().publish(
+                (Symbol::new(&env, "arbiter_pool_manager_cleared"),),
+                (),
+            );
+        }
+    }
+
+    /// Return the current dedicated arbiter pool manager address, if set.
+    /// Returns `None` if no dedicated manager is configured (main admin has authority).
+    pub fn get_arbiter_pool_manager(env: Env) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Ext(ExtKey::ArbiterPoolManager))
     }
 
 }
