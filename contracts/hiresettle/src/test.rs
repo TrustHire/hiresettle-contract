@@ -2898,6 +2898,301 @@ fn test_platform_fee_event_not_emitted_when_fee_zero() {
 }
 
 // ============================================================
+// PLATFORM FEE FLOOR (issue #478)
+// ============================================================
+
+#[test]
+fn test_platform_fee_floor_raises_small_fees() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+
+    // Set 1% fee and a floor of 5_000_000 stroops
+    client.set_platform_fee(&company, &100, &treasury);
+    client.set_platform_fee_floor(&company, &5_000_000);
+
+    let eng_id = String::from_str(&env, "ENG-FLOOR");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-FLOOR",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    // Gross share: 30% of 1_000_000_000 = 300_000_000
+    // Percentage fee: 300_000_000 * 1% = 3_000_000 < floor
+    // Actual fee collected: 5_000_000 (the floor)
+    let gross = 300_000_000i128;
+    let floor = 5_000_000i128;
+    assert_eq!(token_client.balance(&treasury), floor);
+    assert_eq!(token_client.balance(&recruiter), gross - floor);
+}
+
+#[test]
+fn test_platform_fee_floor_does_not_lower_higher_fees() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+
+    // Set 5% fee and a floor of 1_000_000 stroops
+    client.set_platform_fee(&company, &500, &treasury);
+    client.set_platform_fee_floor(&company, &1_000_000);
+
+    let eng_id = String::from_str(&env, "ENG-HIGH-FEE");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-HIGH-FEE",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    // Gross share: 30% of 1_000_000_000 = 300_000_000
+    // Percentage fee: 300_000_000 * 5% = 15_000_000 > floor
+    // Actual fee: 15_000_000 (percentage wins)
+    let gross = 300_000_000i128;
+    let percentage_fee = 15_000_000i128;
+    assert_eq!(token_client.balance(&treasury), percentage_fee);
+    assert_eq!(token_client.balance(&recruiter), gross - percentage_fee);
+}
+
+#[test]
+fn test_platform_fee_floor_never_exceeds_payout() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+
+    client.set_platform_fee(&company, &100, &treasury);
+    // Set floor higher than the entire milestone payout
+    client.set_platform_fee_floor(&company, &500_000_000);
+
+    let eng_id = String::from_str(&env, "ENG-FLOOR-CAP");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-FLOOR-CAP",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    // Gross share: 30% of 1_000_000_000 = 300_000_000
+    // Floor: 500_000_000
+    // Actual fee: 300_000_000 (capped at the payout itself)
+    let gross = 300_000_000i128;
+    assert_eq!(token_client.balance(&treasury), gross);
+    assert_eq!(token_client.balance(&recruiter), 0);
+}
+
+#[test]
+fn test_platform_fee_floor_zero_is_noop() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+
+    client.set_platform_fee(&company, &100, &treasury);
+    client.set_platform_fee_floor(&company, &0);
+
+    assert_eq!(client.get_platform_fee_floor(), 0);
+
+    let eng_id = String::from_str(&env, "ENG-NO-FLOOR");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-NO-FLOOR",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    let gross = 300_000_000i128;
+    let percentage_fee = gross * 100 / 10_000;
+    assert_eq!(token_client.balance(&treasury), percentage_fee);
+}
+
+#[test]
+#[should_panic(expected = "InvalidFeeFloor")]
+fn test_platform_fee_floor_rejects_negative() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_platform_fee_floor(&company, &-1);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_platform_fee_floor_non_admin_rejected() {
+    let (env, contract_id, _token_id, _company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_platform_fee_floor(&recruiter, &1_000_000);
+}
+
+// ============================================================
+// PER-TOKEN PLATFORM FEE OVERRIDE (issue #479)
+// ============================================================
+
+#[test]
+fn test_token_platform_fee_overrides_global_rate() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+
+    // Set global rate to 2% but override this token to 4%
+    client.set_platform_fee(&company, &200, &treasury);
+    client.set_token_platform_fee(&company, &token_id, &400);
+
+    assert_eq!(client.get_platform_fee(), (200, treasury.clone()));
+    assert_eq!(client.get_token_platform_fee(&token_id), Some(400));
+
+    let eng_id = String::from_str(&env, "ENG-TOKEN-OVERRIDE");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-TOKEN-OVERRIDE",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    // Gross: 30% of 1_000_000_000 = 300_000_000
+    // Should use token override: 300_000_000 * 4% = 12_000_000
+    let gross = 300_000_000i128;
+    let token_fee = gross * 400 / 10_000;
+    assert_eq!(token_client.balance(&treasury), token_fee);
+    assert_eq!(token_client.balance(&recruiter), gross - token_fee);
+}
+
+#[test]
+fn test_token_platform_fee_removed_falls_back_to_global() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+
+    // Set global 2%, override to 5%, then remove override
+    client.set_platform_fee(&company, &200, &treasury);
+    client.set_token_platform_fee(&company, &token_id, &500);
+    assert_eq!(client.get_token_platform_fee(&token_id), Some(500));
+
+    client.remove_token_platform_fee(&company, &token_id);
+    assert_eq!(client.get_token_platform_fee(&token_id), None);
+
+    let eng_id = String::from_str(&env, "ENG-FALLBACK");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-FALLBACK",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    // Should use global rate: 300_000_000 * 2% = 6_000_000
+    let gross = 300_000_000i128;
+    let global_fee = gross * 200 / 10_000;
+    assert_eq!(token_client.balance(&treasury), global_fee);
+}
+
+#[test]
+fn test_token_platform_fee_applies_with_floor() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+
+    // Set global 1%, override to 0.5%, and a floor of 2_000_000
+    client.set_platform_fee(&company, &100, &treasury);
+    client.set_token_platform_fee(&company, &token_id, &50);
+    client.set_platform_fee_floor(&company, &2_000_000);
+
+    let eng_id = String::from_str(&env, "ENG-TOKEN-FLOOR");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-TOKEN-FLOOR",
+    );
+
+    client.submit_proof(
+        &recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(&env, "ipfs://proof"),
+    );
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    // Gross: 300_000_000
+    // Token override: 300_000_000 * 0.5% = 1_500_000 < floor
+    // Actual fee: 2_000_000 (floor wins)
+    let gross = 300_000_000i128;
+    let floor = 2_000_000i128;
+    assert_eq!(token_client.balance(&treasury), floor);
+    assert_eq!(token_client.balance(&recruiter), gross - floor);
+}
+
+#[test]
+#[should_panic(expected = "FeeTooHigh")]
+fn test_token_platform_fee_cap_validation() {
+    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_token_platform_fee(&company, &token_id, &501);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_token_platform_fee_non_admin_rejected() {
+    let (env, contract_id, token_id, _company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_token_platform_fee(&recruiter, &token_id, &100);
+}
+
+#[test]
+fn test_multiple_tokens_different_overrides() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    // Create second token
+    let token_admin2 = Address::generate(&env);
+    let token_id2 = env
+        .register_stellar_asset_contract_v2(token_admin2.clone())
+        .address();
+    let token_client2 = token::StellarAssetClient::new(&env, &token_id2);
+    token_client2.mint(&company, &500_000_000_000);
+
+    let treasury = Address::generate(&env);
+
+    // Global 2%, token1 3%, token2 1%
+    client.set_platform_fee(&company, &200, &treasury);
+    client.set_token_platform_fee(&company, &token_id, &300);
+    client.set_token_platform_fee(&company, &token_id2, &100);
+
+    assert_eq!(client.get_token_platform_fee(&token_id), Some(300));
+    assert_eq!(client.get_token_platform_fee(&token_id2), Some(100));
+}
+
+// ============================================================
 // #14 — emergency pause
 // ============================================================
 

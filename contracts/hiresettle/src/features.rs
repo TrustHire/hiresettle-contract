@@ -700,4 +700,125 @@ impl HireSettleContract {
             );
         }
     }
+
+    // ----------------------------------------------------------
+    // EMERGENCY SIGNER SELF-ROTATION BY M-OF-N VOTE
+    // ----------------------------------------------------------
+
+    /// Existing emergency signer nominates a replacement address via M-of-N vote.
+    /// When `threshold` signers vote for the same (old, new) pair within the window,
+    /// the old signer is replaced with the new one in the signer set.
+    ///
+    /// # Authorization
+    /// Requires auth from `current_signer`, who must already be in the emergency signers set.
+    ///
+    /// # Voting Window
+    /// Votes are cleared if the window elapses before threshold is reached. A fresh
+    /// vote batch must then start from zero.
+    ///
+    /// # Events
+    /// - `("emergency_signer_rotation_vote",)` with `(current_signer, new_signer, vote_count, threshold)`
+    /// - `("emergency_signer_rotated",)` with `(current_signer, new_signer)` when threshold is reached
+    ///
+    /// # Panics
+    /// - `"no emergency signers"` — no signer set configured.
+    /// - `"unauthorized"` — caller is not in the current signer set.
+    /// - `"DuplicateEmergencySigner"` — `new_signer` is already in the set.
+    /// - `"already voted"` — `current_signer` has already voted for this (old, new) pair.
+    pub fn rotate_emergency_signer(
+        env: Env,
+        current_signer: Address,
+        new_signer: Address,
+    ) {
+        current_signer.require_auth();
+        
+        let mut cfg: EmergencySignerConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::EmergencySigners)
+            .unwrap_or_else(|| panic!("no emergency signers"));
+
+        // Verify current_signer is in the set
+        let position = (0..cfg.signers.len())
+            .find(|&i| cfg.signers.get(i).unwrap() == current_signer);
+        if position.is_none() {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+        let pos = position.unwrap();
+
+        // Reject if new_signer is already in the set
+        for i in 0..cfg.signers.len() {
+            if cfg.signers.get(i).unwrap() == new_signer {
+                panic!("DuplicateEmergencySigner");
+            }
+        }
+
+        // Build rotation key: "rotation:{current}:{new}"
+        let rotation_key = String::from_str(
+            &env,
+            &alloc::format!(
+                "rotation:{}:{}",
+                current_signer.to_string(),
+                new_signer.to_string()
+            ),
+        );
+        let key = DataKey2::EmergencyVotes(rotation_key.clone());
+        let now = env.ledger().sequence();
+
+        let mut tally: EmergencyVoteTally = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(EmergencyVoteTally {
+                voters: Vec::new(&env),
+                started_at_ledger: now,
+            });
+
+        // Reset if window expired
+        if now > tally.started_at_ledger.saturating_add(cfg.vote_window_ledgers)
+            && !tally.voters.is_empty()
+        {
+            tally = EmergencyVoteTally {
+                voters: Vec::new(&env),
+                started_at_ledger: now,
+            };
+        }
+        if tally.voters.is_empty() {
+            tally.started_at_ledger = now;
+        }
+
+        // Reject duplicate votes
+        for i in 0..tally.voters.len() {
+            if tally.voters.get(i).unwrap() == current_signer {
+                panic!("already voted");
+            }
+        }
+        tally.voters.push_back(current_signer.clone());
+
+        if tally.voters.len() >= cfg.threshold {
+            // Replace current_signer with new_signer
+            cfg.signers.set(pos, new_signer.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey2::EmergencySigners, &cfg);
+            
+            // Clear the vote tally
+            env.storage().persistent().remove(&key);
+            
+            env.events().publish(
+                (Symbol::new(&env, "emergency_signer_rotated"),),
+                (current_signer, new_signer),
+            );
+        } else {
+            env.storage().persistent().set(&key, &tally);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, 100_000, 6_300_000);
+            
+            env.events().publish(
+                (Symbol::new(&env, "emergency_signer_rotation_vote"),),
+                (current_signer, new_signer, tally.voters.len(), cfg.threshold),
+            );
+        }
+    }
 }
