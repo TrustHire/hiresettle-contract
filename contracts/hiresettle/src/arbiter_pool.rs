@@ -369,4 +369,160 @@ impl HireSettleContract {
         stats.missed_vote_deadlines += 1;
         Self::store_arbiter_stats(env, arbiter, &stats);
     }
+
+    // ----------------------------------------------------------
+    // ARBITER CONFLICT-OF-INTEREST DECLARATIONS
+    // ----------------------------------------------------------
+
+    /// Arbiter declares a conflict of interest on an engagement, recusing
+    /// themselves from voting on all disputes for that engagement.
+    ///
+    /// # Caller
+    /// Must be an arbiter on the engagement's panel and must sign the transaction.
+    ///
+    /// # Behaviour
+    /// - The arbiter must be on the engagement's arbiter panel.
+    /// - The declaration is permanent for this engagement (cannot be undone by
+    ///   the arbiter, only by admin via `clear_conflict_declaration`).
+    /// - Once declared, the arbiter cannot vote on any disputes for this engagement.
+    /// - The declaration does not affect other engagements.
+    /// - `reason` is limited to 256 characters for storage efficiency.
+    ///
+    /// # Panics
+    /// - `"engagement not found"` — no engagement exists for `engagement_id`.
+    /// - `"unauthorized"` — the caller is not on the engagement's arbiter panel.
+    /// - `"ConflictReasonTooLong"` — `reason` exceeds 256 characters.
+    /// - `"ConflictAlreadyDeclared"` — an active declaration already exists.
+    ///
+    /// # Events
+    /// Emits `("conflict_declared", engagement_id)` with `arbiter`.
+    pub fn declare_conflict_of_interest(
+        env: Env,
+        arbiter: Address,
+        engagement_id: String,
+        reason: String,
+    ) {
+        arbiter.require_auth();
+
+        if reason.len() > 256 {
+            panic!("ConflictReasonTooLong");
+        }
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        // Verify arbiter is on the panel
+        if !engagement.arbiters.contains(&arbiter) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let key = DataKey2::ConflictDeclaration(engagement_id.clone(), arbiter.clone());
+
+        // Check if a declaration already exists
+        if let Some(existing) = env.storage().persistent().get::<_, ConflictDeclaration>(&key) {
+            if existing.active {
+                panic!("ConflictAlreadyDeclared");
+            }
+        }
+
+        let declaration = ConflictDeclaration {
+            arbiter: arbiter.clone(),
+            reason,
+            declared_at_ledger: env.ledger().sequence(),
+            active: true,
+        };
+
+        env.storage().persistent().set(&key, &declaration);
+        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (Symbol::new(&env, "conflict_declared"), engagement_id),
+            arbiter,
+        );
+    }
+
+    /// Return the conflict-of-interest declaration for an arbiter on an
+    /// engagement, if one exists and is active.
+    pub fn get_conflict_declaration(
+        env: Env,
+        engagement_id: String,
+        arbiter: Address,
+    ) -> Option<ConflictDeclaration> {
+        let key = DataKey2::ConflictDeclaration(engagement_id, arbiter);
+        let decl: Option<ConflictDeclaration> = env.storage().persistent().get(&key);
+        decl.filter(|d| d.active)
+    }
+
+    /// Return all active conflict declarations for an engagement.
+    /// Useful for displaying which arbiters have recused themselves.
+    pub fn get_engagement_conflicts(
+        env: Env,
+        engagement_id: String,
+    ) -> Vec<ConflictDeclaration> {
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let mut conflicts: Vec<ConflictDeclaration> = Vec::new(&env);
+
+        for arbiter in engagement.arbiters.iter() {
+            if let Some(decl) = Self::get_conflict_declaration(env.clone(), engagement_id.clone(), arbiter) {
+                conflicts.push_back(decl);
+            }
+        }
+
+        conflicts
+    }
+
+    /// Admin clears a conflict-of-interest declaration (e.g., if it was made
+    /// in error). The historical record is preserved but marked inactive.
+    ///
+    /// # Panics
+    /// - `"engagement not found"` — no engagement exists for `engagement_id`.
+    /// - `"unauthorized"` — caller is not the admin.
+    /// - `"NoConflictDeclaration"` — no active declaration exists.
+    ///
+    /// # Events
+    /// Emits `("conflict_cleared", engagement_id)` with `arbiter`.
+    pub fn clear_conflict_declaration(
+        env: Env,
+        admin: Address,
+        engagement_id: String,
+        arbiter: Address,
+    ) {
+        Self::assert_admin(&env, &admin);
+
+        let _ = Self::get_engagement_internal(&env, &engagement_id);
+
+        let key = DataKey2::ConflictDeclaration(engagement_id.clone(), arbiter.clone());
+        let mut declaration: ConflictDeclaration = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("NoConflictDeclaration"));
+
+        if !declaration.active {
+            panic!("NoConflictDeclaration");
+        }
+
+        declaration.active = false;
+        env.storage().persistent().set(&key, &declaration);
+        env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (Symbol::new(&env, "conflict_cleared"), engagement_id),
+            arbiter,
+        );
+    }
+
+    /// Check if an arbiter has an active conflict declaration for an engagement.
+    /// Used internally to prevent conflicted arbiters from voting.
+    pub(crate) fn has_conflict_of_interest(
+        env: &Env,
+        engagement_id: &String,
+        arbiter: &Address,
+    ) -> bool {
+        let key = DataKey2::ConflictDeclaration(engagement_id.clone(), arbiter.clone());
+        if let Some(decl) = env.storage().persistent().get::<_, ConflictDeclaration>(&key) {
+            decl.active
+        } else {
+            false
+        }
+    }
 }
