@@ -361,6 +361,9 @@ impl HireSettleContract {
     ///
     /// Duplicate votes for the same arbiter slot are rejected.
     ///
+    /// `rationale_hash` (optional) may contain an IPFS CID or other URI
+    /// documenting the arbiter's reasoning. Empty string is stored if `None`.
+    ///
     /// # Panics
     /// - `"MixedVoteModes"` — split votes have already been cast on this dispute
     ///   (issue #462).
@@ -370,6 +373,7 @@ impl HireSettleContract {
         engagement_id: String,
         milestone_index: u32,
         approve: bool,
+        rationale_hash: Option<String>,
     ) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
@@ -422,6 +426,7 @@ impl HireSettleContract {
         let weight = Self::arbiter_weight(&engagement, slot_index);
         record.voted.push_back(arbiter.clone());
         record.approvals.push_back(approve);
+        record.rationale_hashes.push_back(rationale_hash.unwrap_or(String::from_str(&env, "")));
         Self::record_arbiter_vote(&env, &arbiter, &engagement_id, milestone_index);
         if approve {
             record.approve_votes += 1;
@@ -509,6 +514,9 @@ impl HireSettleContract {
     /// exactly as it would have on a fresh `cast_arbiter_vote` (payout, fees,
     /// storage cleanup and events).
     ///
+    /// `rationale_hash` (optional) may update the arbiter's rationale
+    /// documentation. If `None`, the existing rationale is preserved.
+    ///
     /// # Panics
     /// - `"engagement is not active"` / `"milestone is not in disputed status"`.
     /// - `"unauthorized"` — caller is neither an arbiter nor an arbiter's delegate.
@@ -526,6 +534,7 @@ impl HireSettleContract {
         engagement_id: String,
         milestone_index: u32,
         approve: bool,
+        rationale_hash: Option<String>,
     ) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
@@ -593,6 +602,11 @@ impl HireSettleContract {
         }
         record.approvals.set(position, approve);
         record.changed.push_back(arbiter.clone());
+        
+        // Update rationale hash if provided
+        if let Some(hash) = rationale_hash {
+            record.rationale_hashes.set(position, hash);
+        }
 
         env.events().publish(
             (

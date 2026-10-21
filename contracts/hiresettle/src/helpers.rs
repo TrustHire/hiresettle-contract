@@ -452,6 +452,7 @@ impl HireSettleContract {
             reject_weight: 0,
             approvals: Vec::new(env),
             changed: Vec::new(env),
+            rationale_hashes: Vec::new(env),
         }
     }
 
