@@ -493,9 +493,9 @@ pub enum DataKey2 {
     /// Pending mutual settlement proposal for a disputed (engagement_id,
     /// milestone_index) (issue #564).
     DisputeSettlementProposal(String, u32),
-    /// Arbiter conflict-of-interest declaration for (engagement_id, arbiter_address).
-    /// When present, the arbiter has declared a conflict and is recused from all
-    /// disputes on that engagement.
-    ConflictDeclaration(String, Address),
+    /// Emergency M-of-N signer set and threshold (issue #474).
+    EmergencySigners,
+    /// Active emergency signer rotation vote.
+    EmergencySignerRotationVote,
 }
 
