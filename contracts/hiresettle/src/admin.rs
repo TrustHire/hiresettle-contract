@@ -1882,4 +1882,313 @@ impl HireSettleContract {
             .get(&DataKey::Ext(ExtKey::ArbiterPoolManager))
     }
 
+    // ----------------------------------------------------------
+    // EMERGENCY SIGNER SELF-ROTATION BY M-OF-N VOTE
+    // ----------------------------------------------------------
+
+    /// Configure the emergency signer set and threshold for self-rotation votes.
+    /// Only callable by admin. Overwrites any existing configuration.
+    ///
+    /// # Arguments
+    /// * `admin` - Current contract admin
+    /// * `signers` - Ordered list of addresses eligible to vote on signer rotation
+    /// * `threshold` - Number of votes (M) required to approve a rotation
+    /// * `vote_window_ledgers` - How long a rotation vote remains active
+    ///
+    /// # Panics
+    /// * If caller is not the admin
+    /// * If contract is paused
+    /// * If signers list is empty
+    /// * If threshold is zero or exceeds the number of signers
+    /// * If vote_window_ledgers is zero
+    pub fn set_emergency_signers(
+        env: Env,
+        admin: Address,
+        signers: Vec<Address>,
+        threshold: u32,
+        vote_window_ledgers: u32,
+    ) {
+        admin.require_auth();
+        Self::assert_not_paused(&env);
+        Self::assert_admin(&env, &admin);
+
+        if signers.is_empty() {
+            panic!("emergency signers cannot be empty");
+        }
+        if threshold == 0 {
+            panic!("threshold must be positive");
+        }
+        if threshold > signers.len() {
+            panic!("threshold cannot exceed signer count");
+        }
+        if vote_window_ledgers == 0 {
+            panic!("vote window must be positive");
+        }
+
+        let config = EmergencySignerConfig {
+            signers,
+            threshold,
+            vote_window_ledgers,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey2::EmergencySigners, &config);
+
+        env.events().publish(
+            (Symbol::new(&env, "emergency_signers_set"),),
+            (threshold, vote_window_ledgers),
+        );
+    }
+
+    /// Get the current emergency signer configuration.
+    ///
+    /// # Returns
+    /// `Some(signers, threshold, vote_window_ledgers)` if configured, `None` otherwise.
+    pub fn get_emergency_signers(env: Env) -> Option<(Vec<Address>, u32, u32)> {
+        let config: Option<EmergencySignerConfig> = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::EmergencySigners);
+
+        config.map(|c| (c.signers, c.threshold, c.vote_window_ledgers))
+    }
+
+    /// Propose a new emergency signer to replace an existing one. Initiates
+    /// an M-of-N voting round among the current signer set.
+    ///
+    /// # Arguments
+    /// * `proposer` - One of the current emergency signers
+    /// * `old_signer` - Address to be replaced (must be in current signer set)
+    /// * `new_signer` - Address to add as replacement
+    ///
+    /// # Panics
+    /// * If emergency signers not configured
+    /// * If proposer is not in the current signer set
+    /// * If old_signer is not in the current signer set
+    /// * If new_signer is already in the signer set
+    /// * If a vote is already in progress
+    pub fn propose_signer_rotation(
+        env: Env,
+        proposer: Address,
+        old_signer: Address,
+        new_signer: Address,
+    ) {
+        proposer.require_auth();
+
+        let config: EmergencySignerConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::EmergencySigners)
+            .unwrap_or_else(|| panic!("emergency signers not configured"));
+
+        // Verify proposer is a current signer
+        if !config.signers.contains(&proposer) {
+            panic!("proposer not in emergency signer set");
+        }
+
+        // Verify old_signer is in current set
+        if !config.signers.contains(&old_signer) {
+            panic!("old signer not in emergency signer set");
+        }
+
+        // Verify new_signer is not already in set
+        if config.signers.contains(&new_signer) {
+            panic!("new signer already in emergency signer set");
+        }
+
+        // Check if there's an active vote
+        let vote_key = DataKey2::EmergencySignerRotationVote;
+        if env.storage().persistent().has(&vote_key) {
+            panic!("signer rotation vote already in progress");
+        }
+
+        // Initialize the vote with the proposer's vote
+        let mut voters = Vec::new(&env);
+        voters.push_back(proposer.clone());
+
+        let vote = EmergencySignerRotationVote {
+            old_signer: old_signer.clone(),
+            new_signer: new_signer.clone(),
+            voters,
+            started_at_ledger: env.ledger().sequence(),
+        };
+
+        env.storage().persistent().set(&vote_key, &vote);
+
+        env.events().publish(
+            (Symbol::new(&env, "signer_rotation_proposed"),),
+            (proposer, old_signer, new_signer),
+        );
+    }
+
+    /// Cast a vote in favor of the active signer rotation proposal.
+    ///
+    /// # Arguments
+    /// * `voter` - One of the current emergency signers
+    ///
+    /// # Panics
+    /// * If no rotation vote is active
+    /// * If voter is not in the current signer set
+    /// * If voter has already voted
+    /// * If vote window has expired
+    ///
+    /// # Effects
+    /// When threshold is reached, automatically executes the rotation and
+    /// clears the vote.
+    pub fn vote_signer_rotation(env: Env, voter: Address) {
+        voter.require_auth();
+
+        let config: EmergencySignerConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::EmergencySigners)
+            .unwrap_or_else(|| panic!("emergency signers not configured"));
+
+        let vote_key = DataKey2::EmergencySignerRotationVote;
+        let mut vote: EmergencySignerRotationVote = env
+            .storage()
+            .persistent()
+            .get(&vote_key)
+            .unwrap_or_else(|| panic!("no active signer rotation vote"));
+
+        // Verify voter is a current signer
+        if !config.signers.contains(&voter) {
+            panic!("voter not in emergency signer set");
+        }
+
+        // Check vote window
+        let current_ledger = env.ledger().sequence();
+        if current_ledger > vote.started_at_ledger + config.vote_window_ledgers {
+            // Vote expired, clean it up
+            env.storage().persistent().remove(&vote_key);
+            panic!("vote window expired");
+        }
+
+        // Check for duplicate vote
+        if vote.voters.contains(&voter) {
+            panic!("already voted");
+        }
+
+        // Record vote
+        vote.voters.push_back(voter.clone());
+        let vote_count = vote.voters.len();
+
+        env.events().publish(
+            (Symbol::new(&env, "signer_rotation_vote_cast"),),
+            (voter.clone(), vote_count),
+        );
+
+        // Check if threshold reached
+        if vote_count >= config.threshold {
+            // Execute rotation
+            let mut new_signers = Vec::new(&env);
+            for signer in config.signers.iter() {
+                if signer == vote.old_signer {
+                    new_signers.push_back(vote.new_signer.clone());
+                } else {
+                    new_signers.push_back(signer);
+                }
+            }
+
+            let new_config = EmergencySignerConfig {
+                signers: new_signers.clone(),
+                threshold: config.threshold,
+                vote_window_ledgers: config.vote_window_ledgers,
+            };
+
+            env.storage()
+                .persistent()
+                .set(&DataKey2::EmergencySigners, &new_config);
+
+            // Clear the vote
+            env.storage().persistent().remove(&vote_key);
+
+            env.events().publish(
+                (Symbol::new(&env, "signer_rotation_executed"),),
+                (vote.old_signer, vote.new_signer, vote_count),
+            );
+        } else {
+            // Update vote record
+            env.storage().persistent().set(&vote_key, &vote);
+        }
+    }
+
+    /// Cancel an active signer rotation vote. Only callable by admin.
+    ///
+    /// # Arguments
+    /// * `admin` - Current contract admin
+    ///
+    /// # Panics
+    /// * If caller is not the admin
+    /// * If no rotation vote is active
+    pub fn cancel_signer_rotation(env: Env, admin: Address) {
+        admin.require_auth();
+        Self::assert_admin(&env, &admin);
+
+        let vote_key = DataKey2::EmergencySignerRotationVote;
+        if !env.storage().persistent().has(&vote_key) {
+            panic!("no active signer rotation vote");
+        }
+
+        let vote: EmergencySignerRotationVote = env.storage().persistent().get(&vote_key).unwrap();
+        env.storage().persistent().remove(&vote_key);
+
+        env.events().publish(
+            (Symbol::new(&env, "signer_rotation_cancelled"),),
+            (vote.old_signer, vote.new_signer),
+        );
+    }
+
+    /// Get the current active signer rotation vote, if any.
+    ///
+    /// # Returns
+    /// `Some((old_signer, new_signer, voters, started_at_ledger))` if a vote
+    /// is active, `None` otherwise.
+    pub fn get_signer_rotation_vote(
+        env: Env,
+    ) -> Option<(Address, Address, Vec<Address>, u32)> {
+        let vote_key = DataKey2::EmergencySignerRotationVote;
+        let vote: Option<EmergencySignerRotationVote> =
+            env.storage().persistent().get(&vote_key);
+
+        vote.map(|v| (v.old_signer, v.new_signer, v.voters, v.started_at_ledger))
+    }
+
+    /// Expire an active signer rotation vote after the vote window has passed.
+    /// Permissionless keeper function.
+    ///
+    /// # Arguments
+    /// * `engagement_id` - Unused, kept for consistency with other expire functions
+    ///
+    /// # Panics
+    /// * If no rotation vote is active
+    /// * If vote window has not yet expired
+    pub fn expire_signer_rotation(env: Env) {
+        let config: EmergencySignerConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::EmergencySigners)
+            .unwrap_or_else(|| panic!("emergency signers not configured"));
+
+        let vote_key = DataKey2::EmergencySignerRotationVote;
+        let vote: EmergencySignerRotationVote = env
+            .storage()
+            .persistent()
+            .get(&vote_key)
+            .unwrap_or_else(|| panic!("no active signer rotation vote"));
+
+        let current_ledger = env.ledger().sequence();
+        if current_ledger <= vote.started_at_ledger + config.vote_window_ledgers {
+            panic!("vote window not yet expired");
+        }
+
+        env.storage().persistent().remove(&vote_key);
+
+        env.events().publish(
+            (Symbol::new(&env, "signer_rotation_expired"),),
+            (vote.old_signer, vote.new_signer, vote.voters.len()),
+        );
+    }
+
 }

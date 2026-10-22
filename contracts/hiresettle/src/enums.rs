@@ -493,5 +493,9 @@ pub enum DataKey2 {
     /// Pending mutual settlement proposal for a disputed (engagement_id,
     /// milestone_index) (issue #564).
     DisputeSettlementProposal(String, u32),
+    /// Emergency M-of-N signer set and threshold (issue #474).
+    EmergencySigners,
+    /// Active emergency signer rotation vote.
+    EmergencySignerRotationVote,
 }
 

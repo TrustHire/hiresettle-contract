@@ -535,6 +535,16 @@ pub struct EmergencyVoteTally {
     pub voters: Vec<Address>,
     pub started_at_ledger: u32,
 }
+
+/// Active emergency signer rotation vote record.
+#[contracttype]
+#[derive(Clone)]
+pub struct EmergencySignerRotationVote {
+    pub old_signer: Address,
+    pub new_signer: Address,
+    pub voters: Vec<Address>,
+    pub started_at_ledger: u32,
+}
 /// Returned by `get_replacement_record` (issue #501).
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
