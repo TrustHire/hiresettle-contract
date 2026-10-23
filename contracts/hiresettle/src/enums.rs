@@ -215,6 +215,41 @@ pub enum ConfigKey {
     /// engagement's recognised referrer instead of the treasury (issue #543).
     /// Absent or `0` ⇒ the whole fee goes to the treasury.
     ReferrerFeeShareBps,
+    /// Recency-weighted rating half-life in ledgers (issue #596). 0 ⇒ no decay.
+    WeightedRatingHalfLife,
+    /// When true, the proof cooldown discount uses the recency-weighted
+    /// rating instead of the lifetime average (issue #596).
+    CooldownUsesRecentRating,
+    /// Ledgers arbiters have to vote after a dispute is raised (issue #560).
+    /// 0 (the default) disables `enforce_vote_deadline`.
+    ArbiterVoteDeadline,
+    /// TTL in ledgers for pending config change proposals
+    /// (default `DEFAULT_CONFIG_CHANGE_TTL`).
+    ConfigChangeTTL,
+    /// Quarantine escape delay in ledgers (issue #590). `0` (the default)
+    /// disables `emergency_exit`.
+    PauseEscapeDelay,
+    /// Ledger at which an engagement was last (re-)paused via
+    /// `pause_engagement` (issue #590). Cleared by `unpause_engagement`
+    /// so unpausing resets the escape timer.
+    QuarantineStartedAt(String),
+    /// Role of a company team member, scoped to `(company, member)`
+    /// (issue #575). Absent means the address is not a team member.
+    CompanyMember(Address, Address),
+    /// Per-function pause flag for `fn_id` (issue #589). Present and `true`
+    /// means the entry point is paused; absent means it runs normally.
+    FunctionPaused(u32),
+}
+
+/// Role of a company team member (issue #575): which company-gated actions
+/// the member may perform on any engagement of that company.
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum CompanyMemberRole {
+    /// May call `confirm_milestone` / `batch_confirm_milestones`.
+    Confirmer,
+    /// May call `raise_dispute` / `batch_raise_dispute`.
+    Disputer,
 }
 /// Contract storage key space. Instance keys reset between transactions;
 /// persistent keys survive across ledgers.
@@ -333,6 +368,11 @@ pub enum DataKey {
     /// Nested storage keys that would otherwise push `DataKey` past the
     /// Soroban union case limit of 50. See [`ExtKey`].
     Ext(ExtKey),
+    /// Emergency M-of-N signer set and threshold (issue #474). Lives on
+    /// `DataKey` because `DataKey2` is at the 50-variant union limit.
+    EmergencySigners,
+    /// Active emergency signer rotation vote.
+    EmergencySignerRotationVote,
 }
 
 /// Secondary storage-key space nested under [`DataKey::Ext`] so the primary
@@ -493,9 +533,34 @@ pub enum DataKey2 {
     /// Pending mutual settlement proposal for a disputed (engagement_id,
     /// milestone_index) (issue #564).
     DisputeSettlementProposal(String, u32),
-    /// Emergency M-of-N signer set and threshold (issue #474).
-    EmergencySigners,
-    /// Active emergency signer rotation vote.
-    EmergencySignerRotationVote,
 }
 
+
+/// Second overflow storage key space: [`DataKey2`] is at the Soroban
+/// 50-variant union limit.
+#[contracttype]
+pub enum DataKey3 {
+    /// Pending scheduled platform-fee change.
+    ScheduledPlatformFee,
+    /// Engagement ids funded in a given token.
+    TokenEngagements(Address),
+    /// Arbiter conflict-of-interest declaration for (engagement_id, arbiter).
+    ConflictDeclaration(String, Address),
+    /// Suspension record for a pool arbiter.
+    ArbiterSuspension(Address),
+    /// Recruiter's max slippage for payout token swaps.
+    RecruiterPayoutSlippage(Address),
+    /// Per-party dispute counters (issue #581).
+    PartyDisputeStats(Address),
+    /// Pending mutual cancellation proposal for an engagement.
+    CancellationProposal(String),
+    /// Running escrow locked per token (issue #578).
+    TokenLocked(Address),
+    /// Running pooled company balance per token (issue #578).
+    TokenPooled(Address),
+    /// Recency-weighted rating totals for a recruiter (issue #596).
+    RecruiterWeightedRating(Address),
+    /// Rotation vote tally for replacing (current_signer, new_signer) in the
+    /// emergency signer set.
+    EmergencyRotationVotes(Address, Address),
+}

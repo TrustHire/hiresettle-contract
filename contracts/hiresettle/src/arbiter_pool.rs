@@ -88,7 +88,7 @@ impl HireSettleContract {
         if until_ledger <= env.ledger().sequence() {
             panic!("InvalidUntilLedger");
         }
-        let key = DataKey2::ArbiterSuspension(arbiter.clone());
+        let key = DataKey3::ArbiterSuspension(arbiter.clone());
         env.storage().persistent().set(&key, &until_ledger);
         env.storage()
             .persistent()
@@ -110,7 +110,7 @@ impl HireSettleContract {
         }
         env.storage()
             .persistent()
-            .remove(&DataKey2::ArbiterSuspension(arbiter.clone()));
+            .remove(&DataKey3::ArbiterSuspension(arbiter.clone()));
         env.events()
             .publish((Symbol::new(&env, "arbiter_unsuspended"),), arbiter);
     }
@@ -121,7 +121,7 @@ impl HireSettleContract {
         let until: u32 = env
             .storage()
             .persistent()
-            .get(&DataKey2::ArbiterSuspension(arbiter))?;
+            .get(&DataKey3::ArbiterSuspension(arbiter))?;
         if until > env.ledger().sequence() {
             Some(until)
         } else {
@@ -134,7 +134,7 @@ impl HireSettleContract {
         let until: Option<u32> = env
             .storage()
             .persistent()
-            .get(&DataKey2::ArbiterSuspension(arbiter.clone()));
+            .get(&DataKey3::ArbiterSuspension(arbiter.clone()));
         until.map_or(false, |u| u > env.ledger().sequence())
     }
 
@@ -415,7 +415,7 @@ impl HireSettleContract {
             panic!("{}", ERR_UNAUTHORIZED);
         }
 
-        let key = DataKey2::ConflictDeclaration(engagement_id.clone(), arbiter.clone());
+        let key = DataKey3::ConflictDeclaration(engagement_id.clone(), arbiter.clone());
 
         // Check if a declaration already exists
         if let Some(existing) = env.storage().persistent().get::<_, ConflictDeclaration>(&key) {
@@ -447,7 +447,7 @@ impl HireSettleContract {
         engagement_id: String,
         arbiter: Address,
     ) -> Option<ConflictDeclaration> {
-        let key = DataKey2::ConflictDeclaration(engagement_id, arbiter);
+        let key = DataKey3::ConflictDeclaration(engagement_id, arbiter);
         let decl: Option<ConflictDeclaration> = env.storage().persistent().get(&key);
         decl.filter(|d| d.active)
     }
@@ -490,7 +490,7 @@ impl HireSettleContract {
 
         let _ = Self::get_engagement_internal(&env, &engagement_id);
 
-        let key = DataKey2::ConflictDeclaration(engagement_id.clone(), arbiter.clone());
+        let key = DataKey3::ConflictDeclaration(engagement_id.clone(), arbiter.clone());
         let mut declaration: ConflictDeclaration = env
             .storage()
             .persistent()
@@ -518,7 +518,7 @@ impl HireSettleContract {
         engagement_id: &String,
         arbiter: &Address,
     ) -> bool {
-        let key = DataKey2::ConflictDeclaration(engagement_id.clone(), arbiter.clone());
+        let key = DataKey3::ConflictDeclaration(engagement_id.clone(), arbiter.clone());
         if let Some(decl) = env.storage().persistent().get::<_, ConflictDeclaration>(&key) {
             decl.active
         } else {

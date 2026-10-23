@@ -107,6 +107,9 @@ pub struct Engagement {
     /// payout linearly over this many ledgers instead of paying it out in one
     /// lump sum (issue #466). Set at creation time from `EngagementConfig`.
     pub stream_duration_ledgers: Option<u32>,
+    /// Optional absolute deadline ledger copied from
+    /// `EngagementConfig::end_ledger` (issue #571). `None` means no deadline.
+    pub end_ledger: Option<u32>,
 }
 /// A lightweight read-only view of an engagement, suitable for list/dashboard APIs.
 ///
@@ -363,6 +366,11 @@ pub struct EngagementConfig {
     /// becomes `Active` once the recruiter calls `accept_engagement`
     /// (issue #569). Default `false` creates it `Active` as before.
     pub require_recruiter_acceptance: bool,
+    /// Optional absolute deadline ledger (issue #571). After this ledger,
+    /// anyone may call `close_engagement_at_end`. Must be after the last
+    /// retention milestone's earliest unlock when set. `None` keeps today's
+    /// behaviour.
+    pub end_ledger: Option<u32>,
 }
 /// Vesting record for a streamed milestone payout (issue #466), stored under
 /// `DataKey::StreamedPayout(engagement_id, milestone_index)`.
@@ -415,6 +423,16 @@ pub struct RatingSummary {
     pub total_stars: u64,
     /// Number of ratings received; always ≥ 1 once a summary exists.
     pub rating_count: u32,
+}
+/// Recency-weighted rating totals (issue #596), in `WEIGHTED_RATING_SCALE`
+/// fixed-point units. Decayed by the configured half-life on every read/write.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct WeightedRatingSummary {
+    pub weighted_stars: u64,
+    pub weighted_count: u64,
+    /// Ledger the totals were last decayed to.
+    pub last_ledger: u32,
 }
 /// Admin-configured curve for the rating-based proof cooldown discount
 /// (issue #470). See `get_effective_proof_cooldown`.
@@ -516,12 +534,22 @@ pub struct SplitAmendmentEntry {
 #[derive(Clone)]
 pub struct PendingConfigChange {
     pub change_id: u64,
+    /// Setter id to apply on acceptance; `FN_CONFIG_CHANGE_NOOP` for a bare
+    /// proposal from `propose_config_change`.
     pub fn_id: u32,
     pub u32_val: u32,
     pub i128_val: i128,
     pub bool_val: bool,
     pub address_val: Option<Address>,
     pub string_val: Option<String>,
+    /// Admin who proposed the change; the only address that may cancel it.
+    pub proposer: Address,
+    /// Ledger when the proposal was made.
+    pub proposed_at_ledger: u32,
+    /// Ledger after which the proposal can no longer be accepted.
+    pub expires_at_ledger: u32,
+    /// Set by `cancel_config_change`; a cancelled proposal cannot be accepted.
+    pub cancelled: bool,
 }
 /// Admin-configured emergency M-of-N signer set (issue #474).
 #[contracttype]

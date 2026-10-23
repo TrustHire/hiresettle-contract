@@ -54,6 +54,7 @@ impl HireSettleContract {
         reason: String,
     ) {
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_function_not_paused(&env, FN_RAISE_DISPUTE);
         Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         company.require_auth();
 
@@ -67,7 +68,7 @@ impl HireSettleContract {
             panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
         }
 
-        if !Self::is_authorized_company(&env, &company, &engagement.company) {
+        if !Self::is_company_disputer(&env, &company, &engagement.company) {
             panic!("{}", ERR_UNAUTHORIZED);
         }
 
@@ -86,6 +87,17 @@ impl HireSettleContract {
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
         Self::extend_engagement_ttl(&env, &engagement_id);
+        // Issue #575: identify the team member when the disputer is not the
+        // company itself.
+        if Self::company_member_role(&env, &engagement.company, &company).is_some() {
+            env.events().publish(
+                (
+                    Symbol::new(&env, "dispute_raised_by_member"),
+                    engagement_id.clone(),
+                ),
+                (milestone_index, company.clone()),
+            );
+        }
     }
 
     // ----------------------------------------------------------
@@ -126,6 +138,7 @@ impl HireSettleContract {
         reason: String,
     ) {
         Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_function_not_paused(&env, FN_RAISE_DISPUTE);
         company.require_auth();
 
         if milestone_indices.is_empty() {
@@ -141,7 +154,7 @@ impl HireSettleContract {
             panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
         }
 
-        if !Self::is_authorized_company(&env, &company, &engagement.company) {
+        if !Self::is_company_disputer(&env, &company, &engagement.company) {
             panic!("{}", ERR_UNAUTHORIZED);
         }
 
@@ -285,7 +298,7 @@ impl HireSettleContract {
     fn load_party_dispute_stats(env: &Env, party: &Address) -> DisputeStats {
         env.storage()
             .persistent()
-            .get(&DataKey2::PartyDisputeStats(party.clone()))
+            .get(&DataKey3::PartyDisputeStats(party.clone()))
             .unwrap_or(DisputeStats {
                 disputes_raised: 0,
                 disputes_won: 0,
@@ -295,7 +308,7 @@ impl HireSettleContract {
     }
 
     fn store_party_dispute_stats(env: &Env, party: &Address, stats: &DisputeStats) {
-        let key = DataKey2::PartyDisputeStats(party.clone());
+        let key = DataKey3::PartyDisputeStats(party.clone());
         env.storage().persistent().set(&key, stats);
         env.storage()
             .persistent()
@@ -486,12 +499,13 @@ impl HireSettleContract {
                 payment,
                 Some(arbiter),
             );
+            Self::finish_dispute_resolved(env, engagement, engagement_id, milestone_index, caller);
             // Issue #581: approve pays out — recruiter side wins.
-            Self::record_dispute_outcome(&env, &engagement, true);
+            Self::record_dispute_outcome(env, engagement, true);
         } else if record.reject_weight > total_weight - quorum {
-            Self::finish_dispute_rejected(&env, &mut engagement, &engagement_id, milestone_index);
+            Self::finish_dispute_rejected(env, engagement, engagement_id, milestone_index);
             // Issue #581: reject withholds — company wins.
-            Self::record_dispute_outcome(&env, &engagement, false);
+            Self::record_dispute_outcome(env, engagement, false);
         } else {
             let vote_key = DataKey::ArbiterVotes(engagement_id.clone(), milestone_index);
             env.storage().persistent().set(&vote_key, record);

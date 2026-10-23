@@ -66,7 +66,7 @@ impl HireSettleContract {
         // ISSUE #596 — recency-weighted rating. Decay the running weighted
         // totals by the configured half-life (in ledgers) before folding in
         // the new rating, so older ratings contribute exponentially less.
-        let weighted_key = DataKey2::RecruiterWeightedRating(engagement.recruiter.clone());
+        let weighted_key = DataKey3::RecruiterWeightedRating(engagement.recruiter.clone());
         let mut weighted: WeightedRatingSummary = env
             .storage()
             .persistent()
@@ -127,7 +127,7 @@ impl HireSettleContract {
     /// if they have never been rated. The stored weighted totals are decayed to
     /// the current ledger before the average is computed.
     pub fn get_recruiter_recent_rating(env: Env, recruiter: Address) -> Option<u32> {
-        let key = DataKey2::RecruiterWeightedRating(recruiter);
+        let key = DataKey3::RecruiterWeightedRating(recruiter);
         let mut weighted: WeightedRatingSummary = env.storage().persistent().get(&key)?;
         if weighted.weighted_count == 0 {
             return None;

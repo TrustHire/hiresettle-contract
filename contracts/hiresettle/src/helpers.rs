@@ -171,6 +171,25 @@ impl HireSettleContract {
         }
     }
 
+    /// Per-function pause flag (issue #589): `true` once the admin pauses
+    /// `fn_id` via `set_function_paused`, `false` by default. Read-only
+    /// queries never consult this flag.
+    pub(crate) fn is_function_paused_internal(env: &Env, fn_id: u32) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::FunctionPaused(fn_id)))
+            .unwrap_or(false)
+    }
+
+    /// Guard for state-changing entry points (issue #589). Layered under the
+    /// global pause: callers check `assert_not_paused` first, so the global
+    /// pause still overrides everything.
+    pub(crate) fn assert_function_not_paused(env: &Env, fn_id: u32) {
+        if Self::is_function_paused_internal(env, fn_id) {
+            panic!("FunctionPaused");
+        }
+    }
+
     pub(crate) fn is_milestone_on_hold_internal(
         env: &Env,
         engagement_id: &String,
@@ -567,7 +586,7 @@ impl HireSettleContract {
     /// Bumped at every mutation of those fields (funding, top-up, payouts)
     /// so it always matches that sum. Clamped at zero: never negative.
     pub(crate) fn add_token_locked(env: &Env, token: &Address, delta: i128) {
-        let key = DataKey2::TokenLocked(token.clone());
+        let key = DataKey3::TokenLocked(token.clone());
         let locked: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         let updated = locked.saturating_add(delta).max(0);
         env.storage().persistent().set(&key, &updated);
@@ -580,7 +599,7 @@ impl HireSettleContract {
     /// tracked separately from engagement escrow. Read via
     /// `get_token_pooled_balance`.
     pub(crate) fn add_token_pooled(env: &Env, token: &Address, delta: i128) {
-        let key = DataKey2::TokenPooled(token.clone());
+        let key = DataKey3::TokenPooled(token.clone());
         let pooled: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         let updated = pooled.saturating_add(delta).max(0);
         env.storage().persistent().set(&key, &updated);

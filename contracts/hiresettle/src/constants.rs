@@ -79,12 +79,25 @@ pub(crate) const MAX_RATING_STARS: u32 = 5;
 /// Default window for emergency pause votes to accumulate (issue #474).
 pub(crate) const DEFAULT_EMERGENCY_VOTE_WINDOW_LEDGERS: u32 = 1_728;
 /// Sensitive-setter function ids for cosigner gating (issue #473).
+/// `fn_id` of a bare `propose_config_change` proposal: accepting it applies nothing.
+pub(crate) const FN_CONFIG_CHANGE_NOOP: u32 = 0;
 pub(crate) const FN_SET_PLATFORM_FEE: u32 = 1;
 pub(crate) const FN_SET_TOKEN_ALLOWLIST_ENABLED: u32 = 2;
 pub(crate) const FN_SET_REFERRAL_DISCOUNT_BPS: u32 = 3;
 pub(crate) const FN_SET_ARBITER_FEE: u32 = 4;
 pub(crate) const FN_SET_MIN_AMOUNT: u32 = 5;
 pub(crate) const FN_SET_FEE_REBATE_BPS: u32 = 6;
+/// Per-function pause ids for `set_function_paused` (issue #589). They share
+/// the same `u32` id scheme as the sensitive setters but live in a disjoint
+/// range so the two features never collide.
+pub(crate) const FN_CREATE_ENGAGEMENT: u32 = 10;
+pub(crate) const FN_CONFIRM_MILESTONE: u32 = 11;
+pub(crate) const FN_BATCH_CONFIRM_MILESTONES: u32 = 12;
+pub(crate) const FN_RAISE_DISPUTE: u32 = 13;
+pub(crate) const FN_SUBMIT_PROOF: u32 = 14;
+pub(crate) const FN_CANCEL_ENGAGEMENT: u32 = 15;
+pub(crate) const FN_TOP_UP_ESCROW: u32 = 16;
+pub(crate) const FN_UNLOCK_MILESTONE: u32 = 17;
 
 /// Default risk-score points per active dispute (issue #480).
 pub(crate) const DEFAULT_RISK_DISPUTE_WEIGHT: u32 = 30;
@@ -100,3 +113,9 @@ pub(crate) const DEFAULT_RISK_EXTENSION_WEIGHT: u32 = 10;
 /// appended as the last topic of every `env.events().publish` call and is
 /// exposed to off-chain consumers via `get_event_schema_version()`.
 pub(crate) const EVENT_SCHEMA_VERSION: u32 = 1;
+
+/// Fixed-point scale for recency-weighted ratings (issue #596).
+pub(crate) const WEIGHTED_RATING_SCALE: u64 = 1_000_000;
+
+/// Default TTL, in ledgers, for a pending config change proposal (~1 day).
+pub(crate) const DEFAULT_CONFIG_CHANGE_TTL: u32 = 17_280;

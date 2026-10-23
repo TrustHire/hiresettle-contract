@@ -194,28 +194,113 @@ impl HireSettleContract {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
-    /// Cosigner accepts a pending config change, applying it to live state.
-    pub fn accept_config_change(env: Env, cosigner: Address, change_id: u64) {
-        cosigner.require_auth();
-        let stored: Address = env
-            .storage()
-            .persistent()
-            .get(&DataKey2::ConfigCosigner)
-            .unwrap_or_else(|| panic!("no config cosigner"));
-        if cosigner != stored {
-            panic!("{}", ERR_UNAUTHORIZED);
-        }
+    /// Admin sets the TTL, in ledgers, for pending config change proposals.
+    pub fn set_config_change_ttl(env: Env, admin: Address, ledgers: u32) {
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::Config(ConfigKey::ConfigChangeTTL), &ledgers);
+        env.events()
+            .publish((Symbol::new(&env, "config_change_ttl_set"),), ledgers);
+    }
+
+    /// Return the pending config change TTL in ledgers
+    /// (default `DEFAULT_CONFIG_CHANGE_TTL`, ~1 day).
+    pub fn get_config_change_ttl(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::ConfigChangeTTL))
+            .unwrap_or(DEFAULT_CONFIG_CHANGE_TTL)
+    }
+
+    /// Admin opens a bare config change proposal that applies nothing on
+    /// acceptance, and returns its `change_id`. Sensitive setters create
+    /// their own proposals via `defer_if_sensitive`.
+    pub fn propose_config_change(env: Env, admin: Address) -> u64 {
+        Self::assert_admin(&env, &admin);
+        Self::store_pending_config_change(
+            &env,
+            admin,
+            FN_CONFIG_CHANGE_NOOP,
+            0,
+            0,
+            false,
+            None,
+            None,
+        )
+    }
+
+    /// Accept a pending config change, applying it to live state. When a
+    /// config cosigner is configured only the cosigner may accept; otherwise
+    /// the proposer may.
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — caller may not accept this proposal.
+    /// - `"no pending config change"` — no proposal with this id.
+    /// - `"ConfigChangeExpired"` — the TTL elapsed.
+    /// - `"ConfigChangeCancelled"` — the proposer cancelled it.
+    ///
+    /// Expired and cancelled proposals stay stored (the panic rolls back any
+    /// write) but can never be accepted.
+    pub fn accept_config_change(env: Env, signer: Address, change_id: u64) {
+        signer.require_auth();
         let key = DataKey2::PendingConfigChange(change_id);
         let pending: PendingConfigChange = env
             .storage()
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic!("no pending config change"));
+        let cosigner: Option<Address> = env.storage().persistent().get(&DataKey2::ConfigCosigner);
+        let authorized = match cosigner {
+            Some(c) => signer == c,
+            None => signer == pending.proposer,
+        };
+        if !authorized {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let now = env.ledger().sequence();
+        if now > pending.expires_at_ledger {
+            env.events().publish(
+                (Symbol::new(&env, "config_change_expired"),),
+                (change_id, now),
+            );
+            panic!("ConfigChangeExpired");
+        }
+        if pending.cancelled {
+            env.events().publish(
+                (Symbol::new(&env, "config_change_cancelled"),),
+                (change_id, signer),
+            );
+            panic!("ConfigChangeCancelled");
+        }
+
         Self::apply_pending_config_change(&env, &pending);
         env.storage().persistent().remove(&key);
         env.events().publish(
             (Symbol::new(&env, "config_change_accepted"),),
             (change_id, pending.fn_id),
+        );
+    }
+
+    /// Proposer cancels a pending config change. The proposal stays readable
+    /// with `cancelled = true` and can no longer be accepted.
+    pub fn cancel_config_change(env: Env, proposer: Address, change_id: u64) {
+        proposer.require_auth();
+        let key = DataKey2::PendingConfigChange(change_id);
+        let mut pending: PendingConfigChange = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("no pending config change"));
+        if proposer != pending.proposer {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+        pending.cancelled = true;
+        env.storage().persistent().set(&key, &pending);
+        env.events().publish(
+            (Symbol::new(&env, "config_change_cancelled"),),
+            (change_id, proposer),
         );
     }
 
@@ -251,11 +336,37 @@ impl HireSettleContract {
         if !is_sensitive {
             return false;
         }
+        Self::store_pending_config_change(
+            env,
+            Self::get_admin_internal(env),
+            fn_id,
+            u32_val,
+            i128_val,
+            bool_val,
+            address_val,
+            string_val,
+        );
+        true
+    }
+
+    /// Store a new pending config change expiring after the configured TTL
+    /// and return its id.
+    fn store_pending_config_change(
+        env: &Env,
+        proposer: Address,
+        fn_id: u32,
+        u32_val: u32,
+        i128_val: i128,
+        bool_val: bool,
+        address_val: Option<Address>,
+        string_val: Option<String>,
+    ) -> u64 {
         let change_id: u64 = env
             .storage()
             .persistent()
             .get(&DataKey2::NextConfigChangeId)
             .unwrap_or(1u64);
+        let now = env.ledger().sequence();
         let pending = PendingConfigChange {
             change_id,
             fn_id,
@@ -264,6 +375,10 @@ impl HireSettleContract {
             bool_val,
             address_val,
             string_val,
+            proposer,
+            proposed_at_ledger: now,
+            expires_at_ledger: now.saturating_add(Self::get_config_change_ttl(env.clone())),
+            cancelled: false,
         };
         env.storage()
             .persistent()
@@ -273,13 +388,14 @@ impl HireSettleContract {
             .set(&DataKey2::NextConfigChangeId, &(change_id + 1));
         env.events().publish(
             (Symbol::new(env, "config_change_proposed"),),
-            (change_id, fn_id),
+            (change_id, fn_id, pending.expires_at_ledger),
         );
-        true
+        change_id
     }
 
     pub(crate) fn apply_pending_config_change(env: &Env, pending: &PendingConfigChange) {
         match pending.fn_id {
+            FN_CONFIG_CHANGE_NOOP => {}
             FN_SET_PLATFORM_FEE => {
                 let treasury = pending
                     .address_val
@@ -372,7 +488,7 @@ impl HireSettleContract {
         };
         env.storage()
             .persistent()
-            .set(&DataKey2::EmergencySigners, &cfg);
+            .set(&DataKey::EmergencySigners, &cfg);
         // Clear any in-flight tallies.
         env.storage()
             .persistent()
@@ -386,7 +502,7 @@ impl HireSettleContract {
     /// Return `(signers, threshold)`. Empty vec / 0 when unset.
     pub fn get_emergency_signers(env: Env) -> (Vec<Address>, u32) {
         let cfg: Option<EmergencySignerConfig> =
-            env.storage().persistent().get(&DataKey2::EmergencySigners);
+            env.storage().persistent().get(&DataKey::EmergencySigners);
         match cfg {
             Some(c) => (c.signers, c.threshold),
             None => (Vec::new(&env), 0),
@@ -405,12 +521,12 @@ impl HireSettleContract {
         if let Some(mut cfg) = env
             .storage()
             .persistent()
-            .get::<DataKey2, EmergencySignerConfig>(&DataKey2::EmergencySigners)
+            .get::<DataKey, EmergencySignerConfig>(&DataKey::EmergencySigners)
         {
             cfg.vote_window_ledgers = ledgers;
             env.storage()
                 .persistent()
-                .set(&DataKey2::EmergencySigners, &cfg);
+                .set(&DataKey::EmergencySigners, &cfg);
         }
         env.events().publish(
             (Symbol::new(&env, "emergency_vote_window_set"),),
@@ -430,7 +546,7 @@ impl HireSettleContract {
         let cfg: EmergencySignerConfig = env
             .storage()
             .persistent()
-            .get(&DataKey2::EmergencySigners)
+            .get(&DataKey::EmergencySigners)
             .unwrap_or_else(|| panic!("no emergency signers"));
 
         let is_signer = (0..cfg.signers.len()).any(|i| cfg.signers.get(i).unwrap() == signer);
@@ -796,7 +912,7 @@ impl HireSettleContract {
         let mut cfg: EmergencySignerConfig = env
             .storage()
             .persistent()
-            .get(&DataKey2::EmergencySigners)
+            .get(&DataKey::EmergencySigners)
             .unwrap_or_else(|| panic!("no emergency signers"));
 
         // Verify current_signer is in the set
@@ -814,16 +930,7 @@ impl HireSettleContract {
             }
         }
 
-        // Build rotation key: "rotation:{current}:{new}"
-        let rotation_key = String::from_str(
-            &env,
-            &alloc::format!(
-                "rotation:{}:{}",
-                current_signer.to_string(),
-                new_signer.to_string()
-            ),
-        );
-        let key = DataKey2::EmergencyVotes(rotation_key.clone());
+        let key = DataKey3::EmergencyRotationVotes(current_signer.clone(), new_signer.clone());
         let now = env.ledger().sequence();
 
         let mut tally: EmergencyVoteTally = env
@@ -861,7 +968,7 @@ impl HireSettleContract {
             cfg.signers.set(pos, new_signer.clone());
             env.storage()
                 .persistent()
-                .set(&DataKey2::EmergencySigners, &cfg);
+                .set(&DataKey::EmergencySigners, &cfg);
             
             // Clear the vote tally
             env.storage().persistent().remove(&key);

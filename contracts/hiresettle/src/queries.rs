@@ -102,7 +102,7 @@ impl HireSettleContract {
     pub fn get_token_tvl(env: Env, token: Address) -> i128 {
         env.storage()
             .persistent()
-            .get(&DataKey2::TokenLocked(token))
+            .get(&DataKey3::TokenLocked(token))
             .unwrap_or(0)
     }
 
@@ -111,7 +111,7 @@ impl HireSettleContract {
     pub fn get_token_pooled_balance(env: Env, token: Address) -> i128 {
         env.storage()
             .persistent()
-            .get(&DataKey2::TokenPooled(token))
+            .get(&DataKey3::TokenPooled(token))
             .unwrap_or(0)
     }
 
@@ -229,7 +229,7 @@ impl HireSettleContract {
     pub fn get_party_dispute_stats(env: Env, party: Address) -> DisputeStats {
         env.storage()
             .persistent()
-            .get(&DataKey2::PartyDisputeStats(party))
+            .get(&DataKey3::PartyDisputeStats(party))
             .unwrap_or(DisputeStats {
                 disputes_raised: 0,
                 disputes_won: 0,
@@ -377,7 +377,7 @@ impl HireSettleContract {
         let ids: Vec<String> = env
             .storage()
             .persistent()
-            .get(&DataKey2::TokenEngagements(token))
+            .get(&DataKey3::TokenEngagements(token))
             .unwrap_or_else(|| Vec::new(&env));
 
         let total = ids.len();
@@ -403,7 +403,7 @@ impl HireSettleContract {
         let ids: Vec<String> = env
             .storage()
             .persistent()
-            .get(&DataKey2::TokenEngagements(token))
+            .get(&DataKey3::TokenEngagements(token))
             .unwrap_or_else(|| Vec::new(&env));
         ids.len()
     }

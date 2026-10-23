@@ -31,6 +31,7 @@ impl HireSettleContract {
     ///   before `valid_after_ledger`.
     pub fn unlock_milestone(env: Env, engagement_id: String, milestone_index: u32) {
         Self::assert_not_paused(&env);
+        Self::assert_function_not_paused(&env, FN_UNLOCK_MILESTONE);
         Self::assert_engagement_not_paused(&env, &engagement_id);
         Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
@@ -147,6 +148,7 @@ impl HireSettleContract {
         proof_hash: String,
     ) {
         Self::assert_not_paused(&env);
+        Self::assert_function_not_paused(&env, FN_SUBMIT_PROOF);
         Self::assert_engagement_not_paused(&env, &engagement_id);
         Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
 
@@ -408,6 +410,7 @@ impl HireSettleContract {
         milestone_index: u32,
     ) {
         Self::assert_not_paused(&env);
+        Self::assert_function_not_paused(&env, FN_CONFIRM_MILESTONE);
         Self::assert_engagement_not_paused(&env, &engagement_id);
         Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         company.require_auth();
@@ -418,7 +421,7 @@ impl HireSettleContract {
             panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
         }
 
-        if !Self::is_authorized_company(&env, &company, &engagement.company) {
+        if !Self::is_company_confirmer(&env, &company, &engagement.company) {
             panic!("{}", ERR_UNAUTHORIZED);
         }
 
@@ -529,6 +532,17 @@ impl HireSettleContract {
             ),
             (milestone_index, payment),
         );
+        // Issue #575: identify the team member when the confirmer is not the
+        // company itself.
+        if Self::company_member_role(&env, &engagement.company, &company).is_some() {
+            env.events().publish(
+                (
+                    Symbol::new(&env, "milestone_confirmed_by_member"),
+                    engagement_id.clone(),
+                ),
+                (milestone_index, company.clone()),
+            );
+        }
 
         if all_done {
             env.events().publish(
@@ -909,6 +923,7 @@ impl HireSettleContract {
         milestone_indices: Vec<u32>,
     ) {
         Self::assert_not_paused(&env);
+        Self::assert_function_not_paused(&env, FN_BATCH_CONFIRM_MILESTONES);
         Self::assert_engagement_not_paused(&env, &engagement_id);
         // Issue #492: a held index rejects the whole batch.
         for i in 0..milestone_indices.len() {
@@ -927,7 +942,7 @@ impl HireSettleContract {
             panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
         }
 
-        if !Self::is_authorized_company(&env, &company, &engagement.company) {
+        if !Self::is_company_confirmer(&env, &company, &engagement.company) {
             panic!("{}", ERR_UNAUTHORIZED);
         }
 
@@ -996,6 +1011,17 @@ impl HireSettleContract {
                 ),
                 (idx, payment),
             );
+            // Issue #575: identify the team member when the confirmer is not
+            // the company itself.
+            if Self::company_member_role(&env, &engagement.company, &company).is_some() {
+                env.events().publish(
+                    (
+                        Symbol::new(&env, "milestone_confirmed_by_member"),
+                        engagement_id.clone(),
+                    ),
+                    (idx, company.clone()),
+                );
+            }
         }
 
         let all_done = (0..engagement.milestones.len()).all(|i| {

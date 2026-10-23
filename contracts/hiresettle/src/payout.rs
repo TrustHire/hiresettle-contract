@@ -66,7 +66,7 @@ impl HireSettleContract {
             .remove(&DataKey2::RecruiterPayoutToken(recruiter.clone()));
         env.storage()
             .persistent()
-            .remove(&DataKey2::RecruiterPayoutSlippage(recruiter.clone()));
+            .remove(&DataKey3::RecruiterPayoutSlippage(recruiter.clone()));
         env.events()
             .publish((Symbol::new(&env, "payout_token_cleared"), recruiter), ());
     }
@@ -147,7 +147,7 @@ impl HireSettleContract {
         if max_slippage_bps > FULL_SPLIT_BPS {
             panic!("InvalidSlippageBps");
         }
-        let key = DataKey2::RecruiterPayoutSlippage(recruiter.clone());
+        let key = DataKey3::RecruiterPayoutSlippage(recruiter.clone());
         env.storage().persistent().set(&key, &max_slippage_bps);
         env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
         env.events().publish(
@@ -161,7 +161,7 @@ impl HireSettleContract {
     pub fn get_recruiter_payout_slippage(env: Env, recruiter: Address) -> u32 {
         env.storage()
             .persistent()
-            .get(&DataKey2::RecruiterPayoutSlippage(recruiter))
+            .get(&DataKey3::RecruiterPayoutSlippage(recruiter))
             .unwrap_or(DEFAULT_MAX_SLIPPAGE_BPS)
     }
 

@@ -167,6 +167,7 @@ impl HireSettleContract {
         retention_days: Vec<u32>,
         config: EngagementConfig,
     ) -> String {
+        Self::assert_function_not_paused(&env, FN_CREATE_ENGAGEMENT);
         // Validate engagement_id format: non-empty, ≤ 64 chars, [A-Za-z0-9-] only.
         if engagement_id.is_empty() || engagement_id.len() > MAX_ENGAGEMENT_ID_LENGTH {
             panic!("InvalidEngagementId");
@@ -447,6 +448,19 @@ impl HireSettleContract {
             resolved_milestones.push_back(m);
         }
 
+        // Issue #571: an absolute deadline must lie in the future and after
+        // the last retention milestone's earliest unlock.
+        if let Some(end) = config.end_ledger {
+            if end <= current_ledger {
+                panic!("InvalidEndLedger");
+            }
+            for i in 0..resolved_milestones.len() {
+                if end <= resolved_milestones.get(i).unwrap().valid_after_ledger {
+                    panic!("InvalidEndLedger");
+                }
+            }
+        }
+
         // Issue #472: draw from the company pool when requested; otherwise
         // perform a fresh token transfer as before.
         if config.fund_from_pool {
@@ -498,6 +512,7 @@ impl HireSettleContract {
             tags: config.tags.clone(),
             is_public: config.is_public,
             stream_duration_ledgers: config.stream_duration_ledgers,
+            end_ledger: config.end_ledger,
         };
 
         env.storage()
@@ -628,15 +643,15 @@ impl HireSettleContract {
         let mut token_ids: Vec<String> = env
             .storage()
             .persistent()
-            .get(&DataKey2::TokenEngagements(engagement.token.clone()))
+            .get(&DataKey3::TokenEngagements(engagement.token.clone()))
             .unwrap_or_else(|| Vec::new(&env));
         token_ids.push_back(engagement_id.clone());
         env.storage().persistent().set(
-            &DataKey2::TokenEngagements(engagement.token.clone()),
+            &DataKey3::TokenEngagements(engagement.token.clone()),
             &token_ids,
         );
         env.storage().persistent().extend_ttl(
-            &DataKey2::TokenEngagements(engagement.token.clone()),
+            &DataKey3::TokenEngagements(engagement.token.clone()),
             100_000,
             6_300_000,
         );
@@ -1064,6 +1079,7 @@ impl HireSettleContract {
         engagement_id: String,
     ) {
         Self::assert_not_paused(&env);
+        Self::assert_function_not_paused(&env, FN_CANCEL_ENGAGEMENT);
         Self::assert_engagement_not_paused(&env, &engagement_id);
         company.require_auth();
         recruiter.require_auth();
@@ -1113,6 +1129,129 @@ impl HireSettleContract {
                 engagement_id.clone(),
             ),
             refund,
+        );
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #571 — HARD ENGAGEMENT END DATE
+    // ----------------------------------------------------------
+
+    /// Close an engagement past its absolute deadline
+    /// (`EngagementConfig::end_ledger`). Permissionless: anyone may call once
+    /// `current_ledger >= end_ledger`. `ProofSubmitted` milestones are
+    /// auto-confirmed with the same economics as `confirm_milestone`;
+    /// confirmed amounts stay paid and everything else unreleased is refunded
+    /// to the company, so `released + refunded == total_amount`.
+    ///
+    /// Idempotent: calling on a terminal engagement is a no-op. Engagements
+    /// without an `end_ledger` keep today's behaviour (`"NoEndLedger"`).
+    ///
+    /// # Panics
+    /// - `"NoEndLedger"` — the engagement has no deadline configured.
+    /// - `"EndLedgerNotReached"` — the current ledger is before `end_ledger`.
+    /// - `"engagement is not active"` — the engagement is not `Active`.
+    /// - `"DisputePending"` — a milestone is `Disputed`; resolve it first.
+    ///
+    /// # Events
+    /// Per auto-confirmed milestone `("milestone_confirmed", engagement_id)`
+    /// with `(milestone_index, payment)`, plus
+    /// `("engagement_closed_at_end", engagement_id)` with
+    /// `(released_amount, refund)`.
+    pub fn close_engagement_at_end(env: Env, engagement_id: String) {
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        // Idempotent: an already-closed engagement reports success silently.
+        if Self::is_terminal_status(&engagement.status) {
+            return;
+        }
+
+        let end = engagement
+            .end_ledger
+            .unwrap_or_else(|| panic!("NoEndLedger"));
+        if env.ledger().sequence() < end {
+            panic!("EndLedgerNotReached");
+        }
+
+        if engagement.status != EngagementStatus::Active {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+
+        for i in 0..engagement.milestones.len() {
+            if engagement.milestones.get(i).unwrap().status == MilestoneStatus::Disputed {
+                panic!("DisputePending");
+            }
+        }
+
+        let token_client = token::Client::new(&env, &engagement.token);
+        for i in 0..engagement.milestones.len() {
+            let m = engagement.milestones.get(i).unwrap();
+            if m.status != MilestoneStatus::ProofSubmitted {
+                continue;
+            }
+            let full_share = (engagement.total_amount * m.payment_percent as i128) / 100;
+            let payment = full_share - m.replacement_paid_out;
+            if payment > 0 {
+                let effective_bps = Self::payout_fee_bps(&env, &engagement_id, &engagement);
+                let fee_amount =
+                    Self::platform_fee_amount(&env, &engagement_id, payment, effective_bps);
+                let net_payment = payment - fee_amount;
+                engagement.released_amount += payment;
+                Self::add_token_locked(&env, &engagement.token, -payment);
+                if fee_amount > 0 {
+                    Self::collect_platform_fee(&env, &engagement, &engagement_id, i, fee_amount);
+                }
+                Self::distribute_recruiter_payout(&env, &engagement, net_payment, &token_client, true);
+            }
+            let mut updated = m.clone();
+            updated.status = MilestoneStatus::Confirmed;
+            engagement.milestones.set(i, updated);
+            Self::bond_clear_rejection(&env, &engagement_id, i);
+            Self::emit_milestone_status_changed(
+                &env,
+                &engagement_id,
+                i,
+                MilestoneStatus::ProofSubmitted,
+                MilestoneStatus::Confirmed,
+            );
+            env.events().publish(
+                (
+                    Symbol::new(&env, "milestone_confirmed"),
+                    engagement_id.clone(),
+                ),
+                (i, payment),
+            );
+        }
+
+        let refund = engagement.total_amount - engagement.released_amount;
+        // Issue #472: pool-funded engagements refund to the pool by default.
+        Self::refund_company_escrow(&env, &engagement, &engagement_id, refund);
+
+        let old_engagement_status = engagement.status.clone();
+        engagement.status = EngagementStatus::Cancelled;
+        engagement.last_activity_ledger = env.ledger().sequence();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::emit_engagement_status_changed(
+            &env,
+            &engagement_id,
+            old_engagement_status,
+            engagement.status.clone(),
+            None,
+        );
+
+        Self::decrement_company_active_count(&env, &engagement.company);
+        Self::settle_bonds(&env, &engagement);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "engagement_closed_at_end"),
+                engagement_id.clone(),
+            ),
+            (engagement.released_amount, refund),
         );
     }
 
@@ -1174,7 +1313,7 @@ impl HireSettleContract {
             proposed_at_ledger: now,
             expires_at_ledger: now.saturating_add(ttl),
         };
-        let key = DataKey2::CancellationProposal(engagement_id.clone());
+        let key = DataKey3::CancellationProposal(engagement_id.clone());
         env.storage().persistent().set(&key, &proposal);
         env.storage()
             .persistent()
@@ -1216,7 +1355,7 @@ impl HireSettleContract {
         Self::assert_engagement_not_paused(&env, &engagement_id);
         acceptor.require_auth();
 
-        let key = DataKey2::CancellationProposal(engagement_id.clone());
+        let key = DataKey3::CancellationProposal(engagement_id.clone());
         let proposal: CancellationProposal = env
             .storage()
             .persistent()
@@ -1323,7 +1462,7 @@ impl HireSettleContract {
         let proposal: CancellationProposal = env
             .storage()
             .persistent()
-            .get(&DataKey2::CancellationProposal(engagement_id))?;
+            .get(&DataKey3::CancellationProposal(engagement_id))?;
         if env.ledger().sequence() > proposal.expires_at_ledger {
             return None;
         }
@@ -1383,6 +1522,7 @@ impl HireSettleContract {
         from_pool: bool,
     ) {
         Self::assert_not_paused(env);
+        Self::assert_function_not_paused(env, FN_TOP_UP_ESCROW);
         Self::assert_engagement_not_paused(env, engagement_id);
         company.require_auth();
 

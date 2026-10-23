@@ -138,7 +138,7 @@ impl HireSettleContract {
         let scheduled: ScheduledPlatformFee = env
             .storage()
             .instance()
-            .get(&DataKey2::ScheduledPlatformFee)
+            .get(&DataKey3::ScheduledPlatformFee)
             .unwrap_or_else(|| panic!("NoScheduledFee"));
 
         if env.ledger().sequence() < scheduled.effective_after_ledger {
@@ -147,7 +147,7 @@ impl HireSettleContract {
 
         env.storage()
             .instance()
-            .remove(&DataKey2::ScheduledPlatformFee);
+            .remove(&DataKey3::ScheduledPlatformFee);
 
         env.events().publish(
             (Symbol::new(&env, "fee_change_applied"),),
@@ -171,12 +171,12 @@ impl HireSettleContract {
         let scheduled: ScheduledPlatformFee = env
             .storage()
             .instance()
-            .get(&DataKey2::ScheduledPlatformFee)
+            .get(&DataKey3::ScheduledPlatformFee)
             .unwrap_or_else(|| panic!("NoScheduledFee"));
 
         env.storage()
             .instance()
-            .remove(&DataKey2::ScheduledPlatformFee);
+            .remove(&DataKey3::ScheduledPlatformFee);
 
         env.events().publish(
             (Symbol::new(&env, "fee_change_cancelled"),),
@@ -189,7 +189,7 @@ impl HireSettleContract {
     pub fn get_scheduled_fee(env: Env) -> Option<(u32, Address, u32)> {
         env.storage()
             .instance()
-            .get::<DataKey2, ScheduledPlatformFee>(&DataKey2::ScheduledPlatformFee)
+            .get::<DataKey3, ScheduledPlatformFee>(&DataKey3::ScheduledPlatformFee)
             .map(|s| (s.bps, s.treasury, s.effective_after_ledger))
     }
 
@@ -234,7 +234,7 @@ impl HireSettleContract {
             .sequence()
             .saturating_add(Self::get_fee_change_delay(env.clone()));
         env.storage().instance().set(
-            &DataKey2::ScheduledPlatformFee,
+            &DataKey3::ScheduledPlatformFee,
             &ScheduledPlatformFee {
                 bps,
                 treasury: treasury.clone(),
@@ -895,6 +895,39 @@ impl HireSettleContract {
     }
 
     // ----------------------------------------------------------
+    // ISSUE #589 — PER-FUNCTION PAUSE
+    // ----------------------------------------------------------
+
+    /// Pause or unpause a single state-changing entry point identified by
+    /// `fn_id` (same `u32` id scheme as the sensitive setters, e.g.
+    /// `FN_CREATE_ENGAGEMENT`), without halting the rest of the contract.
+    /// Each guarded entry point checks its id in addition to the global and
+    /// per-engagement pauses; read-only queries are never pausable. The
+    /// global pause still overrides everything.
+    ///
+    /// # Events
+    /// `("function_pause_set",)` with `(fn_id, paused)`.
+    pub fn set_function_paused(env: Env, admin: Address, fn_id: u32, paused: bool) {
+        Self::assert_admin(&env, &admin);
+        let key = DataKey::Config(ConfigKey::FunctionPaused(fn_id));
+        if paused {
+            env.storage().persistent().set(&key, &true);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, 100_000, 6_300_000);
+        } else {
+            env.storage().persistent().remove(&key);
+        }
+        env.events()
+            .publish((Symbol::new(&env, "function_pause_set"),), (fn_id, paused));
+    }
+
+    /// Return `true` if the entry point `fn_id` is currently paused.
+    pub fn is_function_paused(env: Env, fn_id: u32) -> bool {
+        Self::is_function_paused_internal(&env, fn_id)
+    }
+
+    // ----------------------------------------------------------
     // ISSUE #239 — PER-ENGAGEMENT PAUSE (QUARANTINE)
     // ----------------------------------------------------------
 
@@ -972,6 +1005,16 @@ impl HireSettleContract {
             6_300_000,
         );
 
+        // Issue #590: (re-)pausing starts the escape-hatch quarantine timer.
+        let started_at_key =
+            DataKey::Config(ConfigKey::QuarantineStartedAt(engagement_id.clone()));
+        env.storage()
+            .persistent()
+            .set(&started_at_key, &env.ledger().sequence());
+        env.storage()
+            .persistent()
+            .extend_ttl(&started_at_key, 100_000, 6_300_000);
+
         env.events().publish(
             (
                 Symbol::new(&env, "engagement_paused"),
@@ -1003,11 +1046,131 @@ impl HireSettleContract {
             .persistent()
             .remove(&DataKey::EngagementPaused(engagement_id.clone()));
 
+        // Issue #590: unpausing resets the escape-hatch timer.
+        env.storage().persistent().remove(&DataKey::Config(
+            ConfigKey::QuarantineStartedAt(engagement_id.clone()),
+        ));
+
         env.events().publish(
             (
                 Symbol::new(&env, "engagement_unpaused"),
                 engagement_id.clone(),
             ),
+            caller,
+        );
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #590 — PAUSED-ENGAGEMENT ESCAPE HATCH
+    // ----------------------------------------------------------
+
+    /// Admin sets the quarantine escape delay in ledgers (e.g. ~180 days of
+    /// ledgers). After an engagement has been continuously paused longer than
+    /// this, either party may call `emergency_exit`. `0` (the default)
+    /// disables the escape hatch.
+    ///
+    /// # Events
+    /// `("pause_escape_ledgers_set",)` with `ledgers`.
+    pub fn set_pause_escape_ledgers(env: Env, admin: Address, ledgers: u32) {
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Config(ConfigKey::PauseEscapeDelay), &ledgers);
+        env.events()
+            .publish((Symbol::new(&env, "pause_escape_ledgers_set"),), ledgers);
+    }
+
+    /// Return the quarantine escape delay in ledgers (`0` when disabled).
+    pub fn get_pause_escape_ledgers(env: Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::PauseEscapeDelay))
+            .unwrap_or(0u32)
+    }
+
+    /// Refund path for an engagement frozen by `pause_engagement` when the
+    /// admin key is lost. Either the company or the recruiter (or their
+    /// co-signers) may call once the engagement has been continuously paused
+    /// longer than `get_pause_escape_ledgers`. Refunds all unreleased escrow
+    /// to the company, clears the quarantine markers and sets status
+    /// `Cancelled`.
+    ///
+    /// # Panics
+    /// - `"ContractPaused"` — the global pause is active.
+    /// - `"engagement is not active"` — the engagement is not `Active`.
+    /// - `"unauthorized"` — caller is neither party (nor a co-signer).
+    /// - `"EngagementNotPaused"` — the engagement is not quarantined.
+    /// - `"EscapeDisabled"` — no escape delay is configured.
+    /// - `"EscapeNotReady"` — the quarantine has not lasted long enough.
+    ///
+    /// # Events
+    /// `("emergency_exit", engagement_id)` with the caller, plus the
+    /// `Active → Cancelled` status-change event.
+    pub fn emergency_exit(env: Env, caller: Address, engagement_id: String) {
+        // Not available while the global pause is active.
+        Self::assert_not_paused(&env);
+        caller.require_auth();
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+
+        if engagement.status != EngagementStatus::Active {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+
+        if !Self::is_authorized_company(&env, &caller, &engagement.company)
+            && !Self::is_authorized_recruiter(&env, &caller, &engagement.recruiter)
+        {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        if !Self::is_engagement_paused_internal(&env, &engagement_id) {
+            panic!("EngagementNotPaused");
+        }
+        let escape = Self::get_pause_escape_ledgers(env.clone());
+        if escape == 0 {
+            panic!("EscapeDisabled");
+        }
+        let started_at_key =
+            DataKey::Config(ConfigKey::QuarantineStartedAt(engagement_id.clone()));
+        let paused_at: u32 = env
+            .storage()
+            .persistent()
+            .get(&started_at_key)
+            .unwrap_or_else(|| panic!("EngagementNotPaused"));
+        if env.ledger().sequence() < paused_at.saturating_add(escape) {
+            panic!("EscapeNotReady");
+        }
+
+        let refund = engagement.total_amount - engagement.released_amount;
+        // Issue #472: pool-funded engagements refund to the pool by default.
+        Self::refund_company_escrow(&env, &engagement, &engagement_id, refund);
+
+        let old_engagement_status = engagement.status.clone();
+        engagement.status = EngagementStatus::Cancelled;
+        engagement.last_activity_ledger = env.ledger().sequence();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::emit_engagement_status_changed(
+            &env,
+            &engagement_id,
+            old_engagement_status,
+            engagement.status.clone(),
+            Some(caller.clone()),
+        );
+
+        Self::decrement_company_active_count(&env, &engagement.company);
+        Self::settle_bonds(&env, &engagement);
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::EngagementPaused(engagement_id.clone()));
+        env.storage().persistent().remove(&started_at_key);
+
+        env.events().publish(
+            (Symbol::new(&env, "emergency_exit"), engagement_id.clone()),
             caller,
         );
     }
@@ -1886,74 +2049,6 @@ impl HireSettleContract {
     // EMERGENCY SIGNER SELF-ROTATION BY M-OF-N VOTE
     // ----------------------------------------------------------
 
-    /// Configure the emergency signer set and threshold for self-rotation votes.
-    /// Only callable by admin. Overwrites any existing configuration.
-    ///
-    /// # Arguments
-    /// * `admin` - Current contract admin
-    /// * `signers` - Ordered list of addresses eligible to vote on signer rotation
-    /// * `threshold` - Number of votes (M) required to approve a rotation
-    /// * `vote_window_ledgers` - How long a rotation vote remains active
-    ///
-    /// # Panics
-    /// * If caller is not the admin
-    /// * If contract is paused
-    /// * If signers list is empty
-    /// * If threshold is zero or exceeds the number of signers
-    /// * If vote_window_ledgers is zero
-    pub fn set_emergency_signers(
-        env: Env,
-        admin: Address,
-        signers: Vec<Address>,
-        threshold: u32,
-        vote_window_ledgers: u32,
-    ) {
-        admin.require_auth();
-        Self::assert_not_paused(&env);
-        Self::assert_admin(&env, &admin);
-
-        if signers.is_empty() {
-            panic!("emergency signers cannot be empty");
-        }
-        if threshold == 0 {
-            panic!("threshold must be positive");
-        }
-        if threshold > signers.len() {
-            panic!("threshold cannot exceed signer count");
-        }
-        if vote_window_ledgers == 0 {
-            panic!("vote window must be positive");
-        }
-
-        let config = EmergencySignerConfig {
-            signers,
-            threshold,
-            vote_window_ledgers,
-        };
-
-        env.storage()
-            .persistent()
-            .set(&DataKey2::EmergencySigners, &config);
-
-        env.events().publish(
-            (Symbol::new(&env, "emergency_signers_set"),),
-            (threshold, vote_window_ledgers),
-        );
-    }
-
-    /// Get the current emergency signer configuration.
-    ///
-    /// # Returns
-    /// `Some(signers, threshold, vote_window_ledgers)` if configured, `None` otherwise.
-    pub fn get_emergency_signers(env: Env) -> Option<(Vec<Address>, u32, u32)> {
-        let config: Option<EmergencySignerConfig> = env
-            .storage()
-            .persistent()
-            .get(&DataKey2::EmergencySigners);
-
-        config.map(|c| (c.signers, c.threshold, c.vote_window_ledgers))
-    }
-
     /// Propose a new emergency signer to replace an existing one. Initiates
     /// an M-of-N voting round among the current signer set.
     ///
@@ -1979,7 +2074,7 @@ impl HireSettleContract {
         let config: EmergencySignerConfig = env
             .storage()
             .persistent()
-            .get(&DataKey2::EmergencySigners)
+            .get(&DataKey::EmergencySigners)
             .unwrap_or_else(|| panic!("emergency signers not configured"));
 
         // Verify proposer is a current signer
@@ -1998,7 +2093,7 @@ impl HireSettleContract {
         }
 
         // Check if there's an active vote
-        let vote_key = DataKey2::EmergencySignerRotationVote;
+        let vote_key = DataKey::EmergencySignerRotationVote;
         if env.storage().persistent().has(&vote_key) {
             panic!("signer rotation vote already in progress");
         }
@@ -2042,10 +2137,10 @@ impl HireSettleContract {
         let config: EmergencySignerConfig = env
             .storage()
             .persistent()
-            .get(&DataKey2::EmergencySigners)
+            .get(&DataKey::EmergencySigners)
             .unwrap_or_else(|| panic!("emergency signers not configured"));
 
-        let vote_key = DataKey2::EmergencySignerRotationVote;
+        let vote_key = DataKey::EmergencySignerRotationVote;
         let mut vote: EmergencySignerRotationVote = env
             .storage()
             .persistent()
@@ -2099,7 +2194,7 @@ impl HireSettleContract {
 
             env.storage()
                 .persistent()
-                .set(&DataKey2::EmergencySigners, &new_config);
+                .set(&DataKey::EmergencySigners, &new_config);
 
             // Clear the vote
             env.storage().persistent().remove(&vote_key);
@@ -2126,7 +2221,7 @@ impl HireSettleContract {
         admin.require_auth();
         Self::assert_admin(&env, &admin);
 
-        let vote_key = DataKey2::EmergencySignerRotationVote;
+        let vote_key = DataKey::EmergencySignerRotationVote;
         if !env.storage().persistent().has(&vote_key) {
             panic!("no active signer rotation vote");
         }
@@ -2148,7 +2243,7 @@ impl HireSettleContract {
     pub fn get_signer_rotation_vote(
         env: Env,
     ) -> Option<(Address, Address, Vec<Address>, u32)> {
-        let vote_key = DataKey2::EmergencySignerRotationVote;
+        let vote_key = DataKey::EmergencySignerRotationVote;
         let vote: Option<EmergencySignerRotationVote> =
             env.storage().persistent().get(&vote_key);
 
@@ -2168,10 +2263,10 @@ impl HireSettleContract {
         let config: EmergencySignerConfig = env
             .storage()
             .persistent()
-            .get(&DataKey2::EmergencySigners)
+            .get(&DataKey::EmergencySigners)
             .unwrap_or_else(|| panic!("emergency signers not configured"));
 
-        let vote_key = DataKey2::EmergencySignerRotationVote;
+        let vote_key = DataKey::EmergencySignerRotationVote;
         let vote: EmergencySignerRotationVote = env
             .storage()
             .persistent()
