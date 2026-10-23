@@ -655,6 +655,25 @@ pub struct NextAction {
     pub available_at_ledger: u32,
 }
 
+/// Arbiter conflict-of-interest declaration for an engagement (new feature).
+/// When an arbiter declares a conflict, they are recused from voting on all
+/// disputes for that engagement, ensuring impartiality and transparency in
+/// the arbitration process.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConflictDeclaration {
+    /// The arbiter declaring the conflict of interest.
+    pub arbiter: Address,
+    /// Reason for the conflict (e.g., "Prior business relationship with company").
+    /// Limited to 256 characters for storage efficiency.
+    pub reason: String,
+    /// Ledger at which the declaration was made.
+    pub declared_at_ledger: u32,
+    /// Whether the declaration is currently active. Admin can clear declarations
+    /// if they were made in error, but the historical record is preserved.
+    pub active: bool,
+}
+
 /// Pending company-proposed partial release of a `ProofSubmitted` milestone
 /// (issue #550), stored under `DataKey2::PartialConfirmationProposal`.
 #[contracttype]
