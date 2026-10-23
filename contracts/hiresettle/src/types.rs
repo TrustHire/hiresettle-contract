@@ -170,6 +170,9 @@ pub struct ArbiterVoteRecord {
     /// Arbiter slots that have already used their one `change_arbiter_vote`
     /// on this dispute (issue #559).
     pub changed: Vec<Address>,
+    /// Optional rationale hash (e.g. IPFS CID) for each vote, parallel to `voted`.
+    /// Arbiters may provide documentation or reasoning for their decision.
+    pub rationale_hashes: Vec<String>,
 }
 /// Returned by `get_arbiter_vote_weights` (issue #460).
 #[contracttype]

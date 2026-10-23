@@ -283,6 +283,8 @@ pub struct ArbiterVoteRecord {
     pub reject_votes: u32,
     /// Addresses that have already cast a vote; prevents double-voting.
     pub voted: Vec<Address>,
+    /// Optional rationale hash (e.g. IPFS CID) for each vote, parallel to `voted`.
+    pub rationale_hashes: Vec<String>,
 }
 
 /// Role of a company team member (issue #575): which company-gated actions
@@ -2610,6 +2612,7 @@ impl HireSettleContract {
                     approve_votes: 0,
                     reject_votes: 0,
                     voted: Vec::new(&env),
+                    rationale_hashes: Vec::new(&env),
                 });
 
         // Reject duplicate votes.
@@ -2908,6 +2911,7 @@ impl HireSettleContract {
                     approve_votes: 0,
                     reject_votes: 0,
                     voted: Vec::new(&env),
+                    rationale_hashes: Vec::new(&env),
                 });
 
         let total_arbiters = engagement.arbiters.len();
@@ -2947,6 +2951,7 @@ impl HireSettleContract {
                     approve_votes: 0,
                     reject_votes: 0,
                     voted: Vec::new(&env),
+                    rationale_hashes: Vec::new(&env),
                 },
             );
             env.events().publish(
@@ -3232,6 +3237,7 @@ impl HireSettleContract {
                 approve_votes: 0,
                 reject_votes: 0,
                 voted: Vec::new(&env),
+                rationale_hashes: Vec::new(&env),
             });
 
         // Check for double voting
@@ -4522,6 +4528,7 @@ impl HireSettleContract {
                     approve_votes: 0,
                     reject_votes: 0,
                     voted: Vec::new(&env),
+                    rationale_hashes: Vec::new(&env),
                 });
         ArbiterVoteCounts {
             approve_votes: record.approve_votes,
