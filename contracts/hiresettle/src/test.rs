@@ -195,6 +195,7 @@ fn default_config() -> EngagementConfig {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        external_ref: None,
     }
 }
 
@@ -1419,6 +1420,7 @@ fn test_metadata_hash_present() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+        external_ref: None,
         },
     );
 
@@ -1482,6 +1484,7 @@ fn test_metadata_hash_empty_string_rejected() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+        external_ref: None,
         },
     );
 }
@@ -1514,6 +1517,7 @@ fn test_co_recruiter_60_40_split() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        external_ref: None,
     };
 
     client.create_engagement(
@@ -1611,6 +1615,7 @@ fn test_split_bps_over_10000_rejected() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        external_ref: None,
     };
 
     client.create_engagement(
@@ -1656,6 +1661,7 @@ fn test_co_recruiter_gets_remainder() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        external_ref: None,
     };
 
     client.create_engagement(
@@ -1716,6 +1722,7 @@ fn test_co_recruiter_summary_fields() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        external_ref: None,
     };
 
     client.create_engagement(
@@ -1765,6 +1772,7 @@ fn test_split_bps_10000_accepted() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        external_ref: None,
     };
 
     client.create_engagement(
@@ -7725,6 +7733,7 @@ fn test_co_recruiter_split_with_platform_fee() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        external_ref: None,
     };
 
     client.create_engagement(
@@ -8143,6 +8152,7 @@ fn test_co_recruiter_split_with_odd_percentage_remainder() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        external_ref: None,
     };
 
     client.create_engagement(
@@ -9559,6 +9569,7 @@ fn test_split_amendment_applies_to_future_not_past() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+        external_ref: None,
         },
     );
 
@@ -9616,6 +9627,7 @@ fn test_split_amendment_proposer_cannot_accept() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+        external_ref: None,
         },
     );
     client.propose_split_amendment(&recruiter, &eng_id, &5_000);
@@ -9644,6 +9656,7 @@ fn test_split_amendment_expires() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+        external_ref: None,
         },
     );
     client.set_amendment_ttl(&company, &100);
@@ -14210,4 +14223,83 @@ fn test_function_pause_blocks_only_that_entry_point() {
 
     client.set_function_paused(&company, &FN_CREATE_ENGAGEMENT, &false);
     assert!(!client.is_function_paused(&FN_CREATE_ENGAGEMENT));
+}
+
+// ============================================================
+// ISSUE #572 — EXTERNAL REFERENCE ID LOOKUP
+// ============================================================
+
+#[test]
+fn test_external_ref_lookup_cross_company_and_transfer_company() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_admin = token::StellarAssetClient::new(&env, &token_id);
+    let company2 = Address::generate(&env);
+    let company3 = Address::generate(&env);
+    token_admin.mint(&company2, &5_000_000_000);
+
+    let ext = String::from_str(&env, "ATS-JOB-42");
+    let mut cfg1 = default_config();
+    cfg1.external_ref = Some(ext.clone());
+    let eng1 = create_standard_engagement_with_config(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXT-1", cfg1,
+    );
+
+    // Same reference for a different company is allowed.
+    let mut cfg2 = default_config();
+    cfg2.external_ref = Some(ext.clone());
+    let eng2 = create_standard_engagement_with_config(
+        &env, &client, &token_id, &company2, &recruiter, &arbiter, "ENG-EXT-2", cfg2,
+    );
+
+    assert_eq!(
+        client.get_engagement_by_external_ref(&company, &ext),
+        Some(eng1.clone())
+    );
+    assert_eq!(
+        client.get_engagement_by_external_ref(&company2, &ext),
+        Some(eng2.clone())
+    );
+    assert_eq!(client.get_engagement(&eng1).external_ref, Some(ext.clone()));
+
+    // Survives `transfer_company` by being re-indexed under the new company.
+    client.transfer_company(&company, &eng1, &company3);
+    assert_eq!(client.get_engagement_by_external_ref(&company, &ext), None);
+    assert_eq!(
+        client.get_engagement_by_external_ref(&company3, &ext),
+        Some(eng1)
+    );
+}
+
+#[test]
+#[should_panic(expected = "DuplicateExternalRef")]
+fn test_external_ref_duplicate_same_company_panics() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let ext = String::from_str(&env, "ATS-DUP-1");
+    let mut cfg = default_config();
+    cfg.external_ref = Some(ext);
+    create_standard_engagement_with_config(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXT-A", cfg.clone(),
+    );
+    create_standard_engagement_with_config(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXT-B", cfg,
+    );
+}
+
+#[test]
+#[should_panic(expected = "InvalidExternalRef")]
+fn test_external_ref_too_long_panics() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let mut cfg = default_config();
+    cfg.external_ref = Some(String::from_str(
+        &env,
+        "01234567890123456789012345678901234567890123456789012345678901234",
+    ));
+    create_standard_engagement_with_config(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EXT-LONG", cfg,
+    );
 }

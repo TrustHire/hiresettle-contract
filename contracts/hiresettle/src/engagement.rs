@@ -349,6 +349,20 @@ impl HireSettleContract {
             }
         }
 
+        // Issue #572: external reference ID validation and per-company uniqueness.
+        if let Some(ref ext_ref) = config.external_ref {
+            if ext_ref.is_empty() || ext_ref.len() > MAX_EXTERNAL_REF_LENGTH {
+                panic!("InvalidExternalRef");
+            }
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey3::ExternalRef(company.clone(), ext_ref.clone()))
+            {
+                panic!("DuplicateExternalRef");
+            }
+        }
+
         // Issue #56: validate co-recruiter split basis points.
         if config.recruiter_split_bps > FULL_SPLIT_BPS {
             panic!("InvalidSplitBps");
@@ -513,6 +527,7 @@ impl HireSettleContract {
             is_public: config.is_public,
             stream_duration_ledgers: config.stream_duration_ledgers,
             end_ledger: config.end_ledger,
+            external_ref: config.external_ref.clone(),
         };
 
         env.storage()
@@ -520,6 +535,14 @@ impl HireSettleContract {
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
 
         Self::extend_engagement_ttl(&env, &engagement_id);
+
+        if let Some(ref ext_ref) = config.external_ref {
+            let ext_key = DataKey3::ExternalRef(company.clone(), ext_ref.clone());
+            env.storage().persistent().set(&ext_key, &engagement_id);
+            env.storage()
+                .persistent()
+                .extend_ttl(&ext_key, 100_000, 6_300_000);
+        }
 
         // Issue #547: credit payouts instead of pushing them.
         if config.pull_payouts {

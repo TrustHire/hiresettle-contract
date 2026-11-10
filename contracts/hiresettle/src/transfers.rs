@@ -229,6 +229,21 @@ impl HireSettleContract {
         }
 
         let old_company = engagement.company.clone();
+        if old_company != new_company {
+            if let Some(ref ext_ref) = engagement.external_ref {
+                let new_ext_key = DataKey3::ExternalRef(new_company.clone(), ext_ref.clone());
+                if env.storage().persistent().has(&new_ext_key) {
+                    panic!("DuplicateExternalRef");
+                }
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey3::ExternalRef(old_company.clone(), ext_ref.clone()));
+                env.storage().persistent().set(&new_ext_key, &engagement_id);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&new_ext_key, 100_000, 6_300_000);
+            }
+        }
         engagement.company = new_company.clone();
         engagement.last_activity_ledger = env.ledger().sequence();
 

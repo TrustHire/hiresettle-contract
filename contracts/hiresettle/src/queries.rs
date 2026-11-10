@@ -904,4 +904,21 @@ impl HireSettleContract {
             None => false,
         }
     }
+
+    // ----------------------------------------------------------
+    // ISSUE #572 — EXTERNAL REFERENCE ID LOOKUP
+    // ----------------------------------------------------------
+
+    /// Look up an engagement ID by its company-scoped external reference
+    /// (issue #572), or `None` if no engagement for `company` carries
+    /// `external_ref`. Read-only, permissionless.
+    pub fn get_engagement_by_external_ref(
+        env: Env,
+        company: Address,
+        external_ref: String,
+    ) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::ExternalRef(company, external_ref))
+    }
 }

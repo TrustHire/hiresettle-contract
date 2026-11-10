@@ -32,6 +32,8 @@ pub(crate) const DEFAULT_DISPUTE_WINDOW_LEDGERS: u32 = 51_840; // ~3 days
 pub(crate) const MAX_VERSION_LENGTH: u32 = 32;
 pub(crate) const MAX_PROOF_HASH_LENGTH: u32 = 200;
 pub(crate) const MAX_ENGAGEMENT_ID_LENGTH: u32 = 64;
+/// Maximum length (in characters) of an `EngagementConfig::external_ref` (issue #572).
+pub(crate) const MAX_EXTERNAL_REF_LENGTH: u32 = 64;
 pub(crate) const DEFAULT_MAX_ACTIVE_PER_COMPANY: u32 = 50;
 /// Default maximum number of replacements allowed per engagement (issue #31).
 pub(crate) const DEFAULT_MAX_REPLACEMENTS: u32 = 3;

@@ -563,4 +563,6 @@ pub enum DataKey3 {
     /// Rotation vote tally for replacing (current_signer, new_signer) in the
     /// emergency signer set.
     EmergencyRotationVotes(Address, Address),
+    /// Per-company external reference index `(company, external_ref) -> engagement_id` (issue #572).
+    ExternalRef(Address, String),
 }

@@ -110,6 +110,8 @@ pub struct Engagement {
     /// Optional absolute deadline ledger copied from
     /// `EngagementConfig::end_ledger` (issue #571). `None` means no deadline.
     pub end_ledger: Option<u32>,
+    /// Optional off-chain ATS/job-board reference identifier (issue #572).
+    pub external_ref: Option<String>,
 }
 /// A lightweight read-only view of an engagement, suitable for list/dashboard APIs.
 ///
@@ -371,6 +373,9 @@ pub struct EngagementConfig {
     /// retention milestone's earliest unlock when set. `None` keeps today's
     /// behaviour.
     pub end_ledger: Option<u32>,
+    /// Optional off-chain ATS/job-board reference identifier, max 64 chars,
+    /// unique per company (issue #572).
+    pub external_ref: Option<String>,
 }
 /// Vesting record for a streamed milestone payout (issue #466), stored under
 /// `DataKey::StreamedPayout(engagement_id, milestone_index)`.
