@@ -251,6 +251,23 @@ pub enum CompanyMemberRole {
     /// May call `raise_dispute` / `batch_raise_dispute`.
     Disputer,
 }
+/// Source of the base platform-fee basis points reported in [`crate::FeeQuote`]
+/// by `get_fee_quote` (issue #542).
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum FeeBaseSource {
+    /// The contract-wide default platform fee (`PlatformFee.bps`) or a
+    /// company-level override.
+    Global,
+    /// A live fee tier matched `engagement.total_amount` (`set_fee_tiers`).
+    Tier,
+    /// A per-token platform-fee override (`set_token_platform_fee`).
+    Token,
+    /// The tier rate snapshotted at creation (`snapshot_fee_tier`).
+    Snapshot,
+    /// The admin waived platform fees for this engagement (`waive_fee`).
+    Waived,
+}
 /// Contract storage key space. Instance keys reset between transactions;
 /// persistent keys survive across ledgers.
 #[contracttype]

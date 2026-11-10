@@ -1,7 +1,7 @@
 //! Contract data structs (`#[contracttype]`).
 
 use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
-use crate::{ActionKind, ActorRole, EngagementStatus, MilestoneKind, MilestoneStatus, TimelineKind};
+use crate::{ActionKind, ActorRole, EngagementStatus, FeeBaseSource, MilestoneKind, MilestoneStatus, TimelineKind};
 
 /// A payment and workflow checkpoint belonging to an [`Engagement`]'s `milestones`.
 #[contracttype]
@@ -742,4 +742,31 @@ pub struct DisputeSettlementProposal {
     pub dispute_cycle: u32,
     /// Ledger at which the proposal was made.
     pub proposed_at_ledger: u32,
+}
+
+/// Read-only fee breakdown for a milestone payout, returned by
+/// `get_fee_quote` (issue #542).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeeQuote {
+    /// Gross milestone amount before fees (`full_share - replacement_paid_out`).
+    pub gross_amount: i128,
+    /// Base platform-fee rate in basis points before referral discounts.
+    pub base_bps: u32,
+    /// Which rule supplied `base_bps` (`Global | Tier | Token | Snapshot | Waived`).
+    pub base_bps_source: FeeBaseSource,
+    /// Basis points deducted by a recognised referrer discount.
+    pub referral_discount_bps: u32,
+    /// Effective platform-fee rate in basis points after referral discount.
+    pub effective_bps: u32,
+    /// Extra amount added to the bps-derived fee by the platform fee floor.
+    pub floor_adjustment: i128,
+    /// Total platform fee deducted from `gross_amount`.
+    pub platform_fee: i128,
+    /// New company rebate credited from the collected platform fee.
+    pub rebate_credit: i128,
+    /// Arbiter fee deducted when the milestone is currently `Disputed` (`0` otherwise).
+    pub arbiter_fee: i128,
+    /// Net amount paid to the recruiter side (`gross_amount - platform_fee - arbiter_fee`).
+    pub net_recruiter_amount: i128,
 }

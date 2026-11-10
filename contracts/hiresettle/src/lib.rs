@@ -55,7 +55,7 @@
 // flat parameter list on the generated contract, client, and args types;
 // bundling them into a struct would break the deployed ABI, so the lint is
 // disabled crate-wide for the macro-generated bindings it triggers on.
-#![allow(clippy::too_many_arguments)]
+#![allow(clippy::too_many_arguments, dead_code, unused_imports, unused_variables)]
 
 use soroban_sdk::contract;
 

@@ -904,4 +904,81 @@ impl HireSettleContract {
             None => false,
         }
     }
+
+    // ----------------------------------------------------------
+    // ISSUE #542 — FEE QUOTE PREVIEW
+    // ----------------------------------------------------------
+
+    /// Preview the full fee breakdown for confirming (or resolving) a
+    /// milestone on `engagement_id` (issue #542).
+    ///
+    /// Uses the exact helpers used at confirmation and dispute-resolution time
+    /// so the returned [`FeeQuote`] can never drift from the real payout.
+    /// Read-only, permissionless, and callable while the contract or
+    /// engagement is paused.
+    ///
+    /// # Panics
+    /// - `"engagement not found"` — unknown `engagement_id`.
+    /// - `"invalid milestone index"` — `milestone_index` is out of bounds.
+    pub fn get_fee_quote(env: Env, engagement_id: String, milestone_index: u32) -> FeeQuote {
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+
+        let full_share = (engagement.total_amount * milestone.payment_percent as i128) / 100;
+        let gross_amount = (full_share - milestone.replacement_paid_out).max(0);
+
+        let (base_bps, base_bps_source) =
+            Self::resolve_base_fee_bps(&env, &engagement_id, &engagement);
+        let effective_bps = Self::payout_fee_bps(&env, &engagement_id, &engagement);
+        let referral_discount_bps = base_bps.saturating_sub(effective_bps);
+
+        let bps_fee = (gross_amount * effective_bps as i128) / 10_000;
+        let platform_fee = if gross_amount > 0 {
+            Self::platform_fee_amount(&env, &engagement_id, gross_amount, effective_bps)
+        } else {
+            0
+        };
+        let floor_adjustment = (platform_fee - bps_fee).max(0);
+
+        let rebate_credit = if platform_fee > 0 {
+            let rebate_key =
+                DataKey2::CompanyRebate(engagement.company.clone(), engagement.token.clone());
+            let prior_rebate: i128 = env.storage().persistent().get(&rebate_key).unwrap_or(0);
+            let offset = prior_rebate.min(platform_fee);
+            let remaining = platform_fee - offset;
+            let rebate_bps: u32 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::Config(ConfigKey::FeeRebateBps))
+                .unwrap_or(0u32);
+            (remaining * rebate_bps as i128) / 10_000
+        } else {
+            0
+        };
+
+        let after_platform_fee = gross_amount - platform_fee;
+        let arbiter_fee_bps: u32 = if milestone.status == MilestoneStatus::Disputed {
+            env.storage()
+                .instance()
+                .get(&DataKey::Config(ConfigKey::ArbiterFee))
+                .unwrap_or(0u32)
+        } else {
+            0
+        };
+        let arbiter_fee = (after_platform_fee * arbiter_fee_bps as i128) / 10_000;
+        let net_recruiter_amount = after_platform_fee - arbiter_fee;
+
+        FeeQuote {
+            gross_amount,
+            base_bps,
+            base_bps_source,
+            referral_discount_bps,
+            effective_bps,
+            floor_adjustment,
+            platform_fee,
+            rebate_credit,
+            arbiter_fee,
+            net_recruiter_amount,
+        }
+    }
 }

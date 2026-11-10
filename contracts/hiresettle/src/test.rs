@@ -14211,3 +14211,186 @@ fn test_function_pause_blocks_only_that_entry_point() {
     client.set_function_paused(&company, &FN_CREATE_ENGAGEMENT, &false);
     assert!(!client.is_function_paused(&FN_CREATE_ENGAGEMENT));
 }
+
+// ============================================================
+// ISSUE #542 — FEE QUOTE PREVIEW
+// ============================================================
+
+#[test]
+fn test_fee_quote_matches_confirm_across_tier_token_waiver_and_floor() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+    let referrer = Address::generate(&env);
+
+    // 1. Global base + referral discount + floor + rebate
+    client.set_platform_fee(&company, &300, &treasury);
+    client.add_referrer(&company, &referrer);
+    client.set_referral_discount_bps(&company, &50);
+    client.set_platform_fee_floor(&company, &10_000_000); // floor 10M > 2.5% of 300M (7.5M)
+    client.set_fee_rebate_bps(&company, &200); // 2% of collected fee
+
+    let eng_floor = String::from_str(&env, "ENG-QUOTE-FLOOR");
+    let mut cfg = default_config();
+    cfg.referrer = Some(referrer.clone());
+    client.create_engagement(
+        &eng_floor,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &cfg,
+    );
+
+    // Works while paused and has no side effects.
+    client.pause(&company);
+    let q_floor = client.get_fee_quote(&eng_floor, &0);
+    client.unpause(&company);
+
+    assert_eq!(q_floor.gross_amount, 300_000_000);
+    assert_eq!(q_floor.base_bps, 300);
+    assert_eq!(q_floor.base_bps_source, FeeBaseSource::Global);
+    assert_eq!(q_floor.referral_discount_bps, 50);
+    assert_eq!(q_floor.effective_bps, 250);
+    assert_eq!(q_floor.floor_adjustment, 2_500_000);
+    assert_eq!(q_floor.platform_fee, 10_000_000);
+    assert_eq!(q_floor.rebate_credit, 200_000);
+    assert_eq!(q_floor.arbiter_fee, 0);
+    assert_eq!(q_floor.net_recruiter_amount, 290_000_000);
+
+    let rec_before = token_client.balance(&recruiter);
+    let tr_before = token_client.balance(&treasury);
+    client.submit_proof(&recruiter, &eng_floor, &0, &String::from_str(&env, "ipfs://p"));
+    client.confirm_milestone(&company, &eng_floor, &0);
+    assert_eq!(
+        token_client.balance(&recruiter) - rec_before,
+        q_floor.net_recruiter_amount
+    );
+    assert_eq!(
+        token_client.balance(&treasury) - tr_before,
+        q_floor.platform_fee - q_floor.rebate_credit
+    );
+    assert_eq!(
+        client.get_company_rebate_balance(&company, &token_id),
+        q_floor.rebate_credit
+    );
+
+    // 2. Token override + Tier + Snapshot + Waiver
+    client.set_platform_fee_floor(&company, &0);
+    client.set_fee_rebate_bps(&company, &0);
+    client.redeem_company_rebate(&company, &token_id, &q_floor.rebate_credit);
+    client.set_token_platform_fee(&company, &token_id, &200);
+
+    let eng_tok = create_standard_engagement_with_config(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-QUOTE-TOK", default_config(),
+    );
+    let q_tok = client.get_fee_quote(&eng_tok, &0);
+    assert_eq!(q_tok.base_bps_source, FeeBaseSource::Token);
+    assert_eq!(q_tok.effective_bps, 200);
+    assert_eq!(q_tok.platform_fee, 6_000_000);
+    assert_eq!(q_tok.net_recruiter_amount, 294_000_000);
+
+    let rec_before = token_client.balance(&recruiter);
+    client.submit_proof(&recruiter, &eng_tok, &0, &String::from_str(&env, "ipfs://p"));
+    client.confirm_milestone(&company, &eng_tok, &0);
+    assert_eq!(
+        token_client.balance(&recruiter) - rec_before,
+        q_tok.net_recruiter_amount
+    );
+
+    // 3. Tier + Snapshot
+    client.set_fee_tiers(
+        &company,
+        &vec![
+            &env,
+            FeeTier {
+                threshold: 500_000_000,
+                bps: 100,
+            },
+        ],
+    );
+    let mut snap_cfg = default_config();
+    snap_cfg.snapshot_fee_tier = true;
+    let eng_snap = create_standard_engagement_with_config(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-QUOTE-SNAP", snap_cfg,
+    );
+    let eng_tier = create_standard_engagement_with_config(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-QUOTE-TIER", default_config(),
+    );
+
+    let q_tier = client.get_fee_quote(&eng_tier, &0);
+    assert_eq!(q_tier.base_bps_source, FeeBaseSource::Tier);
+    assert_eq!(q_tier.effective_bps, 100);
+    assert_eq!(q_tier.platform_fee, 3_000_000);
+    assert_eq!(q_tier.net_recruiter_amount, 297_000_000);
+
+    let rec_before = token_client.balance(&recruiter);
+    client.submit_proof(&recruiter, &eng_tier, &0, &String::from_str(&env, "ipfs://p"));
+    client.confirm_milestone(&company, &eng_tier, &0);
+    assert_eq!(
+        token_client.balance(&recruiter) - rec_before,
+        q_tier.net_recruiter_amount
+    );
+
+    // Snapshot preserves 100 bps even if tiers are cleared, and waiver zeroes fees.
+    client.set_fee_tiers(&company, &Vec::new(&env));
+    let q_snap = client.get_fee_quote(&eng_snap, &0);
+    assert_eq!(q_snap.base_bps_source, FeeBaseSource::Snapshot);
+    assert_eq!(q_snap.effective_bps, 100);
+
+    client.waive_platform_fee(&company, &eng_snap);
+    let q_waived = client.get_fee_quote(&eng_snap, &0);
+    assert_eq!(q_waived.base_bps_source, FeeBaseSource::Waived);
+    assert_eq!(q_waived.platform_fee, 0);
+    assert_eq!(q_waived.net_recruiter_amount, 300_000_000);
+
+    let rec_before = token_client.balance(&recruiter);
+    client.submit_proof(&recruiter, &eng_snap, &0, &String::from_str(&env, "ipfs://p"));
+    client.confirm_milestone(&company, &eng_snap, &0);
+    assert_eq!(
+        token_client.balance(&recruiter) - rec_before,
+        q_waived.net_recruiter_amount
+    );
+}
+
+#[test]
+fn test_fee_quote_includes_arbiter_fee_when_disputed() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+
+    client.set_platform_fee(&company, &200, &treasury);
+    client.set_arbiter_fee(&company, &100);
+
+    let eng_id = create_standard_engagement_with_config(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-QUOTE-DISP", default_config(),
+    );
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://p"));
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "check"));
+
+    let quote = client.get_fee_quote(&eng_id, &0);
+    assert_eq!(quote.gross_amount, 300_000_000);
+    assert_eq!(quote.platform_fee, 6_000_000);
+    // Arbiter fee is 1% of after_platform_fee (294_000_000) = 2_940_000.
+    assert_eq!(quote.arbiter_fee, 2_940_000);
+    assert_eq!(quote.net_recruiter_amount, 291_060_000);
+
+    let rec_before = token_client.balance(&recruiter);
+    let arb_before = token_client.balance(&arbiter);
+    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &true, &None);
+    assert_eq!(
+        token_client.balance(&recruiter) - rec_before,
+        quote.net_recruiter_amount
+    );
+    assert_eq!(token_client.balance(&arbiter) - arb_before, quote.arbiter_fee);
+}

@@ -299,26 +299,57 @@ impl HireSettleContract {
         engagement_id: &String,
         engagement: &Engagement,
     ) -> u32 {
-        if Self::is_fee_waived_internal(env, engagement_id) {
+        let (base_bps, source) = Self::resolve_base_fee_bps(env, engagement_id, engagement);
+        if source == FeeBaseSource::Waived {
             return 0;
         }
-        let base_bps = match env
+        Self::apply_referral_discount(env, base_bps, &engagement.referrer)
+    }
+
+    /// Resolve the base platform-fee bps and its [`FeeBaseSource`] for
+    /// `engagement`, shared by [`Self::payout_fee_bps`] and `get_fee_quote`
+    /// (issue #542) so the quote never drifts from confirmation-time math.
+    pub(crate) fn resolve_base_fee_bps(
+        env: &Env,
+        engagement_id: &String,
+        engagement: &Engagement,
+    ) -> (u32, FeeBaseSource) {
+        if Self::is_fee_waived_internal(env, engagement_id) {
+            return (0, FeeBaseSource::Waived);
+        }
+        if let Some(bps) = env
             .storage()
             .persistent()
             .get::<DataKey2, u32>(&DataKey2::CompanyPlatformFee(engagement.company.clone()))
         {
-            Some(bps) => bps,
-            None => {
-                let global_bps = Self::get_platform_fee_internal(env).bps;
-                Self::engagement_tier_bps(
-                    env,
-                    engagement_id,
-                    Self::token_base_bps(env, &engagement.token, global_bps),
-                    engagement.total_amount,
-                )
+            return (bps, FeeBaseSource::Global);
+        }
+        if let Some(bps) = env
+            .storage()
+            .persistent()
+            .get::<DataKey2, u32>(&DataKey2::FeeTierSnapshot(engagement_id.clone()))
+        {
+            return (bps, FeeBaseSource::Snapshot);
+        }
+        let tiers: Option<Vec<FeeTier>> = env.storage().persistent().get(&DataKey::FeeTiers);
+        if let Some(tiers) = tiers {
+            let mut i = tiers.len();
+            while i > 0 {
+                i -= 1;
+                let tier = tiers.get(i).unwrap();
+                if engagement.total_amount >= tier.threshold {
+                    return (tier.bps, FeeBaseSource::Tier);
+                }
             }
-        };
-        Self::apply_referral_discount(env, base_bps, &engagement.referrer)
+        }
+        if let Some(bps) = env
+            .storage()
+            .persistent()
+            .get::<DataKey2, u32>(&DataKey2::TokenPlatformFee(engagement.token.clone()))
+        {
+            return (bps, FeeBaseSource::Token);
+        }
+        (Self::get_platform_fee_internal(env).bps, FeeBaseSource::Global)
     }
 
 
