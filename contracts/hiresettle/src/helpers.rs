@@ -688,6 +688,32 @@ impl HireSettleContract {
                 );
             }
         };
+        if let Some(ref splits) = engagement.recruiter_splits {
+            let mut non_primary_sum: i128 = 0;
+            for i in 0..splits.len() {
+                let (addr, bps) = splits.get(i).unwrap();
+                if addr != engagement.recruiter {
+                    let share = (net_payment * bps as i128) / (FULL_SPLIT_BPS as i128);
+                    non_primary_sum += share;
+                }
+            }
+            let primary_payment = net_payment - non_primary_sum;
+            let mut primary_paid = false;
+            for i in 0..splits.len() {
+                let (addr, bps) = splits.get(i).unwrap();
+                if addr == engagement.recruiter {
+                    pay(&engagement.recruiter, primary_payment);
+                    primary_paid = true;
+                } else {
+                    let share = (net_payment * bps as i128) / (FULL_SPLIT_BPS as i128);
+                    pay(&addr, share);
+                }
+            }
+            if !primary_paid && primary_payment > 0 {
+                pay(&engagement.recruiter, primary_payment);
+            }
+            return;
+        }
         match &engagement.co_recruiter {
             Some(co_recruiter) => {
                 let split = engagement.recruiter_split_bps as i128;
@@ -697,6 +723,34 @@ impl HireSettleContract {
                 pay(co_recruiter, co_payment);
             }
             None => pay(&engagement.recruiter, net_payment),
+        }
+    }
+
+    /// Validate an N-way `recruiter_splits` list (issue #574): 1..=5 distinct
+    /// addresses with positive bps summing to 10 000.
+    pub(crate) fn validate_recruiter_splits(splits: &Vec<(Address, u32)>) {
+        if splits.is_empty() {
+            panic!("EmptyRecruiterSplits");
+        }
+        if splits.len() > MAX_RECRUITER_SPLITS {
+            panic!("TooManyRecruiterSplits");
+        }
+        let mut total: u64 = 0;
+        for i in 0..splits.len() {
+            let (addr, bps) = splits.get(i).unwrap();
+            if bps == 0 || bps > FULL_SPLIT_BPS {
+                panic!("InvalidSplitBps");
+            }
+            for j in 0..i {
+                let (prev, _) = splits.get(j).unwrap();
+                if prev == addr {
+                    panic!("DuplicateRecruiterSplit");
+                }
+            }
+            total += bps as u64;
+        }
+        if total != FULL_SPLIT_BPS as u64 {
+            panic!("InvalidSplitBps");
         }
     }
 

@@ -8,6 +8,8 @@ pub(crate) const MAX_ARBITER_FEE_BPS: u32 = 200;
 /// (issue #549): 100 bps = 1 %.
 pub(crate) const DEFAULT_MAX_SLIPPAGE_BPS: u32 = 100;
 pub(crate) const FULL_SPLIT_BPS: u32 = 10_000;
+/// Maximum number of entries in `EngagementConfig::recruiter_splits` (issue #574).
+pub(crate) const MAX_RECRUITER_SPLITS: u32 = 5;
 /// Upper bound for `set_min_quorum_ratio_bps` (issue #502): 10 000 bps
 /// (100 %) forces a unanimous panel.
 pub(crate) const MAX_MIN_QUORUM_RATIO_BPS: u32 = 10_000;

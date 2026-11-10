@@ -110,6 +110,9 @@ pub struct Engagement {
     /// Optional absolute deadline ledger copied from
     /// `EngagementConfig::end_ledger` (issue #571). `None` means no deadline.
     pub end_ledger: Option<u32>,
+    /// Optional N-way recruiter payout split `(recipient, bps)` summing to
+    /// 10 000, max 5 entries, mutually exclusive with `co_recruiter` (issue #574).
+    pub recruiter_splits: Option<Vec<(Address, u32)>>,
 }
 /// A lightweight read-only view of an engagement, suitable for list/dashboard APIs.
 ///
@@ -371,6 +374,9 @@ pub struct EngagementConfig {
     /// retention milestone's earliest unlock when set. `None` keeps today's
     /// behaviour.
     pub end_ledger: Option<u32>,
+    /// Optional N-way recruiter payout split `(recipient, bps)` summing to
+    /// 10 000, max 5 entries, mutually exclusive with `co_recruiter` (issue #574).
+    pub recruiter_splits: Option<Vec<(Address, u32)>>,
 }
 /// Vesting record for a streamed milestone payout (issue #466), stored under
 /// `DataKey::StreamedPayout(engagement_id, milestone_index)`.
@@ -742,4 +748,21 @@ pub struct DisputeSettlementProposal {
     pub dispute_cycle: u32,
     /// Ledger at which the proposal was made.
     pub proposed_at_ledger: u32,
+}
+
+/// Pending N-way recruiter split renegotiation (issue #574). Requires
+/// approval from all listed recruiters plus the company.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MultiSplitAmendmentProposal {
+    /// Address that proposed the new split list.
+    pub proposer: Address,
+    /// Proposed `(recipient, bps)` list summing to 10 000 (max 5 entries).
+    pub new_splits: Vec<(Address, u32)>,
+    /// Addresses that have already approved this proposal.
+    pub approvals: Vec<Address>,
+    /// Ledger at which the proposal was created.
+    pub proposed_at_ledger: u32,
+    /// Last ledger at which the proposal can still be approved.
+    pub expires_at_ledger: u32,
 }

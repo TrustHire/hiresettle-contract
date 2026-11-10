@@ -354,6 +354,15 @@ impl HireSettleContract {
             panic!("InvalidSplitBps");
         }
 
+        // Issue #574: validate N-way `recruiter_splits` and enforce mutual
+        // exclusivity with `co_recruiter`.
+        if let Some(ref splits) = config.recruiter_splits {
+            if config.co_recruiter.is_some() {
+                panic!("MutuallyExclusiveRecruiterSplit");
+            }
+            Self::validate_recruiter_splits(splits);
+        }
+
         // Issue #466: a zero-length stream would divide by zero when vesting.
         if config.stream_duration_ledgers == Some(0) {
             panic!("InvalidStreamDuration");
@@ -513,6 +522,7 @@ impl HireSettleContract {
             is_public: config.is_public,
             stream_duration_ledgers: config.stream_duration_ledgers,
             end_ledger: config.end_ledger,
+            recruiter_splits: config.recruiter_splits.clone(),
         };
 
         env.storage()
@@ -1818,6 +1828,150 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, 100_000, 6_300_000);
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #574 — MULTI-RECRUITER SPLIT RENEGOTIATION
+    // ----------------------------------------------------------
+
+    /// Propose a new N-way `recruiter_splits` list on an active engagement
+    /// configured with `recruiter_splits` (issue #574).
+    ///
+    /// Requires signatures from all listed recruiters plus the company before
+    /// taking effect; the proposer's approval is recorded immediately and each
+    /// remaining party calls [`Self::approve_recruiter_splits`].
+    pub fn propose_recruiter_splits(
+        env: Env,
+        proposer: Address,
+        engagement_id: String,
+        new_splits: Vec<(Address, u32)>,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        proposer.require_auth();
+
+        Self::validate_recruiter_splits(&new_splits);
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        if engagement.status != EngagementStatus::Active {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+        let required = Self::required_multi_split_signers(&env, &engagement);
+        if !required.contains(&proposer) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let now = env.ledger().sequence();
+        let ttl = Self::get_amendment_ttl(env.clone());
+        let mut approvals = Vec::new(&env);
+        approvals.push_back(proposer.clone());
+        let proposal = MultiSplitAmendmentProposal {
+            proposer: proposer.clone(),
+            new_splits,
+            approvals,
+            proposed_at_ledger: now,
+            expires_at_ledger: now.saturating_add(ttl),
+        };
+        let key = DataKey3::MultiSplitAmendmentProposal(engagement_id.clone());
+        env.storage().persistent().set(&key, &proposal);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (Symbol::new(&env, "recruiter_splits_proposed"), engagement_id),
+            (proposer, proposal.expires_at_ledger),
+        );
+    }
+
+    /// Approve a pending N-way `recruiter_splits` renegotiation (issue #574).
+    /// Once all listed recruiters plus the company have approved, the new
+    /// split list replaces `engagement.recruiter_splits`.
+    pub fn approve_recruiter_splits(env: Env, signer: Address, engagement_id: String) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        signer.require_auth();
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+        if engagement.status != EngagementStatus::Active {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+
+        let key = DataKey3::MultiSplitAmendmentProposal(engagement_id.clone());
+        let mut proposal: MultiSplitAmendmentProposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("no pending amendment proposal"));
+
+        if env.ledger().sequence() > proposal.expires_at_ledger {
+            env.storage().persistent().remove(&key);
+            panic!("amendment_expired");
+        }
+
+        let required = Self::required_multi_split_signers(&env, &engagement);
+        if !required.contains(&signer) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+        if proposal.approvals.contains(&signer) {
+            panic!("duplicate vote");
+        }
+        proposal.approvals.push_back(signer.clone());
+
+        let all_approved =
+            (0..required.len()).all(|i| proposal.approvals.contains(&required.get(i).unwrap()));
+        if all_approved {
+            engagement.recruiter_splits = Some(proposal.new_splits.clone());
+            engagement.last_activity_ledger = env.ledger().sequence();
+            env.storage()
+                .persistent()
+                .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+            Self::extend_engagement_ttl(&env, &engagement_id);
+            env.storage().persistent().remove(&key);
+            env.events().publish(
+                (Symbol::new(&env, "recruiter_splits_amended"), engagement_id),
+                signer,
+            );
+        } else {
+            env.storage().persistent().set(&key, &proposal);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, 100_000, 6_300_000);
+        }
+    }
+
+    /// Return the pending N-way recruiter split proposal, or `None` if absent/expired.
+    pub fn get_pending_recruiter_splits(
+        env: Env,
+        engagement_id: String,
+    ) -> Option<MultiSplitAmendmentProposal> {
+        let proposal: MultiSplitAmendmentProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::MultiSplitAmendmentProposal(engagement_id))?;
+        if env.ledger().sequence() > proposal.expires_at_ledger {
+            return None;
+        }
+        Some(proposal)
+    }
+
+    fn required_multi_split_signers(env: &Env, engagement: &Engagement) -> Vec<Address> {
+        let splits = engagement
+            .recruiter_splits
+            .as_ref()
+            .unwrap_or_else(|| panic!("no recruiter_splits"));
+        let mut signers = Vec::new(env);
+        signers.push_back(engagement.company.clone());
+        if !signers.contains(&engagement.recruiter) {
+            signers.push_back(engagement.recruiter.clone());
+        }
+        for i in 0..splits.len() {
+            let (addr, _) = splits.get(i).unwrap();
+            if !signers.contains(&addr) {
+                signers.push_back(addr);
+            }
+        }
+        signers
     }
 
 }

@@ -563,4 +563,6 @@ pub enum DataKey3 {
     /// Rotation vote tally for replacing (current_signer, new_signer) in the
     /// emergency signer set.
     EmergencyRotationVotes(Address, Address),
+    /// Pending N-way recruiter split renegotiation proposal (issue #574).
+    MultiSplitAmendmentProposal(String),
 }

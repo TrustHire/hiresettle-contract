@@ -195,6 +195,7 @@ fn default_config() -> EngagementConfig {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        recruiter_splits: None,
     }
 }
 
@@ -1419,6 +1420,7 @@ fn test_metadata_hash_present() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+        recruiter_splits: None,
         },
     );
 
@@ -1482,6 +1484,7 @@ fn test_metadata_hash_empty_string_rejected() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+        recruiter_splits: None,
         },
     );
 }
@@ -1514,6 +1517,7 @@ fn test_co_recruiter_60_40_split() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        recruiter_splits: None,
     };
 
     client.create_engagement(
@@ -1611,6 +1615,7 @@ fn test_split_bps_over_10000_rejected() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        recruiter_splits: None,
     };
 
     client.create_engagement(
@@ -1656,6 +1661,7 @@ fn test_co_recruiter_gets_remainder() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        recruiter_splits: None,
     };
 
     client.create_engagement(
@@ -1716,6 +1722,7 @@ fn test_co_recruiter_summary_fields() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        recruiter_splits: None,
     };
 
     client.create_engagement(
@@ -1765,6 +1772,7 @@ fn test_split_bps_10000_accepted() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        recruiter_splits: None,
     };
 
     client.create_engagement(
@@ -7725,6 +7733,7 @@ fn test_co_recruiter_split_with_platform_fee() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        recruiter_splits: None,
     };
 
     client.create_engagement(
@@ -8143,6 +8152,7 @@ fn test_co_recruiter_split_with_odd_percentage_remainder() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        recruiter_splits: None,
     };
 
     client.create_engagement(
@@ -9559,6 +9569,7 @@ fn test_split_amendment_applies_to_future_not_past() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+        recruiter_splits: None,
         },
     );
 
@@ -9616,6 +9627,7 @@ fn test_split_amendment_proposer_cannot_accept() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+        recruiter_splits: None,
         },
     );
     client.propose_split_amendment(&recruiter, &eng_id, &5_000);
@@ -9644,6 +9656,7 @@ fn test_split_amendment_expires() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+        recruiter_splits: None,
         },
     );
     client.set_amendment_ttl(&company, &100);
@@ -14210,4 +14223,123 @@ fn test_function_pause_blocks_only_that_entry_point() {
 
     client.set_function_paused(&company, &FN_CREATE_ENGAGEMENT, &false);
     assert!(!client.is_function_paused(&FN_CREATE_ENGAGEMENT));
+}
+
+// ============================================================
+// ISSUE #574 — MULTIPLE CO-RECRUITERS (N-WAY PAYOUT SPLIT)
+// ============================================================
+
+#[test]
+fn test_recruiter_splits_n_way_rounding_dust_and_renegotiation() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let co1 = Address::generate(&env);
+    let co2 = Address::generate(&env);
+
+    // 3334 + 3333 + 3333 = 10_000 bps on a 1_000_003 total amount (30% = 300_000).
+    // Let's use total_amount = 1_000_000 (milestone 0 is 30% = 300_000) with 3_333 bps each for co1/co2:
+    // co1 gets 300_000 * 3333 / 10_000 = 99_990
+    // co2 gets 300_000 * 3333 / 10_000 = 99_990
+    // primary gets 300_000 - 199_980 = 100_020 (99_990 + 30 bps + rounding dust).
+    let mut cfg = default_config();
+    cfg.recruiter_splits = Some(vec![
+        &env,
+        (recruiter.clone(), 3_334u32),
+        (co1.clone(), 3_333u32),
+        (co2.clone(), 3_333u32),
+    ]);
+
+    let eng_id = String::from_str(&env, "ENG-NSPLIT-1");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_003,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &cfg,
+    );
+
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://m0"));
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    let gross_m0 = (1_000_003i128 * 30) / 100; // 300_000
+    let r_bal = token_client.balance(&recruiter);
+    let c1_bal = token_client.balance(&co1);
+    let c2_bal = token_client.balance(&co2);
+    assert_eq!(c1_bal, (gross_m0 * 3_333) / 10_000);
+    assert_eq!(c2_bal, (gross_m0 * 3_333) / 10_000);
+    assert_eq!(r_bal + c1_bal + c2_bal, gross_m0);
+
+    // Renegotiate split across all listed recruiters + company: 5000 / 2500 / 2500
+    let new_splits = vec![
+        &env,
+        (recruiter.clone(), 5_000u32),
+        (co1.clone(), 2_500u32),
+        (co2.clone(), 2_500u32),
+    ];
+    client.propose_recruiter_splits(&recruiter, &eng_id, &new_splits);
+    assert!(client.get_pending_recruiter_splits(&eng_id).is_some());
+
+    client.approve_recruiter_splits(&co1, &eng_id);
+    assert!(client.get_pending_recruiter_splits(&eng_id).is_some());
+
+    client.approve_recruiter_splits(&co2, &eng_id);
+    assert!(client.get_pending_recruiter_splits(&eng_id).is_some());
+
+    // Final required approval from company applies the new split.
+    client.approve_recruiter_splits(&company, &eng_id);
+    assert!(client.get_pending_recruiter_splits(&eng_id).is_none());
+    assert_eq!(
+        client.get_engagement(&eng_id).recruiter_splits,
+        Some(new_splits)
+    );
+}
+
+#[test]
+#[should_panic(expected = "MutuallyExclusiveRecruiterSplit")]
+fn test_recruiter_splits_mutually_exclusive_with_co_recruiter() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let co1 = Address::generate(&env);
+
+    let mut cfg = default_config();
+    cfg.co_recruiter = Some(co1.clone());
+    cfg.recruiter_splits = Some(vec![
+        &env,
+        (recruiter.clone(), 5_000u32),
+        (co1, 5_000u32),
+    ]);
+    create_standard_engagement_with_config(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-NSPLIT-EX", cfg,
+    );
+}
+
+#[test]
+#[should_panic(expected = "TooManyRecruiterSplits")]
+fn test_recruiter_splits_exceeding_max_entries_panics() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let mut cfg = default_config();
+    cfg.recruiter_splits = Some(vec![
+        &env,
+        (recruiter.clone(), 2_000u32),
+        (Address::generate(&env), 2_000u32),
+        (Address::generate(&env), 2_000u32),
+        (Address::generate(&env), 2_000u32),
+        (Address::generate(&env), 1_000u32),
+        (Address::generate(&env), 1_000u32),
+    ]);
+    create_standard_engagement_with_config(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-NSPLIT-6", cfg,
+    );
 }
