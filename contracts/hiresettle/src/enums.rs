@@ -1,7 +1,7 @@
 //! Contract enums (`#[contracttype]`), including the `DataKey`/`DataKey2`
 //! storage key space.
 
-use soroban_sdk::{contracttype, Address, String};
+use soroban_sdk::{contracttype, Address, BytesN, String};
 
 /// Lifecycle state of a single milestone.
 #[contracttype]
@@ -239,6 +239,9 @@ pub enum ConfigKey {
     /// Per-function pause flag for `fn_id` (issue #589). Present and `true`
     /// means the entry point is paused; absent means it runs normally.
     FunctionPaused(u32),
+    /// Duplicate-candidate detection window in ledgers (issue #573).
+    /// `0` disables duplicate rejection while still recording commitments.
+    DuplicateCandidateWindow,
 }
 
 /// Role of a company team member (issue #575): which company-gated actions
@@ -563,4 +566,8 @@ pub enum DataKey3 {
     /// Rotation vote tally for replacing (current_signer, new_signer) in the
     /// emergency signer set.
     EmergencyRotationVotes(Address, Address),
+    /// Index of candidate placement `(company, commitment) -> (engagement_id, ledger)` (issue #573).
+    CandidatePlacement(Address, BytesN<32>),
+    /// Candidate commitment recorded for `(engagement_id, milestone_index)` (issue #573).
+    MilestoneCandidate(String, u32),
 }

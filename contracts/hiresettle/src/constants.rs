@@ -119,3 +119,6 @@ pub(crate) const WEIGHTED_RATING_SCALE: u64 = 1_000_000;
 
 /// Default TTL, in ledgers, for a pending config change proposal (~1 day).
 pub(crate) const DEFAULT_CONFIG_CHANGE_TTL: u32 = 17_280;
+/// Default window, in ledgers, during which a duplicate candidate commitment
+/// for the same company is rejected (~90 days, issue #573).
+pub(crate) const DEFAULT_DUPLICATE_CANDIDATE_WINDOW_LEDGERS: u32 = 1_555_200;

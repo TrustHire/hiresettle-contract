@@ -14211,3 +14211,119 @@ fn test_function_pause_blocks_only_that_entry_point() {
     client.set_function_paused(&company, &FN_CREATE_ENGAGEMENT, &false);
     assert!(!client.is_function_paused(&FN_CREATE_ENGAGEMENT));
 }
+
+// ============================================================
+// ISSUE #573 — CANDIDATE COMMITMENT HASH
+// ============================================================
+
+#[test]
+fn test_candidate_commitment_stored_and_duplicate_allowed_after_window_or_when_disabled() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_admin = token::StellarAssetClient::new(&env, &token_id);
+    let company2 = Address::generate(&env);
+    token_admin.mint(&company2, &5_000_000_000);
+
+    let eng1 = create_standard_engagement_with_config(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-CAND-1", default_config(),
+    );
+    let eng2 = create_standard_engagement_with_config(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-CAND-2", default_config(),
+    );
+    let eng3 = create_standard_engagement_with_config(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-CAND-3", default_config(),
+    );
+    let eng_other_co = create_standard_engagement_with_config(
+        &env, &client, &token_id, &company2, &recruiter, &arbiter, "ENG-CAND-CO2", default_config(),
+    );
+
+    client.set_duplicate_candidate_window(&company, &1_000);
+    assert_eq!(client.get_duplicate_candidate_window(), 1_000);
+
+    let commitment = BytesN::from_array(&env, &[0x42u8; 32]);
+    let ledger1 = env.ledger().sequence();
+    client.submit_proof_with_candidate(
+        &recruiter,
+        &eng1,
+        &0,
+        &String::from_str(&env, "ipfs://cand-1"),
+        &commitment,
+    );
+    assert_eq!(
+        client.get_candidate_placement(&company, &commitment),
+        Some((eng1.clone(), ledger1))
+    );
+    assert_eq!(
+        client.get_milestone_candidate(&eng1, &0),
+        Some(commitment.clone())
+    );
+
+    // Same candidate placed with a different company is allowed immediately.
+    client.submit_proof_with_candidate(
+        &recruiter,
+        &eng_other_co,
+        &0,
+        &String::from_str(&env, "ipfs://cand-co2"),
+        &commitment,
+    );
+
+    // After the window elapses, placing the same candidate for the same company succeeds.
+    advance_ledger(&env, 1_000);
+    let ledger2 = env.ledger().sequence();
+    client.submit_proof_with_candidate(
+        &recruiter,
+        &eng2,
+        &0,
+        &String::from_str(&env, "ipfs://cand-2"),
+        &commitment,
+    );
+    assert_eq!(
+        client.get_candidate_placement(&company, &commitment),
+        Some((eng2.clone(), ledger2))
+    );
+
+    // Window 0 disables the duplicate check while still recording the new commitment.
+    client.set_duplicate_candidate_window(&company, &0);
+    client.submit_proof_with_candidate(
+        &recruiter,
+        &eng3,
+        &0,
+        &String::from_str(&env, "ipfs://cand-3"),
+        &commitment,
+    );
+    assert_eq!(
+        client.get_candidate_placement(&company, &commitment),
+        Some((eng3, ledger2))
+    );
+}
+
+#[test]
+#[should_panic(expected = "DuplicateCandidate")]
+fn test_candidate_commitment_duplicate_within_window_panics() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let recruiter2 = Address::generate(&env);
+
+    let eng1 = create_standard_engagement_with_config(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-CAND-DUP-1", default_config(),
+    );
+    let eng2 = create_standard_engagement_with_config(
+        &env, &client, &token_id, &company, &recruiter2, &arbiter, "ENG-CAND-DUP-2", default_config(),
+    );
+
+    let commitment = BytesN::from_array(&env, &[0x99u8; 32]);
+    client.submit_proof_with_candidate(
+        &recruiter,
+        &eng1,
+        &0,
+        &String::from_str(&env, "ipfs://cand-a"),
+        &commitment,
+    );
+    client.submit_proof_with_candidate(
+        &recruiter2,
+        &eng2,
+        &0,
+        &String::from_str(&env, "ipfs://cand-b"),
+        &commitment,
+    );
+}

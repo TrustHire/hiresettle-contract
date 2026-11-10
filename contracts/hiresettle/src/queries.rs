@@ -904,4 +904,34 @@ impl HireSettleContract {
             None => false,
         }
     }
+
+    // ----------------------------------------------------------
+    // ISSUE #573 — CANDIDATE COMMITMENT QUERIES
+    // ----------------------------------------------------------
+
+    /// Return `(engagement_id, ledger)` for the most recent placement of
+    /// `candidate_commitment` under `company` (issue #573), or `None` if never
+    /// placed. Read-only, permissionless.
+    pub fn get_candidate_placement(
+        env: Env,
+        company: Address,
+        candidate_commitment: BytesN<32>,
+    ) -> Option<(String, u32)> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::CandidatePlacement(company, candidate_commitment))
+    }
+
+    /// Return the 32-byte candidate commitment recorded on
+    /// `(engagement_id, milestone_index)` via `submit_proof_with_candidate`
+    /// (issue #573), or `None` if none was committed.
+    pub fn get_milestone_candidate(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Option<BytesN<32>> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::MilestoneCandidate(engagement_id, milestone_index))
+    }
 }

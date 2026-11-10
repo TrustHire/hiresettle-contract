@@ -164,6 +164,110 @@ impl HireSettleContract {
         Self::submit_proof_internal(env, recruiter, engagement_id, milestone_index, proof_hash, None);
     }
 
+    /// Submit proof for a `Placement` milestone together with a 32-byte salted
+    /// candidate commitment hash (issue #573).
+    ///
+    /// Indexes `(company, candidate_commitment) -> (engagement_id, ledger)`.
+    /// When the admin-configured duplicate window (`get_duplicate_candidate_window`)
+    /// is non-zero, a second placement of the same commitment for the same
+    /// company within that window panics `"DuplicateCandidate"`. Setting the
+    /// window to `0` disables the duplicate check while still recording the
+    /// commitment.
+    pub fn submit_proof_with_candidate(
+        env: Env,
+        recruiter: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        proof_hash: String,
+        candidate_commitment: BytesN<32>,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_function_not_paused(&env, FN_SUBMIT_PROOF);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
+
+        if proof_hash.is_empty() {
+            panic!("InvalidProofHash");
+        }
+        if proof_hash.len() > Self::get_max_proof_hash_length_internal(&env) {
+            panic!("ProofHashTooLong");
+        }
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.kind != MilestoneKind::Placement {
+            panic!("only placement milestones accept candidate commitments");
+        }
+
+        let placement_key = DataKey3::CandidatePlacement(
+            engagement.company.clone(),
+            candidate_commitment.clone(),
+        );
+        let window = Self::get_duplicate_candidate_window(env.clone());
+        let now = env.ledger().sequence();
+        if window > 0 {
+            if let Some((_prev_id, prev_ledger)) = env
+                .storage()
+                .persistent()
+                .get::<DataKey3, (String, u32)>(&placement_key)
+            {
+                if now < prev_ledger.saturating_add(window) {
+                    panic!("DuplicateCandidate");
+                }
+            }
+        }
+
+        Self::submit_proof_internal(
+            env.clone(),
+            recruiter,
+            engagement_id.clone(),
+            milestone_index,
+            proof_hash,
+            None,
+        );
+
+        let record = (engagement_id.clone(), now);
+        env.storage().persistent().set(&placement_key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&placement_key, 100_000, 6_300_000);
+
+        let ms_key = DataKey3::MilestoneCandidate(engagement_id.clone(), milestone_index);
+        env.storage().persistent().set(&ms_key, &candidate_commitment);
+        env.storage()
+            .persistent()
+            .extend_ttl(&ms_key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (Symbol::new(&env, "candidate_committed"), engagement_id),
+            (milestone_index, candidate_commitment),
+        );
+    }
+
+    /// Admin configures the duplicate-candidate detection window in ledgers
+    /// (issue #573). `0` disables duplicate rejection while still recording
+    /// commitments.
+    pub fn set_duplicate_candidate_window(env: Env, admin: Address, ledgers: u32) {
+        Self::assert_admin(&env, &admin);
+        env.storage().instance().set(
+            &DataKey::Config(ConfigKey::DuplicateCandidateWindow),
+            &ledgers,
+        );
+        env.events().publish(
+            (Symbol::new(&env, "duplicate_candidate_window_set"),),
+            ledgers,
+        );
+    }
+
+    /// Return the configured duplicate-candidate detection window in ledgers
+    /// (default `DEFAULT_DUPLICATE_CANDIDATE_WINDOW_LEDGERS`, issue #573).
+    pub fn get_duplicate_candidate_window(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::DuplicateCandidateWindow))
+            .unwrap_or(DEFAULT_DUPLICATE_CANDIDATE_WINDOW_LEDGERS)
+    }
+
     /// Submit a Merkle root over several evidence items as a milestone's proof
     /// (issue #486) — the multi-item alternative to [`Self::submit_proof`].
     ///
