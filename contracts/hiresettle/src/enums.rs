@@ -563,4 +563,27 @@ pub enum DataKey3 {
     /// Rotation vote tally for replacing (current_signer, new_signer) in the
     /// emergency signer set.
     EmergencyRotationVotes(Address, Address),
+    /// Stake token and tiers `(Address, Vec<RecruiterStakeTier>)` set by
+    /// `set_recruiter_stake_tiers` (issue #663). Absent ⇒ staking disabled.
+    RecruiterStakeConfig,
+    /// Ledgers unstaked recruiter stake waits before it can be withdrawn
+    /// (issue #663). Absent ⇒ `DEFAULT_STAKE_UNBONDING_DELAY_LEDGERS`.
+    StakeUnbondingDelay,
+    /// A recruiter's stake record (issue #663).
+    RecruiterStake(Address),
+    /// Confirmation receipt for (engagement_id, milestone_index) (issue #665).
+    MilestoneReceipt(String, u32),
+    /// FIFO-capped proof submission / withdrawal history for
+    /// (engagement_id, milestone_index) (issue #666).
+    ProofHistory(String, u32),
+}
+
+/// What a [`crate::ProofHistoryEntry`] records (issue #666).
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum ProofAction {
+    /// `submit_proof` / `submit_proof_root` moved the milestone to `ProofSubmitted`.
+    Submitted,
+    /// `withdraw_proof` moved it back to `Pending`.
+    Withdrawn,
 }

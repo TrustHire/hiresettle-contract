@@ -235,7 +235,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (
@@ -351,7 +351,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (
@@ -604,7 +604,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (Symbol::new(&env, "arbiter_added"), engagement_id),
@@ -681,7 +681,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (Symbol::new(&env, "arbiter_removed"), engagement_id),
