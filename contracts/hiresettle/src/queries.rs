@@ -91,14 +91,19 @@ impl HireSettleContract {
     /// Panics with `"engagement not found"` if no engagement exists with the given `engagement_id`.
     pub fn get_escrow_balance(env: Env, engagement_id: String) -> i128 {
         let engagement = Self::get_engagement_internal(&env, &engagement_id);
-        engagement.total_amount - engagement.released_amount
+        // Issue #671: refunds on cancellation / expiry are not added to
+        // `released_amount`, so subtract them too.
+        engagement.total_amount
+            - engagement.released_amount
+            - Self::escrow_refunded_internal(&env, &engagement_id)
     }
 
     /// Total value locked for `token` (issue #578): the running sum of
-    /// `total_amount - released_amount` over that token's engagements,
-    /// maintained incrementally on funding, top-up and every payout, so it
-    /// always equals the sum of `get_escrow_balance` across those
-    /// engagements. Never negative (clamped at zero). Read-only.
+    /// escrow held across that token's engagements, maintained
+    /// incrementally on funding, top-up, every payout and every refund, so
+    /// it equals the sum of `get_escrow_balance` across those engagements
+    /// (`check_token_invariants` verifies this). Never negative (clamped at
+    /// zero). Read-only.
     pub fn get_token_tvl(env: Env, token: Address) -> i128 {
         env.storage()
             .persistent()

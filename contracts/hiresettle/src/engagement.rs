@@ -76,6 +76,7 @@ impl HireSettleContract {
             milestones,
             retention_days,
             config,
+            false,
         )
     }
 
@@ -154,6 +155,53 @@ impl HireSettleContract {
         count
     }
 
+    /// Enforce the tighter of the recruiter's own cap and the admin-wide
+    /// recruiter cap (issue #482; 0 / unset means no limit) before binding
+    /// `recruiter` to one more engagement.
+    ///
+    /// # Panics
+    /// - `"RecruiterActiveLimitReached"`
+    pub(crate) fn assert_recruiter_below_cap(env: &Env, recruiter: &Address) {
+        let personal_cap: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::RecruiterActiveCap(recruiter.clone()))
+            .unwrap_or(0);
+        let admin_cap: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::MaxActivePerRecruiter))
+            .unwrap_or(0);
+        let recruiter_cap = match (personal_cap, admin_cap) {
+            (0, 0) => None,
+            (0, c) | (c, 0) => Some(c),
+            (p, a) => Some(p.min(a)),
+        };
+        if let Some(cap) = recruiter_cap {
+            if Self::recruiter_active_count(env, recruiter) >= cap {
+                panic!("RecruiterActiveLimitReached");
+            }
+        }
+    }
+
+    /// Append `engagement_id` to `recruiter`'s engagement index (issue #36).
+    pub(crate) fn index_recruiter_engagement(env: &Env, recruiter: &Address, engagement_id: &String) {
+        let key = DataKey::RecruiterEngagements(recruiter.clone());
+        let mut recruiter_ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        recruiter_ids.push_back(engagement_id.clone());
+        env.storage().persistent().set(&key, &recruiter_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+    }
+
+    /// With `open_offer` (issue #677), `recruiter` is a placeholder for a
+    /// recruiter bound later by `accept_engagement`: it skips the recruiter
+    /// cap and the per-recruiter index, which are applied at binding instead.
     pub(crate) fn create_engagement_impl(
         env: Env,
         engagement_id: String,
@@ -166,6 +214,7 @@ impl HireSettleContract {
         milestones: Vec<Milestone>,
         retention_days: Vec<u32>,
         config: EngagementConfig,
+        open_offer: bool,
     ) -> String {
         Self::assert_function_not_paused(&env, FN_CREATE_ENGAGEMENT);
         // Validate engagement_id format: non-empty, ≤ 64 chars, [A-Za-z0-9-] only.
@@ -393,27 +442,10 @@ impl HireSettleContract {
             panic!("CompanyActiveLimitReached");
         }
 
-        // Issue #482: enforce the tighter of the recruiter's own cap and the
-        // admin-wide recruiter cap (0 / unset means no limit).
-        let personal_cap: u32 = env
-            .storage()
-            .persistent()
-            .get(&DataKey2::RecruiterActiveCap(recruiter.clone()))
-            .unwrap_or(0);
-        let admin_cap: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::Config(ConfigKey::MaxActivePerRecruiter))
-            .unwrap_or(0);
-        let recruiter_cap = match (personal_cap, admin_cap) {
-            (0, 0) => None,
-            (0, c) | (c, 0) => Some(c),
-            (p, a) => Some(p.min(a)),
-        };
-        if let Some(cap) = recruiter_cap {
-            if Self::recruiter_active_count(&env, &recruiter) >= cap {
-                panic!("RecruiterActiveLimitReached");
-            }
+        // Issue #482: recruiter caps. An open offer (issue #677) has no
+        // recruiter yet; its caps are checked when one accepts.
+        if !open_offer {
+            Self::assert_recruiter_below_cap(&env, &recruiter);
         }
 
         let current_ledger = env.ledger().sequence();
@@ -471,7 +503,7 @@ impl HireSettleContract {
             token_client.transfer(&company, &env.current_contract_address(), &total_amount);
         }
         // Issue #578: new engagement escrow locked (pool funds were never in TVL).
-        Self::add_token_locked(&env, &token, total_amount);
+        Self::adjust_escrow(&env, &engagement_id, &token, total_amount);
 
         // Issue #459: escrow the optional recruiter bond alongside the company's funding.
         if let Some(bond_amount) = config.recruiter_bond_amount {
@@ -591,17 +623,11 @@ impl HireSettleContract {
             6_300_000,
         );
 
-        // Issue #36: append engagement_id to the per-recruiter index.
-        let mut recruiter_ids: Vec<String> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::RecruiterEngagements(recruiter.clone()))
-            .unwrap_or_else(|| Vec::new(&env));
-        recruiter_ids.push_back(engagement_id.clone());
-        env.storage().persistent().set(
-            &DataKey::RecruiterEngagements(recruiter.clone()),
-            &recruiter_ids,
-        );
+        // Issue #36: append engagement_id to the per-recruiter index. An open
+        // offer (issue #677) is indexed when a recruiter accepts it.
+        if !open_offer {
+            Self::index_recruiter_engagement(&env, &recruiter, &engagement_id);
+        }
 
         // Issue #248 & #249: append engagement_id to per-tag indices.
         // Count/length were already validated above; here we only need to
@@ -630,12 +656,6 @@ impl HireSettleContract {
                 }
             }
         }
-
-        env.storage().persistent().extend_ttl(
-            &DataKey::RecruiterEngagements(recruiter.clone()),
-            100_000,
-            6_300_000,
-        );
 
         // Issue #577: append engagement_id to the per-token index.
         // Forward-only: engagements created before this deployment are not
@@ -684,19 +704,30 @@ impl HireSettleContract {
     // ISSUE #569 — RECRUITER ACCEPTANCE STEP
     // ----------------------------------------------------------
 
-    /// Recruiter (or their co-signer) accepts an `Offered` engagement, moving
-    /// it to `Active`. Placement milestones' no-show clocks start from this
-    /// ledger rather than from creation. Retention time gates are unchanged:
-    /// they were fixed relative to creation.
+    /// Recruiter (or their co-signer) accepts an `Offered` engagement on its
+    /// current terms, moving it to `Active`. Placement milestones' no-show
+    /// clocks start from this ledger rather than from creation. Retention
+    /// time gates are unchanged: they were fixed relative to creation. Any
+    /// pending counter-offer (issue #676) is discarded.
+    ///
+    /// On an open offer (issue #677) the first eligible recruiter to call
+    /// this is bound as the engagement's recruiter. The recruiter's active
+    /// engagement caps are checked at this point, since there was no
+    /// recruiter to check at creation.
     ///
     /// # Panics
     /// - `"ContractPaused"` / `"EngagementPaused"`
     /// - `"EngagementNotOffered"` — the engagement is not in `Offered` status.
     /// - `"unauthorized"` — caller is not the recruiter or their co-signer.
+    /// - `"RecruiterNotEligible"` — open offer, and the caller is not an
+    ///   eligible recruiter or the co-signer of one.
+    /// - `"RecruiterActiveLimitReached"` — open offer, and the recruiter is at
+    ///   its active engagement cap.
     ///
     /// # Events
     /// `("engagement_accepted", engagement_id)` with the recruiter address,
-    /// plus the `Offered → Active` status-change event.
+    /// plus the `Offered → Active` status-change event. An open offer also
+    /// emits `("open_offer_claimed", engagement_id)` with the bound recruiter.
     pub fn accept_engagement(env: Env, recruiter: Address, engagement_id: String) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
@@ -706,31 +737,30 @@ impl HireSettleContract {
         if engagement.status != EngagementStatus::Offered {
             panic!("EngagementNotOffered");
         }
-        if !Self::is_authorized_recruiter(&env, &recruiter, &engagement.recruiter) {
-            panic!("{}", ERR_UNAUTHORIZED);
-        }
-
-        for i in 0..engagement.milestones.len() {
-            let m = engagement.milestones.get(i).unwrap();
-            if m.kind == MilestoneKind::Placement && m.status == MilestoneStatus::Pending {
-                Self::mark_milestone_pending_since(&env, &engagement_id, i);
+        let open_offer = Self::eligible_recruiters_internal(&env, &engagement_id);
+        match &open_offer {
+            Some(eligible) => {
+                let bound = Self::resolve_eligible_recruiter(&env, eligible, &recruiter);
+                Self::bind_open_offer_recruiter(&env, &mut engagement, &engagement_id, &bound);
+            }
+            None => {
+                if !Self::is_authorized_recruiter(&env, &recruiter, &engagement.recruiter) {
+                    panic!("{}", ERR_UNAUTHORIZED);
+                }
             }
         }
 
-        engagement.status = EngagementStatus::Active;
-        engagement.last_activity_ledger = env.ledger().sequence();
-        env.storage()
-            .persistent()
-            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::activate_offered_engagement(&env, &mut engagement, &engagement_id, &recruiter);
 
-        Self::emit_engagement_status_changed(
-            &env,
-            &engagement_id,
-            EngagementStatus::Offered,
-            EngagementStatus::Active,
-            Some(recruiter.clone()),
-        );
+        if open_offer.is_some() {
+            env.events().publish(
+                (
+                    Symbol::new(&env, "open_offer_claimed"),
+                    engagement_id.clone(),
+                ),
+                engagement.recruiter.clone(),
+            );
+        }
         env.events().publish(
             (
                 Symbol::new(&env, "engagement_accepted"),
@@ -743,7 +773,9 @@ impl HireSettleContract {
     /// Company (or its co-signer) withdraws an `Offered` engagement before
     /// the recruiter accepts it. The full escrow is refunded (to the pool for
     /// pool-funded engagements), any bonds are returned, and the engagement
-    /// moves to `Cancelled`, freeing its active-engagement cap slots.
+    /// moves to `Cancelled`, freeing its active-engagement cap slots. Works
+    /// the same on an open offer (issue #677), and discards any pending
+    /// counter-offer (issue #676).
     ///
     /// # Panics
     /// - `"ContractPaused"` / `"EngagementPaused"`
@@ -775,6 +807,7 @@ impl HireSettleContract {
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
         Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::clear_offer_state(&env, &engagement_id);
         Self::emit_engagement_status_changed(
             &env,
             &engagement_id,
@@ -1197,7 +1230,7 @@ impl HireSettleContract {
                     Self::platform_fee_amount(&env, &engagement_id, payment, effective_bps);
                 let net_payment = payment - fee_amount;
                 engagement.released_amount += payment;
-                Self::add_token_locked(&env, &engagement.token, -payment);
+                Self::adjust_escrow(&env, &engagement_id, &engagement.token, -payment);
                 if fee_amount > 0 {
                     Self::collect_platform_fee(&env, &engagement, &engagement_id, i, fee_amount);
                 }
@@ -1400,6 +1433,7 @@ impl HireSettleContract {
                 Self::platform_fee_amount(&env, &engagement_id, recruiter_amount, effective_bps);
             let net_payment = recruiter_amount - fee_amount;
             engagement.released_amount += recruiter_amount;
+            Self::adjust_escrow(&env, &engagement_id, &engagement.token, -recruiter_amount);
 
             let token_client = token::Client::new(&env, &engagement.token);
             if fee_amount > 0 {
@@ -1552,7 +1586,7 @@ impl HireSettleContract {
 
         engagement.total_amount += amount;
         // Issue #578: top-up locks more escrow.
-        Self::add_token_locked(&env, &engagement.token, amount);
+        Self::adjust_escrow(env, engagement_id, &engagement.token, amount);
         engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()

@@ -1611,6 +1611,9 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        // Issues #676 / #677: an expired offer leaves no pending counter-offer
+        // or open-offer allowlist behind.
+        Self::clear_offer_state(&env, &engagement_id);
         Self::emit_engagement_status_changed(
             &env,
             &engagement_id,

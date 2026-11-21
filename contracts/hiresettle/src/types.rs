@@ -542,6 +542,9 @@ pub struct PendingConfigChange {
     pub bool_val: bool,
     pub address_val: Option<Address>,
     pub string_val: Option<String>,
+    /// Second address argument, for setters that take two (e.g. the
+    /// recipient of `recover_stray_tokens`, issue #672). `None` otherwise.
+    pub address_val2: Option<Address>,
     /// Admin who proposed the change; the only address that may cancel it.
     pub proposer: Address,
     /// Ledger when the proposal was made.
@@ -722,6 +725,99 @@ pub struct PartialConfirmationProposal {
     pub proposed_at_ledger: u32,
     /// Last ledger at which the proposal can still be accepted.
     pub expires_at_ledger: u32,
+}
+
+/// Result of `check_escrow_invariants` (issue #671): one engagement's
+/// book-keeping, with a flag per invariant and `ok` set only if all hold.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvariantReport {
+    pub engagement_id: String,
+    pub status: EngagementStatus,
+    pub total_amount: i128,
+    pub released_amount: i128,
+    /// Escrow refunded to the company without touching `released_amount`.
+    pub refunded_amount: i128,
+    /// `total_amount - released_amount - refunded_amount`.
+    pub expected_escrow: i128,
+    /// Escrow tracked by the contract for this engagement. `None` for an
+    /// engagement created before escrow tracking existed.
+    pub escrow_balance: Option<i128>,
+    /// `escrow_balance == Some(expected_escrow)`.
+    pub balance_matches: bool,
+    /// `released_amount >= 0`, `refunded_amount >= 0` and
+    /// `released_amount + refunded_amount <= total_amount`.
+    pub amounts_in_range: bool,
+    /// Milestone `payment_percent`s sum to exactly 100.
+    pub percents_sum_to_100: bool,
+    /// Milestone statuses agree with the engagement status: `Completed`
+    /// ⇒ every milestone `Confirmed`/`Resolved`; `Offered` ⇒ nothing
+    /// released and every milestone still in its initial state.
+    pub milestone_states_consistent: bool,
+    /// `Cancelled`/`Expired` ⇒ no escrow left; `Completed` ⇒ at most one
+    /// unit of rounding dust per milestone left.
+    pub terminal_escrow_settled: bool,
+    pub ok: bool,
+}
+
+/// Result of `check_token_invariants` (issue #671): every balance the
+/// contract tracks for one token, cross-checked against per-engagement
+/// state and the token's actual balance held by the contract.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TokenInvariantReport {
+    pub token: Address,
+    /// Engagements in this token's index (issue #577) that were summed.
+    pub engagement_count: u32,
+    /// Sum of per-engagement escrow balances.
+    pub summed_escrow: i128,
+    /// Running escrow total (`get_token_tvl`).
+    pub tracked_escrow: i128,
+    /// Sum of unsettled bonds over the token's engagements.
+    pub summed_bonds: i128,
+    /// Running bond total.
+    pub tracked_bonds: i128,
+    /// Sum of unclaimed streamed payouts over the token's engagements.
+    pub summed_streamed: i128,
+    /// Running streamed-payout total.
+    pub tracked_streamed: i128,
+    /// Pooled company balances (`get_token_pooled_balance`).
+    pub pooled: i128,
+    /// Pull-payout credits not yet claimed.
+    pub claimable: i128,
+    /// Redeemable company fee rebates.
+    pub rebates: i128,
+    /// Escrow + bonds + streams + pooled + claimable + rebates, using the
+    /// running totals: everything the contract owes someone in this token.
+    pub tracked_total: i128,
+    /// The token's actual balance held by the contract.
+    pub contract_balance: i128,
+    /// `contract_balance - tracked_total`: positive is untracked (stray)
+    /// tokens, negative is a shortfall.
+    pub surplus: i128,
+    /// Every summed value equals its running total.
+    pub totals_consistent: bool,
+    /// `contract_balance >= tracked_total`.
+    pub solvent: bool,
+    pub ok: bool,
+}
+
+/// A recruiter's counter-proposal on an `Offered` engagement (issue #676),
+/// returned by `get_counter_offer`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CounterOffer {
+    /// Address that signed the counter (the recruiter or its co-signer).
+    pub proposer: Address,
+    /// Recruiter bound to the engagement if the company accepts. Differs
+    /// from the engagement's recruiter only on an open offer (issue #677).
+    pub recruiter: Address,
+    /// Proposed new `total_amount`.
+    pub total_amount: i128,
+    /// Proposed `payment_percent` per milestone, by index; sums to 100.
+    pub milestone_percents: Vec<u32>,
+    /// Ledger at which the counter was made.
+    pub proposed_at_ledger: u32,
 }
 
 /// Pending mutual settlement of a disputed milestone (issue #564), stored

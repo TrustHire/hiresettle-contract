@@ -87,6 +87,12 @@ pub(crate) const FN_SET_REFERRAL_DISCOUNT_BPS: u32 = 3;
 pub(crate) const FN_SET_ARBITER_FEE: u32 = 4;
 pub(crate) const FN_SET_MIN_AMOUNT: u32 = 5;
 pub(crate) const FN_SET_FEE_REBATE_BPS: u32 = 6;
+/// `recover_stray_tokens` (issue #672). Mark it sensitive with
+/// `set_sensitive_functions` to require the config cosigner's acceptance.
+pub(crate) const FN_RECOVER_STRAY_TOKENS: u32 = 7;
+/// Maximum size of an open offer's `eligible_recruiters` allowlist
+/// (issue #677). Bounds the scan in `accept_engagement`.
+pub(crate) const MAX_ELIGIBLE_RECRUITERS: u32 = 20;
 /// Per-function pause ids for `set_function_paused` (issue #589). They share
 /// the same `u32` id scheme as the sensitive setters but live in a disjoint
 /// range so the two features never collide.
@@ -112,6 +118,8 @@ pub(crate) const DEFAULT_RISK_EXTENSION_WEIGHT: u32 = 10;
 /// detect payload-shape changes instead of breaking silently. The value is
 /// appended as the last topic of every `env.events().publish` call and is
 /// exposed to off-chain consumers via `get_event_schema_version()`.
+// Not yet stamped onto events; kept for issue #585.
+#[allow(dead_code)]
 pub(crate) const EVENT_SCHEMA_VERSION: u32 = 1;
 
 /// Fixed-point scale for recency-weighted ratings (issue #596).

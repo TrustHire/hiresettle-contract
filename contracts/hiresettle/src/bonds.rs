@@ -73,6 +73,8 @@ impl HireSettleContract {
         }
         payer.require_auth();
         token::Client::new(env, token).transfer(payer, &env.current_contract_address(), &amount);
+        // Issue #672: held until `settle_bonds`.
+        Self::add_token_aggregate(env, DataKey3::TokenBonded(token.clone()), amount);
         env.storage().persistent().set(
             &key,
             &RecruiterBond {
@@ -159,6 +161,7 @@ impl HireSettleContract {
         bond.forfeited = forfeit > 0;
         bond.settled = true;
         env.storage().persistent().set(&key, &bond);
+        Self::add_token_aggregate(env, DataKey3::TokenBonded(engagement.token.clone()), -bond.amount);
 
         env.events().publish(
             (Symbol::new(env, "recruiter_bond_settled"), engagement.id.clone()),
@@ -257,6 +260,7 @@ impl HireSettleContract {
         bond.forfeited = forfeit > 0;
         bond.settled = true;
         env.storage().persistent().set(&key, &bond);
+        Self::add_token_aggregate(env, DataKey3::TokenBonded(engagement.token.clone()), -bond.amount);
 
         env.events().publish(
             (
