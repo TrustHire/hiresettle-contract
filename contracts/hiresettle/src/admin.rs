@@ -1913,20 +1913,15 @@ impl HireSettleContract {
 
     /// Admin sets or clears the verification flag for a recruiter address.
     /// Foundation-only: does not gate any lifecycle behaviour.
+    /// Registered attesters can do the same within their scope via
+    /// `attest_recruiter` (issue #661).
     ///
     /// # Events
     /// Emits `("recruiter_verified_set",)` with `(recruiter, verified)`.
     pub fn set_recruiter_verified(env: Env, admin: Address, recruiter: Address, verified: bool) {
         Self::assert_admin(&env, &admin);
-        let key = DataKey2::RecruiterVerified(recruiter.clone());
-        if verified {
-            env.storage().persistent().set(&key, &true);
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, 100_000, 6_300_000);
-        } else {
-            env.storage().persistent().remove(&key);
-        }
+        // Issue #661: also records the admin as the badge issuer.
+        Self::write_recruiter_verification(&env, &recruiter, verified, &admin);
         env.events().publish(
             (Symbol::new(&env, "recruiter_verified_set"),),
             (recruiter, verified),

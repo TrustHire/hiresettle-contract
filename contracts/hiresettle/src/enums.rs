@@ -251,6 +251,17 @@ pub enum CompanyMemberRole {
     /// May call `raise_dispute` / `batch_raise_dispute`.
     Disputer,
 }
+/// What an attester may verify (issue #661).
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum AttesterScope {
+    /// May set or clear recruiter verification only.
+    Recruiter,
+    /// May set or clear company verification only.
+    Company,
+    /// May set or clear both recruiter and company verification.
+    Both,
+}
 /// Contract storage key space. Instance keys reset between transactions;
 /// persistent keys survive across ledgers.
 #[contracttype]
@@ -563,4 +574,33 @@ pub enum DataKey3 {
     /// Rotation vote tally for replacing (current_signer, new_signer) in the
     /// emergency signer set.
     EmergencyRotationVotes(Address, Address),
+    /// Admin-managed placement oracle registry (issue #667). Present ⇒ the
+    /// address is a registered oracle; removing it blocks its confirmations
+    /// immediately.
+    PlacementOracle(Address),
+    /// Placement oracle an engagement opted into at creation (issue #667).
+    EngagementOracle(String),
+    /// Recruiter-supplied invoice reference for (engagement_id,
+    /// milestone_index) (issue #669). Locked once the milestone is confirmed.
+    MilestoneInvoiceRef(String, u32),
+    /// Payout receipt written when (engagement_id, milestone_index) is
+    /// confirmed (issue #669).
+    MilestoneReceipt(String, u32),
+    /// Per-company external reference index: (company, external_ref) →
+    /// engagement_id (issue #572).
+    ExternalRef(Address, String),
+    /// External reference attached to an engagement at creation (issue #572).
+    EngagementExternalRef(String),
+    /// Registered attester and the scope it may verify (issue #661).
+    Attester(Address),
+    /// Who issued a recruiter's verification badge and when (issue #661).
+    RecruiterVerification(Address),
+    /// Who issued a company's verification badge and when (issue #661).
+    CompanyVerification(Address),
+    /// Recruiters an attester has verified, for `revoke_attester_badges`
+    /// (issue #661).
+    AttesterRecruiterBadges(Address),
+    /// Companies an attester has verified, for `revoke_attester_badges`
+    /// (issue #661).
+    AttesterCompanyBadges(Address),
 }

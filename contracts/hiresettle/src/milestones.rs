@@ -400,6 +400,9 @@ impl HireSettleContract {
     ///
     /// # Events
     /// - `("milestone_confirmed", engagement_id)` with `(milestone_index, payment)`.
+    /// - `("milestone_payout", engagement_id)` with
+    ///   `(milestone_index, payment, Some(confirmer), invoice_ref)` (issue #669);
+    ///   the same data is stored as the milestone receipt.
     /// - `("platform_fee_collected", engagement_id)` with `(milestone_index, fee_amount, treasury)` — when fee > 0.
     /// - `("status_changed", engagement_id)` — when the milestone status changes.
     /// - `("engagement_completed", engagement_id)` — if all milestones are now done.
@@ -415,7 +418,7 @@ impl HireSettleContract {
         Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         company.require_auth();
 
-        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
 
         if engagement.status != EngagementStatus::Active {
             panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
@@ -425,6 +428,30 @@ impl HireSettleContract {
             panic!("{}", ERR_UNAUTHORIZED);
         }
 
+        Self::confirm_milestone_core(
+            &env,
+            engagement,
+            &engagement_id,
+            milestone_index,
+            &company,
+            false,
+        );
+    }
+
+    /// Shared body of `confirm_milestone` and `oracle_confirm_milestone`
+    /// (issue #667), run after the caller has been authorized: validates the
+    /// milestone, releases its payout, records the receipt (issue #669) and
+    /// emits the confirmation events. `by_oracle` selects the attribution
+    /// event: `milestone_confirmed_by_oracle`, or
+    /// `milestone_confirmed_by_member` when a team member confirmed.
+    pub(crate) fn confirm_milestone_core(
+        env: &Env,
+        mut engagement: Engagement,
+        engagement_id: &String,
+        milestone_index: u32,
+        confirmer: &Address,
+        by_oracle: bool,
+    ) {
         let mut milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
 
         if milestone.status != MilestoneStatus::ProofSubmitted {
@@ -450,20 +477,20 @@ impl HireSettleContract {
         let full_share = (engagement.total_amount * milestone.payment_percent as i128) / 100;
         let payment = full_share - milestone.replacement_paid_out;
         if payment > 0 {
-            let effective_bps = Self::payout_fee_bps(&env, &engagement_id, &engagement);
+            let effective_bps = Self::payout_fee_bps(env, engagement_id, &engagement);
             let fee_amount =
-                Self::platform_fee_amount(&env, &engagement_id, payment, effective_bps);
+                Self::platform_fee_amount(env, engagement_id, payment, effective_bps);
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
             // Issue #578: payout releases escrow.
-            Self::add_token_locked(&env, &engagement.token, -payment);
+            Self::add_token_locked(env, &engagement.token, -payment);
 
-            let token_client = token::Client::new(&env, &engagement.token);
+            let token_client = token::Client::new(env, &engagement.token);
             if fee_amount > 0 {
                 Self::collect_platform_fee(
-                    &env,
+                    env,
                     &engagement,
-                    &engagement_id,
+                    engagement_id,
                     milestone_index,
                     fee_amount,
                 );
@@ -471,14 +498,14 @@ impl HireSettleContract {
             match engagement.stream_duration_ledgers {
                 // Issue #466: keep the net share escrowed and vest it instead.
                 Some(duration) => Self::start_streamed_payout(
-                    &env,
-                    &engagement_id,
+                    env,
+                    engagement_id,
                     milestone_index,
                     net_payment,
                     duration,
                 ),
                 None => {
-                    Self::distribute_recruiter_payout(&env, &engagement, net_payment, &token_client, true)
+                    Self::distribute_recruiter_payout(env, &engagement, net_payment, &token_client, true)
                 }
             }
         }
@@ -488,7 +515,7 @@ impl HireSettleContract {
         engagement
             .milestones
             .set(milestone_index, milestone.clone());
-        Self::bond_clear_rejection(&env, &engagement_id, milestone_index);
+        Self::bond_clear_rejection(env, engagement_id, milestone_index);
 
         let all_done = (0..engagement.milestones.len()).all(|i| {
             let s = engagement.milestones.get(i).unwrap().status;
@@ -498,56 +525,73 @@ impl HireSettleContract {
         let old_engagement_status = engagement.status.clone();
         if all_done {
             engagement.status = EngagementStatus::Completed;
-            Self::settle_bonds(&env, &engagement);
-            Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
-            Self::decrement_company_active_count(&env, &engagement.company);
-            Self::refund_split_withheld(&env, &engagement_id, &mut engagement);
+            Self::settle_bonds(env, &engagement);
+            Self::refund_no_show_forfeit(env, engagement_id, &engagement);
+            Self::decrement_company_active_count(env, &engagement.company);
+            Self::refund_split_withheld(env, engagement_id, &mut engagement);
         }
         engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::extend_engagement_ttl(env, engagement_id);
 
         Self::emit_milestone_status_changed(
-            &env,
-            &engagement_id,
+            env,
+            engagement_id,
             milestone_index,
             old_status,
             MilestoneStatus::Confirmed,
         );
         Self::emit_engagement_status_changed(
-            &env,
-            &engagement_id,
+            env,
+            engagement_id,
             old_engagement_status,
             engagement.status.clone(),
-            Some(company.clone()),
+            Some(confirmer.clone()),
         );
 
         env.events().publish(
             (
-                Symbol::new(&env, "milestone_confirmed"),
+                Symbol::new(env, "milestone_confirmed"),
                 engagement_id.clone(),
             ),
             (milestone_index, payment),
         );
-        // Issue #575: identify the team member when the confirmer is not the
-        // company itself.
-        if Self::company_member_role(&env, &engagement.company, &company).is_some() {
+        // Issue #669: payout receipt carrying the invoice reference.
+        Self::record_milestone_receipt(
+            env,
+            engagement_id,
+            milestone_index,
+            payment,
+            Some(confirmer.clone()),
+        );
+        if by_oracle {
+            // Issue #667: identify the oracle as the confirmer.
             env.events().publish(
                 (
-                    Symbol::new(&env, "milestone_confirmed_by_member"),
+                    Symbol::new(env, "milestone_confirmed_by_oracle"),
                     engagement_id.clone(),
                 ),
-                (milestone_index, company.clone()),
+                (milestone_index, confirmer.clone()),
+            );
+        } else if Self::company_member_role(env, &engagement.company, confirmer).is_some() {
+            // Issue #575: identify the team member when the confirmer is not
+            // the company itself.
+            env.events().publish(
+                (
+                    Symbol::new(env, "milestone_confirmed_by_member"),
+                    engagement_id.clone(),
+                ),
+                (milestone_index, confirmer.clone()),
             );
         }
 
         if all_done {
             env.events().publish(
                 (
-                    Symbol::new(&env, "engagement_completed"),
+                    Symbol::new(env, "engagement_completed"),
                     engagement_id.clone(),
                 ),
                 (
@@ -657,6 +701,9 @@ impl HireSettleContract {
     /// - `("partial_confirmation_accepted", engagement_id)` with
     ///   `(milestone_index, release_bps, released, refunded)`.
     /// - `("milestone_confirmed", engagement_id)` with `(milestone_index, released)`.
+    /// - `("milestone_payout", engagement_id)` with
+    ///   `(milestone_index, released, Some(recruiter), invoice_ref)`; the
+    ///   receipt records the accepting recruiter as `confirmed_by`.
     /// - The usual status-change / `engagement_completed` events.
     pub fn accept_partial_confirmation(
         env: Env,
@@ -803,6 +850,13 @@ impl HireSettleContract {
                 engagement_id.clone(),
             ),
             (milestone_index, released),
+        );
+        Self::record_milestone_receipt(
+            &env,
+            &engagement_id,
+            milestone_index,
+            released,
+            Some(recruiter.clone()),
         );
         if all_done {
             env.events().publish(
@@ -1010,6 +1064,13 @@ impl HireSettleContract {
                     engagement_id.clone(),
                 ),
                 (idx, payment),
+            );
+            Self::record_milestone_receipt(
+                &env,
+                &engagement_id,
+                idx,
+                payment,
+                Some(company.clone()),
             );
             // Issue #575: identify the team member when the confirmer is not
             // the company itself.

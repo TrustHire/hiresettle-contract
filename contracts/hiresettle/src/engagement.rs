@@ -45,6 +45,11 @@ impl HireSettleContract {
     ///   [`Self::set_min_quorum_ratio_bps`] (issue #502). Never raised at the default ratio of 0.
     /// - `"InvalidPrerequisiteIndex"` / `"PrerequisiteCycle"` — a milestone's `prerequisites`
     ///   reference an out-of-range index or form a cycle (issue #461).
+    /// - `"OracleNotRegistered"` / `"OracleRecruiterCollision"` — `config.placement_oracle`
+    ///   is not in the oracle registry, or is the recruiter or co-recruiter (issue #667).
+    /// - `"ExternalRefEmpty"` / `"ExternalRefTooLong"` / `"DuplicateExternalRef"` —
+    ///   `config.external_ref` is empty, longer than 64 characters, or already used by
+    ///   this company (issue #572).
     ///
     /// These checks exist so a company cannot name itself (or a colluding address)
     /// as arbiter and vote on its own disputes, or name itself as recruiter to
@@ -349,6 +354,17 @@ impl HireSettleContract {
             }
         }
 
+        // Issue #667: an opted-in placement oracle must be registered and
+        // must not sit on the recruiter side.
+        if let Some(ref oracle) = config.placement_oracle {
+            Self::validate_placement_oracle(&env, oracle, &recruiter, &config.co_recruiter);
+        }
+
+        // Issue #572: bounded external reference, unique per company.
+        if let Some(ref external_ref) = config.external_ref {
+            Self::validate_external_ref(&env, &company, external_ref);
+        }
+
         // Issue #56: validate co-recruiter split basis points.
         if config.recruiter_split_bps > FULL_SPLIT_BPS {
             panic!("InvalidSplitBps");
@@ -520,6 +536,25 @@ impl HireSettleContract {
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
 
         Self::extend_engagement_ttl(&env, &engagement_id);
+
+        // Issue #667: remember the opted-in placement oracle.
+        if let Some(ref oracle) = config.placement_oracle {
+            let key = DataKey3::EngagementOracle(engagement_id.clone());
+            env.storage().persistent().set(&key, oracle);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, 100_000, 6_300_000);
+        }
+
+        // Issue #572: index the external reference under the company.
+        if let Some(ref external_ref) = config.external_ref {
+            Self::index_external_ref(&env, &company, external_ref, &engagement_id);
+            let key = DataKey3::EngagementExternalRef(engagement_id.clone());
+            env.storage().persistent().set(&key, external_ref);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, 100_000, 6_300_000);
+        }
 
         // Issue #547: credit payouts instead of pushing them.
         if config.pull_payouts {
@@ -1154,7 +1189,8 @@ impl HireSettleContract {
     ///
     /// # Events
     /// Per auto-confirmed milestone `("milestone_confirmed", engagement_id)`
-    /// with `(milestone_index, payment)`, plus
+    /// with `(milestone_index, payment)` and `("milestone_payout",
+    /// engagement_id)` with `(milestone_index, payment, None, invoice_ref)`, plus
     /// `("engagement_closed_at_end", engagement_id)` with
     /// `(released_amount, refund)`.
     pub fn close_engagement_at_end(env: Env, engagement_id: String) {
@@ -1221,6 +1257,7 @@ impl HireSettleContract {
                 ),
                 (i, payment),
             );
+            Self::record_milestone_receipt(&env, &engagement_id, i, payment, None);
         }
 
         let refund = engagement.total_amount - engagement.released_amount;
@@ -1552,7 +1589,7 @@ impl HireSettleContract {
 
         engagement.total_amount += amount;
         // Issue #578: top-up locks more escrow.
-        Self::add_token_locked(&env, &engagement.token, amount);
+        Self::add_token_locked(env, &engagement.token, amount);
         engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
