@@ -371,6 +371,16 @@ pub struct EngagementConfig {
     /// retention milestone's earliest unlock when set. `None` keeps today's
     /// behaviour.
     pub end_ledger: Option<u32>,
+    /// Optional registered placement oracle (issue #667), e.g. an HRIS
+    /// integration, allowed to confirm this engagement's `Placement`
+    /// milestones via `oracle_confirm_milestone`. Must be in the admin
+    /// registry at creation. The company keeps its manual confirm and
+    /// dispute rights. `None` keeps manual-only confirmation.
+    pub placement_oracle: Option<Address>,
+    /// Optional ATS / job-board identifier (issue #572), at most 64
+    /// characters and unique per company. Looked up with
+    /// `get_engagement_by_external_ref`.
+    pub external_ref: Option<String>,
 }
 /// Vesting record for a streamed milestone payout (issue #466), stored under
 /// `DataKey::StreamedPayout(engagement_id, milestone_index)`.
@@ -742,4 +752,34 @@ pub struct DisputeSettlementProposal {
     pub dispute_cycle: u32,
     /// Ledger at which the proposal was made.
     pub proposed_at_ledger: u32,
+}
+/// Payout receipt for a confirmed milestone (issue #669), returned by
+/// `get_milestone_receipt`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MilestoneReceipt {
+    /// Index of the confirmed milestone.
+    pub milestone_index: u32,
+    /// Gross amount released for the milestone by this confirmation, before
+    /// the platform fee (the same figure as the `milestone_confirmed` event).
+    pub amount: i128,
+    /// Address that confirmed: the company, a co-signer, a team member, the
+    /// placement oracle, or the `force_confirm_milestone` caller. `None` for
+    /// permissionless auto-confirmation in `close_engagement_at_end`.
+    pub confirmed_by: Option<Address>,
+    /// Ledger at which the milestone was confirmed.
+    pub confirmed_at_ledger: u32,
+    /// Recruiter-supplied invoice reference, if one was set before
+    /// confirmation.
+    pub invoice_ref: Option<String>,
+}
+/// Who issued a verification badge (issue #661), returned by
+/// `get_recruiter_verification` / `get_company_verification`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerificationRecord {
+    /// The admin or registered attester that issued the badge.
+    pub issuer: Address,
+    /// Ledger at which the badge was issued.
+    pub issued_at_ledger: u32,
 }

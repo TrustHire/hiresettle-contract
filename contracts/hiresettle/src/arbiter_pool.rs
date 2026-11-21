@@ -135,7 +135,7 @@ impl HireSettleContract {
             .storage()
             .persistent()
             .get(&DataKey3::ArbiterSuspension(arbiter.clone()));
-        until.map_or(false, |u| u > env.ledger().sequence())
+        until.is_some_and(|u| u > env.ledger().sequence())
     }
 
     fn set_arbiter_pool(env: &Env, pool: &Vec<Address>) {
@@ -513,6 +513,8 @@ impl HireSettleContract {
 
     /// Check if an arbiter has an active conflict declaration for an engagement.
     /// Used internally to prevent conflicted arbiters from voting.
+    // Not wired into vote casting yet.
+    #[allow(dead_code)]
     pub(crate) fn has_conflict_of_interest(
         env: &Env,
         engagement_id: &String,
