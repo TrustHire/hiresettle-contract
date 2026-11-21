@@ -132,6 +132,8 @@ impl HireSettleContract {
 
     /// Mark the most recent dispute on `milestone_index` as withdrawn
     /// (issue #565). A no-op if that entry already aged out of the FIFO cap.
+    // Not yet called anywhere; kept for the feature it belongs to.
+    #[allow(dead_code)]
     pub(crate) fn record_dispute_withdrawn(
         env: &Env,
         engagement_id: &String,
