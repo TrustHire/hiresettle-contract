@@ -345,6 +345,7 @@ impl HireSettleContract {
             return 0;
         }
         env.storage().persistent().remove(&key);
+        Self::add_token_aggregate(&env, DataKey3::TokenClaimable(token.clone()), -amount);
         token::Client::new(&env, &token).transfer(
             &env.current_contract_address(),
             &Self::recruiter_payout_destination(&env, &recruiter),
@@ -405,6 +406,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, 100_000, 6_300_000);
+        Self::add_token_aggregate(env, DataKey3::TokenClaimable(token.clone()), amount);
         env.events().publish(
             (Symbol::new(env, "payout_credited"), recipient.clone()),
             (engagement_id.clone(), token.clone(), amount),

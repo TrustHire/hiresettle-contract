@@ -70,6 +70,43 @@ impl HireSettleContract {
         Self::get_milestone_or_panic(&engagement, milestone_index)
     }
 
+    /// Return the configured candidate's co-signature on a Placement proof
+    /// (issue #654), or `None` if it has not been attested.
+    pub fn get_placement_attestation(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::PlacementAttestation(engagement_id, milestone_index))
+    }
+
+    /// Return the candidate commitment recorded for a Placement milestone
+    /// (issue #573), or `None` when plain `submit_proof` was used.
+    pub fn get_candidate_commitment(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Option<BytesN<32>> {
+        env.storage().persistent().get(&DataKey3::CandidateCommitment(
+            engagement_id,
+            milestone_index,
+        ))
+    }
+
+    /// Return the engagement and ledger where `company` last committed this
+    /// candidate hash (issue #573), if any.
+    pub fn get_candidate_placement(
+        env: Env,
+        company: Address,
+        commitment: BytesN<32>,
+    ) -> Option<(String, u32)> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::CandidatePlacement(company, commitment))
+    }
+
     /// Returns the status of every milestone in the engagement, ordered by
     /// milestone index, in a single call (issue #37). Read-only, permissionless.
     pub fn get_all_milestone_statuses(env: Env, engagement_id: String) -> Vec<MilestoneStatus> {
@@ -91,14 +128,19 @@ impl HireSettleContract {
     /// Panics with `"engagement not found"` if no engagement exists with the given `engagement_id`.
     pub fn get_escrow_balance(env: Env, engagement_id: String) -> i128 {
         let engagement = Self::get_engagement_internal(&env, &engagement_id);
-        engagement.total_amount - engagement.released_amount
+        // Issue #671: refunds on cancellation / expiry are not added to
+        // `released_amount`, so subtract them too.
+        engagement.total_amount
+            - engagement.released_amount
+            - Self::escrow_refunded_internal(&env, &engagement_id)
     }
 
     /// Total value locked for `token` (issue #578): the running sum of
-    /// `total_amount - released_amount` over that token's engagements,
-    /// maintained incrementally on funding, top-up and every payout, so it
-    /// always equals the sum of `get_escrow_balance` across those
-    /// engagements. Never negative (clamped at zero). Read-only.
+    /// escrow held across that token's engagements, maintained
+    /// incrementally on funding, top-up, every payout and every refund, so
+    /// it equals the sum of `get_escrow_balance` across those engagements
+    /// (`check_token_invariants` verifies this). Never negative (clamped at
+    /// zero). Read-only.
     pub fn get_token_tvl(env: Env, token: Address) -> i128 {
         env.storage()
             .persistent()
@@ -903,5 +945,226 @@ impl HireSettleContract {
             Some(root) => Self::merkle_verify(&env, &root, &leaf, &proof),
             None => false,
         }
+    }
+
+    /// Full point-in-time view of the admin-configurable configuration,
+    /// including `evidence_window_ledgers` (issue #657).
+    pub fn get_config_snapshot(env: Env) -> ConfigSnapshot {
+        let platform_fee = Self::get_platform_fee_internal(&env);
+        ConfigSnapshot {
+            version: Self::get_version(env.clone()),
+            admin: Self::get_admin_internal(&env),
+            admin_renounced: env
+                .storage()
+                .instance()
+                .get(&DataKey::AdminRenounced)
+                .unwrap_or(false),
+            paused: Self::is_paused_internal(&env),
+            platform_fee_bps: platform_fee.bps,
+            platform_fee_treasury: platform_fee.treasury,
+            arbiter_fee_bps: Self::get_arbiter_fee(env.clone()),
+            super_arbiter: env.storage().instance().get(&DataKey::SuperArbiter),
+            confirm_window_ledgers: Self::get_confirm_window(env.clone()),
+            dispute_window_ledgers: Self::get_dispute_window(env.clone()),
+            proof_cooldown_ledgers: Self::get_proof_cooldown(&env),
+            amendment_ttl_ledgers: Self::get_amendment_ttl(env.clone()),
+            upgrade_lock_duration_ledgers: Self::get_upgrade_lock_duration(env.clone()),
+            ledgers_per_day: Self::get_ledgers_per_day_internal(&env),
+            max_replacements: Self::get_max_replacements_internal(&env),
+            max_active_per_company: Self::get_max_active_per_company(env.clone()),
+            max_proof_hash_length: Self::get_max_proof_hash_length_internal(&env),
+            min_engagement_amount: Self::get_min_amount(env.clone()),
+            config_change_ttl_ledgers: Self::get_config_change_ttl(env.clone()),
+            evidence_window_ledgers: Self::evidence_window_internal(&env),
+            commit_reveal_voting: Self::commit_reveal_enabled(&env),
+            commit_phase_ledgers: Self::get_commit_phase_ledgers(env.clone()),
+        }
+    }
+
+    pub fn get_next_action(env: Env, engagement_id: String) -> Option<NextAction> {
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let now = env.ledger().sequence();
+        let at = |gate: u32| gate.max(now);
+        let step = |actor: ActorRole, action: ActionKind, milestone_index: Option<u32>, gate: u32| {
+            NextAction {
+                actor,
+                action,
+                milestone_index,
+                available_at_ledger: at(gate),
+            }
+        };
+
+        let active = match engagement.status {
+            EngagementStatus::Completed
+            | EngagementStatus::Cancelled
+            | EngagementStatus::Expired => return None,
+            EngagementStatus::ExitRequested => {
+                return Some(step(ActorRole::Company, ActionKind::AcceptProposal, None, now));
+            }
+            EngagementStatus::Active => true,
+            EngagementStatus::ReplacementRequested | EngagementStatus::Offered => false,
+        };
+
+        let storage = env.storage().persistent();
+        let mut candidates: Vec<NextAction> = Vec::new(&env);
+        let open_milestones = || {
+            (0..engagement.milestones.len()).filter(|&i| {
+                !Self::is_milestone_on_hold_internal(&env, &engagement_id, i)
+            })
+        };
+
+        // 1. Disputes.
+        if active {
+            let super_arbiter_configured = env.storage().instance().has(&DataKey::SuperArbiter)
+                || env.storage().instance().has(&DataKey2::SuperArbiterPanel);
+            for i in open_milestones() {
+                if engagement.milestones.get(i).unwrap().status != MilestoneStatus::Disputed {
+                    continue;
+                }
+                // Issue #657: while the evidence window is open, neither
+                // party has finished presenting evidence, so the only next
+                // action is to attach evidence (or wait for the window).
+                let raised_at: u32 = storage
+                    .get(&DataKey::DisputeRaisedAt(engagement_id.clone(), i))
+                    .unwrap_or(now);
+                let evidence_ends_at = raised_at
+                    .saturating_add(Self::evidence_window_internal(&env));
+                if now < evidence_ends_at {
+                    candidates.push_back(step(
+                        ActorRole::Anyone,
+                        ActionKind::AwaitingEvidence,
+                        Some(i),
+                        evidence_ends_at,
+                    ));
+                    continue;
+                }
+                let escalated: bool = storage
+                    .get(&DataKey::EscalatedDispute(engagement_id.clone(), i))
+                    .unwrap_or(false);
+                if escalated {
+                    let escalated_at: u32 = storage
+                        .get(&DataKey::EscalatedAt(engagement_id.clone(), i))
+                        .unwrap_or(now);
+                    let timeout_at = escalated_at
+                        .saturating_add(Self::get_super_arbiter_deadline(env.clone()))
+                        .saturating_add(1);
+                    candidates.push_back(if now >= timeout_at {
+                        step(ActorRole::Anyone, ActionKind::ResolveEscalationTimeout, Some(i), timeout_at)
+                    } else {
+                        step(ActorRole::Arbiter, ActionKind::ResolveEscalation, Some(i), now)
+                    });
+                    continue;
+                }
+                let raised_at: u32 = storage
+                    .get(&DataKey::DisputeRaisedAt(engagement_id.clone(), i))
+                    .unwrap_or(now);
+                let cycles: u32 = storage
+                    .get(&DataKey2::DisputeCycles(engagement_id.clone(), i))
+                    .unwrap_or(0);
+                let escalate_at = if cycles >= Self::get_max_dispute_cycles(env.clone()) {
+                    now
+                } else {
+                    evidence_ends_at
+                        .saturating_add(Self::engagement_dispute_window_internal(&env, &engagement_id))
+                        .saturating_add(1)
+                };
+                candidates.push_back(if super_arbiter_configured && now >= escalate_at {
+                    step(ActorRole::Anyone, ActionKind::EscalateDispute, Some(i), escalate_at)
+                } else {
+                    step(ActorRole::Arbiter, ActionKind::CastArbiterVote, Some(i), now)
+                });
+            }
+        }
+
+        // 2. Pending proposals.
+        if storage.has(&DataKey::ProposedRecruiterTransfer(engagement_id.clone())) {
+            candidates.push_back(step(ActorRole::Company, ActionKind::AcceptProposal, None, now));
+        }
+        if active {
+            if let Some(p) = Self::get_dispute_window_proposal(env.clone(), engagement_id.clone()) {
+                let actor = if p.proposed_by_company {
+                    ActorRole::Recruiter
+                } else {
+                    ActorRole::Company
+                };
+                candidates.push_back(step(actor, ActionKind::AcceptProposal, None, now));
+            }
+            if Self::get_pending_split_amendment(env.clone(), engagement_id.clone()).is_some() {
+                candidates.push_back(step(ActorRole::Recruiter, ActionKind::AcceptProposal, None, now));
+            }
+        }
+
+        // 3. Confirmations.
+        if active {
+            let confirm_window = Self::get_confirm_window(env.clone());
+            for i in open_milestones() {
+                let m = engagement.milestones.get(i).unwrap();
+                if m.status != MilestoneStatus::ProofSubmitted
+                    || !Self::prerequisites_complete(&engagement, &m)
+                {
+                    continue;
+                }
+                let retention_gate = if m.kind == MilestoneKind::Retention {
+                    m.valid_after_ledger
+                } else {
+                    0
+                };
+                let force_at = m
+                    .proof_submitted_at
+                    .saturating_add(confirm_window)
+                    .saturating_add(1);
+                candidates.push_back(if now >= force_at {
+                    step(ActorRole::Anyone, ActionKind::ForceConfirm, Some(i), force_at.max(retention_gate))
+                } else {
+                    step(ActorRole::Company, ActionKind::ConfirmMilestone, Some(i), retention_gate)
+                });
+            }
+        }
+
+        // 4. Proof submissions.
+        for i in open_milestones() {
+            if engagement.milestones.get(i).unwrap().status != MilestoneStatus::Pending {
+                continue;
+            }
+            let gate = storage
+                .get::<DataKey, u32>(&DataKey::LastProofAt(engagement_id.clone(), i))
+                .map(|last| {
+                    last.saturating_add(Self::effective_proof_cooldown_internal(
+                        &env,
+                        &engagement.recruiter,
+                    ))
+                })
+                .unwrap_or(now);
+            candidates.push_back(step(ActorRole::Recruiter, ActionKind::SubmitProof, Some(i), gate));
+        }
+
+        // 5. Unlocks.
+        if active {
+            for i in open_milestones() {
+                let m = engagement.milestones.get(i).unwrap();
+                if m.status == MilestoneStatus::Locked && m.kind == MilestoneKind::Retention {
+                    candidates.push_back(step(
+                        ActorRole::Anyone,
+                        ActionKind::UnlockMilestone,
+                        Some(i),
+                        m.valid_after_ledger,
+                    ));
+                }
+            }
+        }
+
+        let mut best: Option<NextAction> = None;
+        for c in candidates.iter() {
+            if c.available_at_ledger == now {
+                return Some(c);
+            }
+            if best
+                .as_ref()
+                .map_or(true, |b| c.available_at_ledger < b.available_at_ledger)
+            {
+                best = Some(c);
+            }
+        }
+        best
     }
 }

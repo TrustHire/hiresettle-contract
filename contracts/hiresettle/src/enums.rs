@@ -1,7 +1,7 @@
 //! Contract enums (`#[contracttype]`), including the `DataKey`/`DataKey2`
 //! storage key space.
 
-use soroban_sdk::{contracttype, Address, String};
+use soroban_sdk::{contracttype, Address, BytesN, String};
 
 /// Lifecycle state of a single milestone.
 #[contracttype]
@@ -78,6 +78,8 @@ pub enum ActionKind {
     /// Accept (or reject) a pending proposal: a recruiter transfer, a dispute
     /// window override, a split amendment, or a recruiter exit request.
     AcceptProposal,
+    /// Attach dispute evidence; the evidence window is still open (issue #657).
+    AwaitingEvidence,
 }
 /// Distinguishes the two business-logic types of milestones.
 #[contracttype]
@@ -227,6 +229,14 @@ pub enum ConfigKey {
     /// Ledgers arbiters have to vote after a dispute is raised (issue #560).
     /// 0 (the default) disables `enforce_vote_deadline`.
     ArbiterVoteDeadline,
+    /// When true, panel votes must be committed and revealed (issue #656).
+    CommitRevealVoting,
+    /// Length of the commit phase in ledgers, measured from dispute raise
+    /// (issue #656). `0` disables commit-reveal entirely.
+    CommitPhaseLedgers,
+    /// Ledgers after a dispute is raised during which arbiters may not vote,
+    /// while both parties may attach evidence (issue #657). Default 0.
+    EvidenceWindowLedgers,
     /// TTL in ledgers for pending config change proposals
     /// (default `DEFAULT_CONFIG_CHANGE_TTL`).
     ConfigChangeTTL,
@@ -260,6 +270,17 @@ pub enum CompanyMemberRole {
     Confirmer,
     /// May call `raise_dispute` / `batch_raise_dispute`.
     Disputer,
+}
+/// What an attester may verify (issue #661).
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum AttesterScope {
+    /// May set or clear recruiter verification only.
+    Recruiter,
+    /// May set or clear company verification only.
+    Company,
+    /// May set or clear both recruiter and company verification.
+    Both,
 }
 /// Contract storage key space. Instance keys reset between transactions;
 /// persistent keys survive across ledgers.
@@ -573,14 +594,27 @@ pub enum DataKey3 {
     /// Rotation vote tally for replacing (current_signer, new_signer) in the
     /// emergency signer set.
     EmergencyRotationVotes(Address, Address),
-    /// Current owner of `(company, commitment)` (issue #675).
-    CandidateOwner(Address, String),
-    /// Escrow dust recorded per completed engagement (issue #673).
-    EscrowDustRefund(String),
-    /// Commitment hash registered by an engagement (issue #675).
-    CandidateCommitmentIndex(String),
-    /// Ledger at which future retainer instalments were cancelled (issue #674).
-    RetainerCancelled(String, u32),
-    /// Ledger at which a retainer clock was paused (issue #674).
-    RetainerPausedAt(String, u32),
+    /// Stake token and tiers `(Address, Vec<RecruiterStakeTier>)` set by
+    /// `set_recruiter_stake_tiers` (issue #663). Absent ⇒ staking disabled.
+    RecruiterStakeConfig,
+    /// Ledgers unstaked recruiter stake waits before it can be withdrawn
+    /// (issue #663). Absent ⇒ `DEFAULT_STAKE_UNBONDING_DELAY_LEDGERS`.
+    StakeUnbondingDelay,
+    /// A recruiter's stake record (issue #663).
+    RecruiterStake(Address),
+    /// Confirmation receipt for (engagement_id, milestone_index) (issue #665).
+    MilestoneReceipt(String, u32),
+    /// FIFO-capped proof submission / withdrawal history for
+    /// (engagement_id, milestone_index) (issue #666).
+    ProofHistory(String, u32),
+}
+
+/// What a [`crate::ProofHistoryEntry`] records (issue #666).
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum ProofAction {
+    /// `submit_proof` / `submit_proof_root` moved the milestone to `ProofSubmitted`.
+    Submitted,
+    /// `withdraw_proof` moved it back to `Pending`.
+    Withdrawn,
 }
