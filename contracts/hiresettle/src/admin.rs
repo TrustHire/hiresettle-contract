@@ -2043,6 +2043,69 @@ impl HireSettleContract {
     }
 
     // ----------------------------------------------------------
+    // ISSUE #660 — COMPANY VERIFICATION BADGE
+    // ----------------------------------------------------------
+
+    /// Set or clear a company's verification badge. `expires_at_ledger` of 0
+    /// means the badge never expires; otherwise it must be in the future.
+    /// Verification is read-only metadata and never gates a lifecycle flow.
+    ///
+    /// # Events
+    /// Emits `("company_verification_changed", company)` with
+    /// `(verified, expires_at_ledger)`.
+    pub fn set_company_verified(
+        env: Env,
+        admin: Address,
+        company: Address,
+        verified: bool,
+        expires_at_ledger: u32,
+    ) {
+        Self::assert_admin(&env, &admin);
+        let verified_key = DataKey3::CompanyVerified(company.clone());
+        let expiry_key = DataKey3::CompanyVerificationExpiry(company.clone());
+        if verified {
+            if expires_at_ledger != 0 && expires_at_ledger <= env.ledger().sequence() {
+                panic!("VerificationExpiryMustBeFuture");
+            }
+            env.storage().persistent().set(&verified_key, &true);
+            env.storage()
+                .persistent()
+                .set(&expiry_key, &expires_at_ledger);
+            env.storage()
+                .persistent()
+                .extend_ttl(&verified_key, 100_000, 6_300_000);
+            env.storage()
+                .persistent()
+                .extend_ttl(&expiry_key, 100_000, 6_300_000);
+        } else {
+            env.storage().persistent().remove(&verified_key);
+            env.storage().persistent().remove(&expiry_key);
+        }
+        env.events().publish(
+            (Symbol::new(&env, "company_verification_changed"), company),
+            (verified, expires_at_ledger),
+        );
+    }
+
+    /// Whether the company currently carries a valid (unexpired) badge.
+    pub fn is_company_verified(env: Env, company: Address) -> bool {
+        if !env
+            .storage()
+            .persistent()
+            .get::<DataKey3, bool>(&DataKey3::CompanyVerified(company.clone()))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let expiry: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::CompanyVerificationExpiry(company))
+            .unwrap_or(0);
+        expiry == 0 || env.ledger().sequence() < expiry
+    }
+
+    // ----------------------------------------------------------
     // ROLE-BASED ADMIN — SEPARATE PAUSER, FEE MANAGER, AND ARBITER-POOL MANAGER ROLES
     // ----------------------------------------------------------
 

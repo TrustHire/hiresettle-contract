@@ -85,6 +85,105 @@ impl HireSettleContract {
         )
     }
 
+    /// Issue #668: create an engagement whose milestones specify either a
+    /// percentage or an absolute token amount. `payment_plan` must be parallel
+    /// to `milestones`. Absolute amounts must sum (together with the amounts
+    /// implied by any percent entries) to exactly `total_amount`.
+    /// Percent-only engagements behave exactly as with `create_engagement`.
+    pub fn create_engagement_payment_plan(
+        env: Env,
+        engagement_id: String,
+        company: Address,
+        recruiter: Address,
+        arbiter_setup: ArbiterSetup,
+        params: PaymentPlanParams,
+    ) -> String {
+        let PaymentPlanParams {
+            token,
+            total_amount,
+            job_title,
+            milestones,
+            payment_plan,
+            retention_days,
+            config,
+        } = params;
+        Self::assert_not_paused(&env);
+        company.require_auth();
+        if payment_plan.len() != milestones.len() {
+            panic!("InvalidPaymentPlanLength");
+        }
+        if total_amount <= 0 {
+            panic!("amount must be greater than zero");
+        }
+
+        let mut amounts: Vec<i128> = Vec::new(&env);
+        let mut sum: i128 = 0;
+        let mut percent_total: u32 = 0;
+        let mut updated = milestones.clone();
+        for i in 0..payment_plan.len() {
+            let amount = match payment_plan.get(i).unwrap() {
+                MilestonePayment::Percent(percent) => {
+                    if percent > 100 {
+                        panic!("InvalidPercentages");
+                    }
+                    percent_total += percent;
+                    (total_amount * percent as i128) / 100
+                }
+                MilestonePayment::Absolute(amount) => {
+                    if amount <= 0 {
+                        panic!("InvalidAmount");
+                    }
+                    amount
+                }
+            };
+            sum += amount;
+            amounts.push_back(amount);
+        }
+        if sum != total_amount || percent_total > 100 {
+            panic!("milestone amounts must sum to total_amount");
+        }
+
+        // Keep `payment_percent` coherent for metadata and existing queries.
+        // Exact amounts are stored separately and used for every gross payout.
+        let mut allocated_percent: u32 = 0;
+        for i in 0..updated.len() {
+            if let MilestonePayment::Absolute(_) = payment_plan.get(i).unwrap() {
+                let mut m = updated.get(i).unwrap();
+                let percent = if i == updated.len() - 1 {
+                    100u32.saturating_sub(allocated_percent)
+                } else {
+                    let p = ((amounts.get(i).unwrap() * 100) / total_amount) as u32;
+                    allocated_percent += p;
+                    p
+                };
+                m.payment_percent = percent;
+                updated.set(i, m);
+            } else {
+                allocated_percent += updated.get(i).unwrap().payment_percent;
+            }
+        }
+
+        let id = Self::create_engagement_impl(
+            env.clone(),
+            engagement_id.clone(),
+            company,
+            recruiter,
+            arbiter_setup,
+            token,
+            total_amount,
+            job_title,
+            updated,
+            retention_days,
+            config,
+        );
+        let key = DataKey3::AbsoluteMilestoneAmounts(engagement_id);
+        env.storage().persistent().set(&key, &amounts);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+        id
+    }
+
     /// Shared engagement-creation logic behind `create_engagement`, factored
     /// out so `batch_create_engagements` (issue #260) can authorize each
     /// distinct company address once up front and then create every one of
@@ -474,6 +573,13 @@ impl HireSettleContract {
         }
         if total_percent != 100 {
             panic!("milestone percentages must sum to 100");
+        }
+
+        // Issue #662: persist the opt-in flag; premiums are charged at payout.
+        if config.insured {
+            env.storage()
+                .persistent()
+                .set(&DataKey3::EngagementInsured(engagement_id.clone()), &true);
         }
 
         // Issue #461: prerequisite indices must be in range and acyclic.
