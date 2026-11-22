@@ -212,6 +212,9 @@ impl HireSettleContract {
     ) {
         let milestone = Self::get_milestone_or_panic(engagement, milestone_index);
 
+        if matches!(&milestone.kind, MilestoneKind::Retainer(_)) {
+            panic!("RetainerNotDisputable");
+        }
         if milestone.status != MilestoneStatus::ProofSubmitted {
             panic!("can only dispute a submitted proof");
         }
@@ -1199,6 +1202,7 @@ impl HireSettleContract {
         let old_engagement_status = engagement.status.clone();
         if all_done {
             engagement.status = EngagementStatus::Completed;
+            Self::sweep_dust_on_completion(&env, &mut *engagement);
             Self::settle_bonds(env, engagement);
             Self::decrement_company_active_count(env, &engagement.company);
             Self::refund_split_withheld(env, engagement_id, engagement);
@@ -2221,6 +2225,7 @@ impl HireSettleContract {
             let old_engagement_status = engagement.status.clone();
             if all_done {
                 engagement.status = EngagementStatus::Completed;
+                Self::sweep_dust_on_completion(&env, &mut engagement);
                 Self::settle_bonds(&env, &engagement);
                 Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
                 Self::decrement_company_active_count(&env, &engagement.company);
@@ -2448,6 +2453,7 @@ impl HireSettleContract {
         let old_engagement_status = engagement.status.clone();
         if all_done {
             engagement.status = EngagementStatus::Completed;
+            Self::sweep_dust_on_completion(&env, &mut engagement);
             Self::settle_bonds(&env, &engagement);
             Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
             Self::decrement_company_active_count(&env, &engagement.company);
@@ -2856,6 +2862,7 @@ impl HireSettleContract {
         let old_engagement_status = engagement.status.clone();
         if all_done {
             engagement.status = EngagementStatus::Completed;
+            Self::sweep_dust_on_completion(&env, &mut engagement);
             Self::settle_bonds(&env, &engagement);
             Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
             Self::decrement_company_active_count(&env, &engagement.company);

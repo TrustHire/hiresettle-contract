@@ -92,6 +92,10 @@ pub enum MilestoneKind {
     /// Starts `Locked`; `unlock_milestone` moves it to `Pending` once
     /// `env.ledger().sequence() >= valid_after_ledger`.
     Retention,
+    /// Recurring retainer instalment (issue #674). Starts `Pending`, unlocks
+    /// automatically every `interval_ledgers`, and is claimed by the recruiter
+    /// without proof. Cannot be disputed after a claim.
+    Retainer(u32),
 }
 /// Top-level lifecycle state of an engagement.
 #[contracttype]
@@ -239,6 +243,12 @@ pub enum ConfigKey {
     /// Quarantine escape delay in ledgers (issue #590). `0` (the default)
     /// disables `emergency_exit`.
     PauseEscapeDelay,
+    /// Ownership window, in ledgers, for candidate commitments (issue #675).
+    /// `0` disables ownership tracking entirely.
+    CandidateOwnershipWindow,
+    /// Maximum remaining escrow (in stroops) refunded to the company when an
+    /// engagement completes (issue #673). `0` disables dust sweeps.
+    DustThreshold,
     /// Ledger at which an engagement was last (re-)paused via
     /// `pause_engagement` (issue #590). Cleared by `unpause_engagement`
     /// so unpausing resets the escape timer.

@@ -445,6 +445,29 @@ impl HireSettleContract {
             panic!("InvalidStreamDuration");
         }
 
+        // Issue #670: withholding bps must be valid and, together with the
+        // platform and arbiter fees, must never exceed 10 000 bps so a payout
+        // cannot go negative.
+        if config.withholding_address.is_some() {
+            let bps = config.withholding_bps;
+            if bps > FULL_SPLIT_BPS {
+                panic!("InvalidWithholdingBps");
+            }
+            let platform_bps = Self::resolve_platform_fee_bps(
+                &env,
+                Self::get_platform_fee_internal(&env).bps,
+                total_amount,
+            );
+            let arbiter_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::Config(ConfigKey::ArbiterFee))
+                .unwrap_or(0);
+            if (bps as u64 + platform_bps as u64 + arbiter_bps as u64) > FULL_SPLIT_BPS as u64 {
+                panic!("InvalidWithholdingBps");
+            }
+        }
+
         let mut total_percent: u32 = 0;
         for i in 0..milestones.len() {
             total_percent += milestones.get(i).unwrap().payment_percent;
@@ -499,6 +522,13 @@ impl HireSettleContract {
             match m.kind {
                 MilestoneKind::Placement => {
                     m.valid_after_ledger = 0;
+                    m.status = MilestoneStatus::Pending;
+                }
+                MilestoneKind::Retainer(interval_ledgers) => {
+                    if interval_ledgers == 0 {
+                        panic!("InvalidRetainerInterval");
+                    }
+                    m.valid_after_ledger = current_ledger.saturating_add(interval_ledgers);
                     m.status = MilestoneStatus::Pending;
                 }
                 MilestoneKind::Retention => {
@@ -874,6 +904,7 @@ impl HireSettleContract {
         Self::refund_company_escrow(&env, &engagement, &engagement_id, refund);
 
         engagement.status = EngagementStatus::Cancelled;
+            Self::clear_candidate_ownership(&env, &engagement);
         engagement.last_activity_ledger = env.ledger().sequence();
         env.storage()
             .persistent()
@@ -983,6 +1014,10 @@ impl HireSettleContract {
                         // Issue #465: restart the no-show clock for the replacement.
                         Self::mark_milestone_pending_since(&env, &engagement_id, i);
                     }
+                }
+                MilestoneKind::Retainer(_) => {
+                    // Retainer instalments are not tied to a candidate; a
+                    // replacement request leaves them untouched.
                 }
                 MilestoneKind::Retention => {
                     if m.status != MilestoneStatus::Confirmed
@@ -1218,6 +1253,7 @@ impl HireSettleContract {
 
         let old_engagement_status = engagement.status.clone();
         engagement.status = EngagementStatus::Cancelled;
+            Self::clear_candidate_ownership(&env, &engagement);
         engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
@@ -1343,6 +1379,7 @@ impl HireSettleContract {
 
         let old_engagement_status = engagement.status.clone();
         engagement.status = EngagementStatus::Cancelled;
+            Self::clear_candidate_ownership(&env, &engagement);
         engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
@@ -1535,6 +1572,7 @@ impl HireSettleContract {
 
         let old_engagement_status = engagement.status.clone();
         engagement.status = EngagementStatus::Cancelled;
+            Self::clear_candidate_ownership(&env, &engagement);
         engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()

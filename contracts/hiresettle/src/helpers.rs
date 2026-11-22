@@ -700,10 +700,33 @@ impl HireSettleContract {
     pub(crate) fn distribute_recruiter_payout(
         env: &Env,
         engagement: &Engagement,
-        net_payment: i128,
+        mut net_payment: i128,
         token_client: &token::Client,
         apply_payout_preference: bool,
     ) {
+        // Issue #670: route the configured share of each recruiter payout to
+        // the withholding address. This runs after platform / arbiter fees
+        // (callers pass the net amount) and before the recruiter split, so it
+        // applies on every payout path: confirm, auto-confirm, dispute,
+        // streaming and pull payouts.
+        if let Some(address) = &engagement.withholding_address {
+            let amount = net_payment
+                .checked_mul(engagement.withholding_bps as i128)
+                .map(|v| v / FULL_SPLIT_BPS as i128)
+                .unwrap_or(0)
+                .min(net_payment.max(0));
+            if amount > 0 {
+                token_client.transfer(&env.current_contract_address(), address, &amount);
+                env.events().publish(
+                    (
+                        soroban_sdk::Symbol::new(env, "withholding_transferred"),
+                        engagement.id.clone(),
+                    ),
+                    (address.clone(), amount),
+                );
+            }
+            net_payment -= amount;
+        }
         let pull = Self::is_pull_payouts_internal(env, &engagement.id);
         let pay = |recipient: &Address, amount: i128| {
             if pull {
