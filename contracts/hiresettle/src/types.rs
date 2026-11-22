@@ -112,7 +112,8 @@ pub struct Engagement {
     pub end_ledger: Option<u32>,
     /// Per-engagement withholding: `(address, bps)` deducted from every
     /// recruiter payout after platform fees (issue #670).
-    pub withholding: Option<(Address, u32)>,
+    pub withholding_address: Option<Address>,
+    pub withholding_bps: u32,
 }
 /// A lightweight read-only view of an engagement, suitable for list/dashboard APIs.
 ///
@@ -376,7 +377,8 @@ pub struct EngagementConfig {
     pub end_ledger: Option<u32>,
     /// Withholding destination and rate in basis points, applied to every
     /// recruiter payout on this engagement (issue #670).
-    pub withholding: Option<(Address, u32)>,
+    pub withholding_address: Option<Address>,
+    pub withholding_bps: u32,
 }
 /// Vesting record for a streamed milestone payout (issue #466), stored under
 /// `DataKey::StreamedPayout(engagement_id, milestone_index)`.

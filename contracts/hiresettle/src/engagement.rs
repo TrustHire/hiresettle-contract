@@ -359,6 +359,29 @@ impl HireSettleContract {
             panic!("InvalidStreamDuration");
         }
 
+        // Issue #670: withholding bps must be valid and, together with the
+        // platform and arbiter fees, must never exceed 10 000 bps so a payout
+        // cannot go negative.
+        if config.withholding_address.is_some() {
+            let bps = config.withholding_bps;
+            if bps > FULL_SPLIT_BPS {
+                panic!("InvalidWithholdingBps");
+            }
+            let platform_bps = Self::resolve_platform_fee_bps(
+                &env,
+                Self::get_platform_fee_internal(&env).bps,
+                total_amount,
+            );
+            let arbiter_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::Config(ConfigKey::ArbiterFee))
+                .unwrap_or(0);
+            if (bps as u64 + platform_bps as u64 + arbiter_bps as u64) > FULL_SPLIT_BPS as u64 {
+                panic!("InvalidWithholdingBps");
+            }
+        }
+
         let mut total_percent: u32 = 0;
         for i in 0..milestones.len() {
             total_percent += milestones.get(i).unwrap().payment_percent;
@@ -520,7 +543,8 @@ impl HireSettleContract {
             is_public: config.is_public,
             stream_duration_ledgers: config.stream_duration_ledgers,
             end_ledger: config.end_ledger,
-            withholding: config.withholding.clone(),
+            withholding_address: config.withholding_address.clone(),
+            withholding_bps: config.withholding_bps,
         };
 
         env.storage()
