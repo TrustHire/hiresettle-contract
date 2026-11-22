@@ -2360,7 +2360,7 @@ impl HireSettleContract {
     ///     (issue #461)
     ///
     /// Releases payment to the recruiter (with platform fee) and emits
-    /// `milestone_force_confirmed`. The recruiter's net share honours their
+    /// `milestone_force_confirmed` and `milestone_payout` (issue #669). The recruiter's net share honours their
     /// payout token preference (issue #458).
     pub fn force_confirm_milestone(
         env: Env,
@@ -2468,6 +2468,13 @@ impl HireSettleContract {
                 engagement_id.clone(),
             ),
             (milestone_index, payment),
+        );
+        Self::record_milestone_receipt(
+            &env,
+            &engagement_id,
+            milestone_index,
+            payment,
+            Some(caller.clone()),
         );
 
         if all_done {

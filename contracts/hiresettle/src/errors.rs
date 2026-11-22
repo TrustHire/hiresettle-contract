@@ -39,6 +39,7 @@
 //! | `ArbiterWeightOverflow` | — | `engagement::create_engagement_impl` | 1 |
 //! | `ArbiterWeightsLengthMismatch` | — | `engagement::create_engagement_impl` | 1 |
 //! | `at least one arbiter required` | — | `bonds::create_engagement_bundle`, `engagement::create_engagement_impl`, `transfers::admin_remove_arbiter` | 3 |
+//! | `AttesterNotAuthorized` | — | `integrations::assert_attester_scope` | 1 |
 //! | `BundleAlreadyExists` | — | `bonds::create_engagement_bundle` | 1 |
 //! | `BundleCompanyMismatch` | — | `bonds::load_bundle_for` | 1 |
 //! | `BundleNotFound` | — | `bonds::load_bundle_for` | 1 |
@@ -181,6 +182,9 @@
 //! | `old signer not in emergency signer set` | — | `admin::propose_signer_rotation` | 1 |
 //! | `only placement milestones can be forfeited` | — | `milestones::trigger_no_show` | 1 |
 //! | `only retention milestones can be unlocked this way` | — | `milestones::unlock_milestone` | 1 |
+//! | `OracleNotPlacementMilestone` | — | `integrations::oracle_confirm_milestone` | 1 |
+//! | `OracleNotRegistered` | — | `integrations::oracle_confirm_milestone`, `integrations::validate_placement_oracle` | 2 |
+//! | `OracleRecruiterCollision` | — | `integrations::validate_placement_oracle` | 1 |
 //! | `PanelChangeDuringDispute` | — | `transfers::get_engagement_for_panel_change` | 1 |
 //! | `PartialConfirmationExpired` | — | `milestones::accept_partial_confirmation` | 1 |
 //! | `PauseReasonTooLong` | — | `admin::pause_engagement` | 1 |

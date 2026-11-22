@@ -34,7 +34,7 @@ extern crate std;
 use super::*;
 use soroban_sdk::{
     testutils::{Address as _, Events, Ledger, MockAuth, MockAuthInvoke},
-    contract, contractimpl, token, vec, Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
+    contract, contractimpl, token, vec, Address, Env, IntoVal, String, Symbol,
     TryIntoVal,
     Vec,
 };
@@ -195,6 +195,8 @@ fn default_config() -> EngagementConfig {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        placement_oracle: None,
+        external_ref: None,
     }
 }
 
@@ -1419,6 +1421,8 @@ fn test_metadata_hash_present() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+            placement_oracle: None,
+            external_ref: None,
         },
     );
 
@@ -1482,6 +1486,8 @@ fn test_metadata_hash_empty_string_rejected() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+            placement_oracle: None,
+            external_ref: None,
         },
     );
 }
@@ -1514,6 +1520,8 @@ fn test_co_recruiter_60_40_split() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        placement_oracle: None,
+        external_ref: None,
     };
 
     client.create_engagement(
@@ -1611,6 +1619,8 @@ fn test_split_bps_over_10000_rejected() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        placement_oracle: None,
+        external_ref: None,
     };
 
     client.create_engagement(
@@ -1656,6 +1666,8 @@ fn test_co_recruiter_gets_remainder() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        placement_oracle: None,
+        external_ref: None,
     };
 
     client.create_engagement(
@@ -1716,6 +1728,8 @@ fn test_co_recruiter_summary_fields() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        placement_oracle: None,
+        external_ref: None,
     };
 
     client.create_engagement(
@@ -1765,6 +1779,8 @@ fn test_split_bps_10000_accepted() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        placement_oracle: None,
+        external_ref: None,
     };
 
     client.create_engagement(
@@ -3178,7 +3194,7 @@ fn test_token_platform_fee_non_admin_rejected() {
 
 #[test]
 fn test_multiple_tokens_different_overrides() {
-    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let (env, contract_id, token_id, company, _recruiter, _arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
     
     // Create second token
@@ -7725,6 +7741,8 @@ fn test_co_recruiter_split_with_platform_fee() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        placement_oracle: None,
+        external_ref: None,
     };
 
     client.create_engagement(
@@ -8143,6 +8161,8 @@ fn test_co_recruiter_split_with_odd_percentage_remainder() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        placement_oracle: None,
+        external_ref: None,
     };
 
     client.create_engagement(
@@ -9559,6 +9579,8 @@ fn test_split_amendment_applies_to_future_not_past() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+            placement_oracle: None,
+            external_ref: None,
         },
     );
 
@@ -9616,6 +9638,8 @@ fn test_split_amendment_proposer_cannot_accept() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+            placement_oracle: None,
+            external_ref: None,
         },
     );
     client.propose_split_amendment(&recruiter, &eng_id, &5_000);
@@ -9644,6 +9668,8 @@ fn test_split_amendment_expires() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+            placement_oracle: None,
+            external_ref: None,
         },
     );
     client.set_amendment_ttl(&company, &100);
@@ -13308,7 +13334,7 @@ fn test_missed_vote_deadline_lowers_selection_weight() {
 /// Default config change TTL is 17_280 ledgers (~1 day).
 #[test]
 fn test_get_config_change_ttl_default() {
-    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
 
     assert_eq!(client.get_config_change_ttl(), 17_280u32);
@@ -13348,7 +13374,7 @@ fn test_propose_config_change() {
     let p = proposal.unwrap();
     assert_eq!(p.change_id, 1u64);
     assert_eq!(p.proposer, company);
-    assert_eq!(p.cancelled, false);
+    assert!(!p.cancelled);
     assert!(p.expires_at_ledger > 100); // sequence starts at 100
 }
 
@@ -13439,7 +13465,7 @@ fn test_cancel_config_change() {
 
     let proposal = client.get_pending_config_change(&change_id);
     assert!(proposal.is_some());
-    assert_eq!(proposal.unwrap().cancelled, true);
+    assert!(proposal.unwrap().cancelled);
 }
 
 /// Non-admin cannot cancel a config change.

@@ -113,6 +113,8 @@ impl HireSettleContract {
 
     /// Assert that the caller is authorized as the arbiter pool manager role.
     /// Falls back to the main admin if no dedicated arbiter pool manager is set.
+    // Not wired to an entry point yet; kept for the role-based admin work.
+    #[allow(dead_code)]
     pub(crate) fn assert_arbiter_pool_manager(env: &Env, caller: &Address) {
         caller.require_auth();
         
@@ -568,15 +570,6 @@ impl HireSettleContract {
     // ISSUE #462 — SPLIT-VOTE WITHHELD ESCROW
     // ----------------------------------------------------------
 
-    /// Refund to the company any milestone share withheld by split-vote
-    /// resolutions. Call whenever an engagement transitions to `Completed`;
-    /// a no-op for engagements that never had a split resolution. Cancel and
-    /// expiry need no call because they already refund
-    /// `total_amount - released_amount`, which includes the withheld amount.
-    ///
-    /// The refund is added to `released_amount` so `total_amount -
-    /// released_amount` keeps reporting the true escrow balance, and is capped
-    /// at that balance so it can never over-draw escrow and block completion.
     // ----------------------------------------------------------
     // ISSUE #578 — TOKEN TVL AND POOLED BALANCE AGGREGATES
     // ----------------------------------------------------------
@@ -608,6 +601,15 @@ impl HireSettleContract {
             .extend_ttl(&key, 100_000, 6_300_000);
     }
 
+    /// Refund to the company any milestone share withheld by split-vote
+    /// resolutions. Call whenever an engagement transitions to `Completed`;
+    /// a no-op for engagements that never had a split resolution. Cancel and
+    /// expiry need no call because they already refund
+    /// `total_amount - released_amount`, which includes the withheld amount.
+    ///
+    /// The refund is added to `released_amount` so `total_amount -
+    /// released_amount` keeps reporting the true escrow balance, and is capped
+    /// at that balance so it can never over-draw escrow and block completion.
     pub(crate) fn refund_split_withheld(
         env: &Env,
         engagement_id: &String,

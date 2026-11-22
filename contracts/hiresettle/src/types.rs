@@ -374,6 +374,16 @@ pub struct EngagementConfig {
     /// retention milestone's earliest unlock when set. `None` keeps today's
     /// behaviour.
     pub end_ledger: Option<u32>,
+    /// Optional registered placement oracle (issue #667), e.g. an HRIS
+    /// integration, allowed to confirm this engagement's `Placement`
+    /// milestones via `oracle_confirm_milestone`. Must be in the admin
+    /// registry at creation. The company keeps its manual confirm and
+    /// dispute rights. `None` keeps manual-only confirmation.
+    pub placement_oracle: Option<Address>,
+    /// Optional ATS / job-board identifier (issue #572), at most 64
+    /// characters and unique per company. Looked up with
+    /// `get_engagement_by_external_ref`.
+    pub external_ref: Option<String>,
 }
 /// Vesting record for a streamed milestone payout (issue #466), stored under
 /// `DataKey::StreamedPayout(engagement_id, milestone_index)`.
