@@ -1,7 +1,7 @@
 //! Contract enums (`#[contracttype]`), including the `DataKey`/`DataKey2`
 //! storage key space.
 
-use soroban_sdk::{contracttype, Address, String};
+use soroban_sdk::{contracttype, Address, BytesN, String};
 
 /// Lifecycle state of a single milestone.
 #[contracttype]
@@ -563,4 +563,14 @@ pub enum DataKey3 {
     /// Rotation vote tally for replacing (current_signer, new_signer) in the
     /// emergency signer set.
     EmergencyRotationVotes(Address, Address),
+    /// Admin-configured window (in ledgers) in which the same candidate
+    /// commitment cannot be placed twice for one company (issue #573).
+    /// `0` disables the duplicate check.
+    CandidateDuplicateWindow,
+    /// Company-scoped index from `(company, commitment)` to the engagement and
+    /// ledger where the candidate was committed (issue #573).
+    CandidatePlacement(Address, BytesN<32>),
+    /// Commitment submitted for an engagement's Placement milestone, keyed by
+    /// `(engagement_id, milestone_index)` (issue #573).
+    CandidateCommitment(String, u32),
 }
