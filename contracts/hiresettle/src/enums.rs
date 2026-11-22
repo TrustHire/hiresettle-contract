@@ -563,4 +563,8 @@ pub enum DataKey3 {
     /// Rotation vote tally for replacing (current_signer, new_signer) in the
     /// emergency signer set.
     EmergencyRotationVotes(Address, Address),
+    /// Issue #659: category assigned to a dispute on a milestone.
+    DisputeCategory(String, u32),
+    /// Issue #659: (engagement id, milestone index) pairs by dispute category.
+    DisputesByCategory(String),
 }

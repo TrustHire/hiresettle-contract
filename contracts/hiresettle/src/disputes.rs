@@ -101,6 +101,60 @@ impl HireSettleContract {
     }
 
     // ----------------------------------------------------------
+    // ISSUE #659 — DISPUTES BY CATEGORY
+    // ----------------------------------------------------------
+
+    /// Raise a dispute and tag it with `category` for category-indexed queries.
+    /// The category is durable: it stays in the index after the dispute is
+    /// resolved, so dashboards can list historical disputes too.
+    pub fn raise_dispute_with_category(
+        env: Env,
+        company: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        reason: String,
+        category: String,
+    ) {
+        env.storage().persistent().set(
+            &DataKey3::DisputeCategory(engagement_id.clone(), milestone_index),
+            &category,
+        );
+        Self::raise_dispute(env, company, engagement_id, milestone_index, reason);
+    }
+
+    /// Add a newly raised dispute to its category index (idempotent).
+    pub(crate) fn record_dispute_category(
+        env: &Env,
+        engagement_id: &String,
+        milestone_index: u32,
+    ) {
+        let Some(category) = env
+            .storage()
+            .persistent()
+            .get::<DataKey3, String>(&DataKey3::DisputeCategory(
+                engagement_id.clone(),
+                milestone_index,
+            ))
+        else {
+            return;
+        };
+        let key = DataKey3::DisputesByCategory(category);
+        let mut entries: Vec<(String, u32)> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        let entry = (engagement_id.clone(), milestone_index);
+        if !(0..entries.len()).any(|i| entries.get(i).unwrap() == entry) {
+            entries.push_back(entry);
+            env.storage().persistent().set(&key, &entries);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, 100_000, 6_300_000);
+        }
+    }
+
+    // ----------------------------------------------------------
     // ISSUE #498 — BATCH RAISE DISPUTE
     // ----------------------------------------------------------
 
@@ -288,6 +342,9 @@ impl HireSettleContract {
 
         // Issue #581: count the newly raised dispute against the company.
         Self::record_dispute_raised_party(env, &engagement.company);
+        // Issue #659: maintain the category index on raise. Resolution paths
+        // deliberately leave this index untouched.
+        Self::record_dispute_category(env, engagement_id, milestone_index);
     }
 
     // ----------------------------------------------------------

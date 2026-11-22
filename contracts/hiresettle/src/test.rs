@@ -14211,3 +14211,36 @@ fn test_function_pause_blocks_only_that_entry_point() {
     client.set_function_paused(&company, &FN_CREATE_ENGAGEMENT, &false);
     assert!(!client.is_function_paused(&FN_CREATE_ENGAGEMENT));
 }
+
+// ============================================================
+// #659 — disputes by category
+// ============================================================
+
+#[test]
+fn test_disputes_by_category_index_and_pagination() {
+    let (env, contract_id, _token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let category = String::from_str(&env, "quality");
+    let id = String::from_str(&env, "ENG-CAT-1");
+    create_standard_engagement(
+        &env, &client, &_token_id, &company, &recruiter, &arbiter, "ENG-CAT-1",
+    );
+    client.submit_proof(&recruiter, &id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.raise_dispute_with_category(
+        &company, &id, &0, &String::from_str(&env, "not_hired"), &category,
+    );
+
+    assert_eq!(client.get_dispute_count_by_category(&category), 1);
+    let page = client.get_disputes_by_category(&category, &0, &10);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap(), (id.clone(), 0));
+    assert_eq!(client.get_disputes_by_category(&category, &1, &10).len(), 0);
+    assert_eq!(client.get_disputes_by_category(&category, &0, &0).len(), 0);
+
+    client.cast_arbiter_vote(&arbiter, &id, &0, &true, &None);
+    assert_eq!(
+        client.get_milestone(&id, &0).status,
+        MilestoneStatus::Resolved
+    );
+    assert_eq!(client.get_dispute_count_by_category(&category), 1);
+}

@@ -483,6 +483,50 @@ impl HireSettleContract {
     }
 
     // ----------------------------------------------------------
+    // ISSUE #659 — DISPUTES BY CATEGORY
+    // ----------------------------------------------------------
+
+    /// Return `(engagement_id, milestone_index)` pairs for disputes raised in
+    /// `category`, paginated with 0-indexed `page` and clamped `page_size`
+    /// (maximum 100). Out-of-range pages return an empty vector.
+    pub fn get_disputes_by_category(
+        env: Env,
+        category: String,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<(String, u32)> {
+        let mut result: Vec<(String, u32)> = Vec::new(&env);
+        if page_size == 0 {
+            return result;
+        }
+        let size = if page_size > 100 { 100 } else { page_size };
+        let entries: Vec<(String, u32)> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::DisputesByCategory(category))
+            .unwrap_or_else(|| Vec::new(&env));
+        let start = page.saturating_mul(size);
+        if start >= entries.len() {
+            return result;
+        }
+        let end = start.saturating_add(size).min(entries.len());
+        for i in start..end {
+            result.push_back(entries.get(i).unwrap());
+        }
+        result
+    }
+
+    /// Total number of disputes recorded for `category`, independent of pagination.
+    pub fn get_dispute_count_by_category(env: Env, category: String) -> u32 {
+        let entries: Vec<(String, u32)> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::DisputesByCategory(category))
+            .unwrap_or_else(|| Vec::new(&env));
+        entries.len()
+    }
+
+    // ----------------------------------------------------------
     // ISSUE #36 — ENGAGEMENT LIST BY RECRUITER
     // ----------------------------------------------------------
 
