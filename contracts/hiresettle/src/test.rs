@@ -14302,3 +14302,50 @@ fn test_early_departure_prorates_and_refunds_dust_to_company() {
         EngagementStatus::Completed
     );
 }
+
+#[test]
+fn test_commit_reveal_vote_hides_vote_until_reveal() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    assert!(!client.is_commit_reveal_voting_enabled());
+    client.set_commit_reveal_voting(&company, &true);
+    client.set_commit_phase_ledgers(&company, &10);
+    assert_eq!(client.get_commit_phase_ledgers(), 10);
+    assert!(client.is_commit_reveal_voting_enabled());
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-COMMIT-REVEAL",
+    );
+    let eng_id = String::from_str(&env, "ENG-COMMIT-REVEAL");
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.raise_dispute(
+        &company, &eng_id, &0, &String::from_str(&env, "dispute"), &DisputeCategory::ProofInvalid,
+    );
+
+    // Plain votes are rejected while commit-reveal is enabled (binary and split).
+    assert!(client.try_cast_arbiter_vote(&arbiter, &eng_id, &0, &true, &None).is_err());
+    assert!(client.try_cast_arbiter_split_vote(&arbiter, &eng_id, &0, &50).is_err());
+
+    let salt = BytesN::<32>::from_array(&env, &[7u8; 32]);
+    let commitment = client.hash_vote_commitment(&true, &salt);
+    client.commit_vote(&arbiter, &eng_id, &0, &commitment);
+    assert!(client.try_commit_vote(&arbiter, &eng_id, &0, &commitment).is_err());
+
+    // No reveal before the commit phase closes, and the hidden vote is not
+    // counted until it is revealed with the exact salt.
+    assert!(client.try_reveal_vote(&arbiter, &eng_id, &0, &true, &salt, &None).is_err());
+    advance_ledger(&env, 11);
+    let wrong_salt = BytesN::<32>::from_array(&env, &[9u8; 32]);
+    assert!(client.try_reveal_vote(&arbiter, &eng_id, &0, &true, &wrong_salt, &None).is_err());
+    assert!(client.try_reveal_vote(&arbiter, &eng_id, &0, &false, &salt, &None).is_err());
+    assert_eq!(token_client.balance(&recruiter), 0);
+
+    client.reveal_vote(&arbiter, &eng_id, &0, &true, &salt, &None);
+    assert!(client.try_reveal_vote(&arbiter, &eng_id, &0, &true, &salt, &None).is_err());
+    assert_eq!(token_client.balance(&recruiter), 300_000_000);
+    assert_eq!(
+        client.get_milestone(&eng_id, &0).status,
+        MilestoneStatus::Resolved
+    );
+}

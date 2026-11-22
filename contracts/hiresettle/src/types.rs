@@ -1,6 +1,6 @@
 //! Contract data structs (`#[contracttype]`).
 
-use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
 use crate::{
     ActionKind, ActorRole, DisputeCategory, EngagementStatus, MilestoneKind, MilestoneStatus,
     TimelineKind,
@@ -709,6 +709,17 @@ pub struct ConflictDeclaration {
     /// Whether the declaration is currently active. Admin can clear declarations
     /// if they were made in error, but the historical record is preserved.
     pub active: bool,
+}
+
+/// A hidden arbiter vote, `sha256(vote || salt)` (issue #656). The vote byte is
+/// `0x01` for approve and `0x00` for reject; `salt` is a 32-byte arbiter secret.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoteCommitment {
+    pub commitment: BytesN<32>,
+    pub committed_at_ledger: u32,
+    pub revealed: bool,
+    pub rationale_hash: String,
 }
 
 /// Company-reported early departure from a retention window (issue #655),

@@ -13,6 +13,8 @@ pub(crate) const FULL_SPLIT_BPS: u32 = 10_000;
 pub(crate) const MAX_MIN_QUORUM_RATIO_BPS: u32 = 10_000;
 
 pub(crate) const LEDGERS_PER_DAY: u32 = 17_280; // 86 400s ÷ 5s per ledger
+/// Default length of the commit-reveal commit phase (issue #656): ~5 minutes.
+pub(crate) const DEFAULT_COMMIT_PHASE_LEDGERS: u32 = 60;
 pub(crate) const DEFAULT_PROOF_COOLDOWN: u32 = 2_880; // ~4 hours
 pub(crate) const DEFAULT_MAX_RETENTION_DAYS: u32 = 365;
 pub(crate) const DEFAULT_MAX_MILESTONES: u32 = 10;

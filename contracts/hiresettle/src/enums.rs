@@ -223,6 +223,11 @@ pub enum ConfigKey {
     /// Ledgers arbiters have to vote after a dispute is raised (issue #560).
     /// 0 (the default) disables `enforce_vote_deadline`.
     ArbiterVoteDeadline,
+    /// When true, panel votes must be committed and revealed (issue #656).
+    CommitRevealVoting,
+    /// Length of the commit phase in ledgers, measured from dispute raise
+    /// (issue #656). `0` disables commit-reveal entirely.
+    CommitPhaseLedgers,
     /// TTL in ledgers for pending config change proposals
     /// (default `DEFAULT_CONFIG_CHANGE_TTL`).
     ConfigChangeTTL,
@@ -590,4 +595,7 @@ pub enum DataKey3 {
     /// Pending company-reported early departure for a retention milestone
     /// (issue #655), awaiting recruiter acceptance.
     EarlyDepartureProposal(String, u32),
+    /// Hidden arbiter vote commitment for (engagement, milestone, arbiter slot)
+    /// (issue #656).
+    VoteCommit(String, u32, Address),
 }
