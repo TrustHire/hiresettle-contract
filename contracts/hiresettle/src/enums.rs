@@ -90,6 +90,10 @@ pub enum MilestoneKind {
     /// Starts `Locked`; `unlock_milestone` moves it to `Pending` once
     /// `env.ledger().sequence() >= valid_after_ledger`.
     Retention,
+    /// Recurring retainer instalment (issue #674). Starts `Pending`, unlocks
+    /// automatically every `interval_ledgers`, and is claimed by the recruiter
+    /// without proof. Cannot be disputed after a claim.
+    Retainer(u32),
 }
 /// Top-level lifecycle state of an engagement.
 #[contracttype]
@@ -575,4 +579,8 @@ pub enum DataKey3 {
     EscrowDustRefund(String),
     /// Commitment hash registered by an engagement (issue #675).
     CandidateCommitmentIndex(String),
+    /// Ledger at which future retainer instalments were cancelled (issue #674).
+    RetainerCancelled(String, u32),
+    /// Ledger at which a retainer clock was paused (issue #674).
+    RetainerPausedAt(String, u32),
 }

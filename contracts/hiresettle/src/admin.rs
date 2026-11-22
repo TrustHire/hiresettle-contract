@@ -977,7 +977,8 @@ impl HireSettleContract {
 
         // Reject unknown IDs so a typo cannot silently create a quarantine
         // record that later blocks a legitimately created engagement.
-        let _ = Self::get_engagement_internal(&env, &engagement_id);
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        Self::pause_retainer_clocks(&env, &engagement);
 
         if reason.is_empty() {
             panic!("EmptyPauseReason");
@@ -1040,11 +1041,12 @@ impl HireSettleContract {
     pub fn unpause_engagement(env: Env, caller: Address, engagement_id: String) {
         Self::assert_pauser(&env, &caller);
 
-        let _ = Self::get_engagement_internal(&env, &engagement_id);
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
 
         env.storage()
             .persistent()
             .remove(&DataKey::EngagementPaused(engagement_id.clone()));
+        Self::unpause_retainer_clocks(&env, engagement);
 
         // Issue #590: unpausing resets the escape-hatch timer.
         env.storage().persistent().remove(&DataKey::Config(

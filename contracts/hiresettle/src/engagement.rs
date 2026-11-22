@@ -429,6 +429,13 @@ impl HireSettleContract {
                     m.valid_after_ledger = 0;
                     m.status = MilestoneStatus::Pending;
                 }
+                MilestoneKind::Retainer(interval_ledgers) => {
+                    if interval_ledgers == 0 {
+                        panic!("InvalidRetainerInterval");
+                    }
+                    m.valid_after_ledger = current_ledger.saturating_add(interval_ledgers);
+                    m.status = MilestoneStatus::Pending;
+                }
                 MilestoneKind::Retention => {
                     let days = retention_days.get(retention_index).unwrap_or(30);
                     retention_index += 1;
@@ -881,6 +888,10 @@ impl HireSettleContract {
                         // Issue #465: restart the no-show clock for the replacement.
                         Self::mark_milestone_pending_since(&env, &engagement_id, i);
                     }
+                }
+                MilestoneKind::Retainer(_) => {
+                    // Retainer instalments are not tied to a candidate; a
+                    // replacement request leaves them untouched.
                 }
                 MilestoneKind::Retention => {
                     if m.status != MilestoneStatus::Confirmed

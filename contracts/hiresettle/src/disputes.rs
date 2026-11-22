@@ -208,6 +208,9 @@ impl HireSettleContract {
     ) {
         let milestone = Self::get_milestone_or_panic(engagement, milestone_index);
 
+        if matches!(&milestone.kind, MilestoneKind::Retainer(_)) {
+            panic!("RetainerNotDisputable");
+        }
         if milestone.status != MilestoneStatus::ProofSubmitted {
             panic!("can only dispute a submitted proof");
         }
