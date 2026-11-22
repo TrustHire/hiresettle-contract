@@ -513,6 +513,7 @@ impl HireSettleContract {
             is_public: config.is_public,
             stream_duration_ledgers: config.stream_duration_ledgers,
             end_ledger: config.end_ledger,
+            candidate: config.candidate,
         };
 
         env.storage()

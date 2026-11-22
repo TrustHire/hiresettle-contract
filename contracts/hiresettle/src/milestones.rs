@@ -248,6 +248,53 @@ impl HireSettleContract {
         );
     }
 
+    /// Co-sign a Placement proof as the candidate configured on the engagement
+    /// (issue #654). Only while the milestone is `ProofSubmitted` and only the
+    /// configured candidate may attest.
+    pub fn attest_placement(
+        env: Env,
+        candidate: Address,
+        engagement_id: String,
+        milestone_index: u32,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
+        candidate.require_auth();
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let configured = engagement
+            .candidate
+            .clone()
+            .unwrap_or_else(|| panic!("NoCandidateConfigured"));
+        if candidate != configured {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.kind != MilestoneKind::Placement {
+            panic!("OnlyPlacementMilestonesCanBeAttested");
+        }
+        if milestone.status != MilestoneStatus::ProofSubmitted {
+            panic!("milestone proof not yet submitted");
+        }
+
+        let key = DataKey3::PlacementAttestation(engagement_id.clone(), milestone_index);
+        env.storage().persistent().set(&key, &candidate);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "placement_attested"),
+                engagement_id,
+                milestone_index,
+            ),
+            candidate,
+        );
+    }
+
     /// Admin sets the candidate-duplicate window in ledgers (issue #573).
     /// `0` disables duplicate detection while commitments are still recorded.
     pub fn set_candidate_duplicate_window(env: Env, admin: Address, window_ledgers: u32) {
@@ -549,6 +596,19 @@ impl HireSettleContract {
 
         if milestone.status != MilestoneStatus::ProofSubmitted {
             panic!("milestone proof not yet submitted");
+        }
+
+        // Issue #654: when a candidate is configured, a Placement proof cannot
+        // be confirmed until that candidate has co-signed it.
+        if milestone.kind == MilestoneKind::Placement {
+            if let Some(candidate) = &engagement.candidate {
+                let key =
+                    DataKey3::PlacementAttestation(engagement_id.clone(), milestone_index);
+                let attested: Option<Address> = env.storage().persistent().get(&key);
+                if attested.as_ref() != Some(candidate) {
+                    panic!("PlacementAttestationRequired");
+                }
+            }
         }
 
         // Issue #461 (replacing #67's flat "all lower indices" rule): every

@@ -110,6 +110,9 @@ pub struct Engagement {
     /// Optional absolute deadline ledger copied from
     /// `EngagementConfig::end_ledger` (issue #571). `None` means no deadline.
     pub end_ledger: Option<u32>,
+    /// Optional candidate that must co-sign a Placement proof before the
+    /// company can confirm it (issue #654). `None` preserves existing flow.
+    pub candidate: Option<Address>,
 }
 /// A lightweight read-only view of an engagement, suitable for list/dashboard APIs.
 ///
@@ -371,6 +374,9 @@ pub struct EngagementConfig {
     /// retention milestone's earliest unlock when set. `None` keeps today's
     /// behaviour.
     pub end_ledger: Option<u32>,
+    /// Optional candidate address that co-signs Placement proofs via
+    /// `attest_placement` (issue #654). `None` keeps today's behaviour.
+    pub candidate: Option<Address>,
 }
 /// Vesting record for a streamed milestone payout (issue #466), stored under
 /// `DataKey::StreamedPayout(engagement_id, milestone_index)`.

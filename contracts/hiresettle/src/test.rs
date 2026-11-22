@@ -195,6 +195,7 @@ fn default_config() -> EngagementConfig {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        candidate: None,
     }
 }
 
@@ -1419,6 +1420,7 @@ fn test_metadata_hash_present() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+            candidate: None,
         },
     );
 
@@ -1482,6 +1484,7 @@ fn test_metadata_hash_empty_string_rejected() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+            candidate: None,
         },
     );
 }
@@ -1514,6 +1517,7 @@ fn test_co_recruiter_60_40_split() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        candidate: None,
     };
 
     client.create_engagement(
@@ -1611,6 +1615,7 @@ fn test_split_bps_over_10000_rejected() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        candidate: None,
     };
 
     client.create_engagement(
@@ -1656,6 +1661,7 @@ fn test_co_recruiter_gets_remainder() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        candidate: None,
     };
 
     client.create_engagement(
@@ -1716,6 +1722,7 @@ fn test_co_recruiter_summary_fields() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        candidate: None,
     };
 
     client.create_engagement(
@@ -1765,6 +1772,7 @@ fn test_split_bps_10000_accepted() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        candidate: None,
     };
 
     client.create_engagement(
@@ -7725,6 +7733,7 @@ fn test_co_recruiter_split_with_platform_fee() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        candidate: None,
     };
 
     client.create_engagement(
@@ -8143,6 +8152,7 @@ fn test_co_recruiter_split_with_odd_percentage_remainder() {
         pull_payouts: false,
         require_recruiter_acceptance: false,
         end_ledger: None,
+        candidate: None,
     };
 
     client.create_engagement(
@@ -9559,6 +9569,7 @@ fn test_split_amendment_applies_to_future_not_past() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+            candidate: None,
         },
     );
 
@@ -9616,6 +9627,7 @@ fn test_split_amendment_proposer_cannot_accept() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+            candidate: None,
         },
     );
     client.propose_split_amendment(&recruiter, &eng_id, &5_000);
@@ -9644,6 +9656,7 @@ fn test_split_amendment_expires() {
             pull_payouts: false,
             require_recruiter_acceptance: false,
             end_ledger: None,
+            candidate: None,
         },
     );
     client.set_amendment_ttl(&company, &100);

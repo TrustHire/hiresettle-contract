@@ -70,6 +70,18 @@ impl HireSettleContract {
         Self::get_milestone_or_panic(&engagement, milestone_index)
     }
 
+    /// Return the configured candidate's co-signature on a Placement proof
+    /// (issue #654), or `None` if it has not been attested.
+    pub fn get_placement_attestation(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::PlacementAttestation(engagement_id, milestone_index))
+    }
+
     /// Return the candidate commitment recorded for a Placement milestone
     /// (issue #573), or `None` when plain `submit_proof` was used.
     pub fn get_candidate_commitment(

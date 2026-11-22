@@ -576,4 +576,7 @@ pub enum DataKey3 {
     /// Written-review hash anchored by `rate_recruiter_with_review`, keyed by
     /// engagement (issue #595). Value is `(stars, review_hash)`.
     EngagementReview(String),
+    /// Candidate's co-signature on a Placement proof, keyed by
+    /// `(engagement_id, milestone_index)` (issue #654).
+    PlacementAttestation(String, u32),
 }
