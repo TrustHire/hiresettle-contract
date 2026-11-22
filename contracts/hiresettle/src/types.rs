@@ -1,7 +1,10 @@
 //! Contract data structs (`#[contracttype]`).
 
 use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
-use crate::{ActionKind, ActorRole, EngagementStatus, MilestoneKind, MilestoneStatus, TimelineKind};
+use crate::{
+    ActionKind, ActorRole, EngagementStatus, MilestoneKind, MilestoneStatus, ProofAction,
+    TimelineKind,
+};
 
 /// A payment and workflow checkpoint belonging to an [`Engagement`]'s `milestones`.
 #[contracttype]
@@ -753,33 +756,65 @@ pub struct DisputeSettlementProposal {
     /// Ledger at which the proposal was made.
     pub proposed_at_ledger: u32,
 }
-/// Payout receipt for a confirmed milestone (issue #669), returned by
-/// `get_milestone_receipt`.
+
+/// One admin-defined recruiter stake tier (issue #663): a recruiter whose
+/// active stake is at least `min_stake` gets `extra_active_slots` added to the
+/// admin-wide active-engagement cap. Configured via `set_recruiter_stake_tiers`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecruiterStakeTier {
+    /// Minimum active stake (inclusive), in the stake token's smallest unit.
+    pub min_stake: i128,
+    /// Extra active-engagement slots granted on top of the base cap.
+    pub extra_active_slots: u32,
+}
+
+/// A recruiter's stake record (issue #663), stored under
+/// `DataKey3::RecruiterStake(recruiter)`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecruiterStake {
+    /// Token the stake is held in. A recruiter holds stake in one token at a
+    /// time.
+    pub token: Address,
+    /// Active stake: counts toward the tier bonus.
+    pub amount: i128,
+    /// Stake queued by `unstake_recruiter`. It no longer counts toward the
+    /// tier bonus and is paid out by `withdraw_unbonded_stake`.
+    pub unbonding_amount: i128,
+    /// Ledger at or after which `unbonding_amount` can be withdrawn. Every
+    /// new `unstake_recruiter` call restarts it.
+    pub unbonding_release_ledger: u32,
+}
+
+/// Receipt written when the company confirms a milestone through
+/// `confirm_milestone`, `confirm_milestone_with_note` or
+/// `batch_confirm_milestones` (issue #665). A later confirmation of the same
+/// milestone (after a replacement reset) overwrites it.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct MilestoneReceipt {
-    /// Index of the confirmed milestone.
-    pub milestone_index: u32,
-    /// Gross amount released for the milestone by this confirmation, before
-    /// the platform fee (the same figure as the `milestone_confirmed` event).
-    pub amount: i128,
-    /// Address that confirmed: the company, a co-signer, a team member, the
-    /// placement oracle, or the `force_confirm_milestone` caller. `None` for
-    /// permissionless auto-confirmation in `close_engagement_at_end`.
-    pub confirmed_by: Option<Address>,
-    /// Ledger at which the milestone was confirmed.
+    /// Address that confirmed: the company, its co-signer or a team member.
+    pub confirmed_by: Address,
+    /// Ledger of the confirmation.
     pub confirmed_at_ledger: u32,
-    /// Recruiter-supplied invoice reference, if one was set before
-    /// confirmation.
-    pub invoice_ref: Option<String>,
+    /// Gross amount released by the confirmation.
+    pub payment: i128,
+    /// Optional note hash (e.g. an IPFS CID) the company attached, recording
+    /// why or with what caveats it confirmed.
+    pub note_hash: Option<String>,
 }
-/// Who issued a verification badge (issue #661), returned by
-/// `get_recruiter_verification` / `get_company_verification`.
+
+/// One entry of `get_proof_history` (issue #666).
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
-pub struct VerificationRecord {
-    /// The admin or registered attester that issued the badge.
-    pub issuer: Address,
-    /// Ledger at which the badge was issued.
-    pub issued_at_ledger: u32,
+pub struct ProofHistoryEntry {
+    /// Whether the proof was submitted or withdrawn.
+    pub action: ProofAction,
+    /// The proof hash submitted, or the one withdrawn.
+    pub proof_hash: String,
+    /// Address that made the call (the recruiter or its co-signer).
+    pub actor: Address,
+    /// Ledger of the call.
+    pub ledger: u32,
 }

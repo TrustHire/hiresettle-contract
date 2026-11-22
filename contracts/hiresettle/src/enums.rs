@@ -574,33 +574,27 @@ pub enum DataKey3 {
     /// Rotation vote tally for replacing (current_signer, new_signer) in the
     /// emergency signer set.
     EmergencyRotationVotes(Address, Address),
-    /// Admin-managed placement oracle registry (issue #667). Present ⇒ the
-    /// address is a registered oracle; removing it blocks its confirmations
-    /// immediately.
-    PlacementOracle(Address),
-    /// Placement oracle an engagement opted into at creation (issue #667).
-    EngagementOracle(String),
-    /// Recruiter-supplied invoice reference for (engagement_id,
-    /// milestone_index) (issue #669). Locked once the milestone is confirmed.
-    MilestoneInvoiceRef(String, u32),
-    /// Payout receipt written when (engagement_id, milestone_index) is
-    /// confirmed (issue #669).
+    /// Stake token and tiers `(Address, Vec<RecruiterStakeTier>)` set by
+    /// `set_recruiter_stake_tiers` (issue #663). Absent ⇒ staking disabled.
+    RecruiterStakeConfig,
+    /// Ledgers unstaked recruiter stake waits before it can be withdrawn
+    /// (issue #663). Absent ⇒ `DEFAULT_STAKE_UNBONDING_DELAY_LEDGERS`.
+    StakeUnbondingDelay,
+    /// A recruiter's stake record (issue #663).
+    RecruiterStake(Address),
+    /// Confirmation receipt for (engagement_id, milestone_index) (issue #665).
     MilestoneReceipt(String, u32),
-    /// Per-company external reference index: (company, external_ref) →
-    /// engagement_id (issue #572).
-    ExternalRef(Address, String),
-    /// External reference attached to an engagement at creation (issue #572).
-    EngagementExternalRef(String),
-    /// Registered attester and the scope it may verify (issue #661).
-    Attester(Address),
-    /// Who issued a recruiter's verification badge and when (issue #661).
-    RecruiterVerification(Address),
-    /// Who issued a company's verification badge and when (issue #661).
-    CompanyVerification(Address),
-    /// Recruiters an attester has verified, for `revoke_attester_badges`
-    /// (issue #661).
-    AttesterRecruiterBadges(Address),
-    /// Companies an attester has verified, for `revoke_attester_badges`
-    /// (issue #661).
-    AttesterCompanyBadges(Address),
+    /// FIFO-capped proof submission / withdrawal history for
+    /// (engagement_id, milestone_index) (issue #666).
+    ProofHistory(String, u32),
+}
+
+/// What a [`crate::ProofHistoryEntry`] records (issue #666).
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum ProofAction {
+    /// `submit_proof` / `submit_proof_root` moved the milestone to `ProofSubmitted`.
+    Submitted,
+    /// `withdraw_proof` moved it back to `Pending`.
+    Withdrawn,
 }

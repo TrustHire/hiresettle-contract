@@ -124,3 +124,11 @@ pub(crate) const WEIGHTED_RATING_SCALE: u64 = 1_000_000;
 
 /// Default TTL, in ledgers, for a pending config change proposal (~1 day).
 pub(crate) const DEFAULT_CONFIG_CHANGE_TTL: u32 = 17_280;
+
+/// Maximum number of recruiter stake tiers (issue #663).
+pub(crate) const MAX_RECRUITER_STAKE_TIERS: u32 = 10;
+/// Default ledgers unstaked recruiter stake waits before withdrawal
+/// (issue #663): ~7 days.
+pub(crate) const DEFAULT_STAKE_UNBONDING_DELAY_LEDGERS: u32 = 120_960;
+/// FIFO cap on per-milestone proof history entries (issue #666).
+pub(crate) const MAX_PROOF_HISTORY_ENTRIES: u32 = 20;

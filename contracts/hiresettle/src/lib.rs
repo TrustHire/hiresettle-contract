@@ -76,7 +76,7 @@ mod ratings;
 mod bonds;
 mod features;
 mod timeline;
-mod integrations;
+mod staking;
 
 pub(crate) use constants::*;
 pub(crate) use errors::*;

@@ -138,7 +138,7 @@ impl HireSettleContract {
 
     /// Count the recruiter's engagements currently in `Active` status, plus
     /// pending `Offered` ones (issue #569), which already hold a cap slot.
-    fn recruiter_active_count(env: &Env, recruiter: &Address) -> u32 {
+    pub(crate) fn recruiter_active_count(env: &Env, recruiter: &Address) -> u32 {
         let ids: Vec<String> = env
             .storage()
             .persistent()
@@ -410,23 +410,9 @@ impl HireSettleContract {
         }
 
         // Issue #482: enforce the tighter of the recruiter's own cap and the
-        // admin-wide recruiter cap (0 / unset means no limit).
-        let personal_cap: u32 = env
-            .storage()
-            .persistent()
-            .get(&DataKey2::RecruiterActiveCap(recruiter.clone()))
-            .unwrap_or(0);
-        let admin_cap: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::Config(ConfigKey::MaxActivePerRecruiter))
-            .unwrap_or(0);
-        let recruiter_cap = match (personal_cap, admin_cap) {
-            (0, 0) => None,
-            (0, c) | (c, 0) => Some(c),
-            (p, a) => Some(p.min(a)),
-        };
-        if let Some(cap) = recruiter_cap {
+        // admin-wide recruiter cap (0 / unset means no limit). Issue #663:
+        // the admin-wide cap is raised by the recruiter's stake tier bonus.
+        if let Some(cap) = Self::recruiter_effective_cap_internal(&env, &recruiter) {
             if Self::recruiter_active_count(&env, &recruiter) >= cap {
                 panic!("RecruiterActiveLimitReached");
             }
@@ -535,7 +521,7 @@ impl HireSettleContract {
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
 
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
 
         // Issue #667: remember the opted-in placement oracle.
         if let Some(ref oracle) = config.placement_oracle {
@@ -757,7 +743,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
 
         Self::emit_engagement_status_changed(
             &env,
@@ -809,7 +795,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
         Self::emit_engagement_status_changed(
             &env,
             &engagement_id,
@@ -996,7 +982,7 @@ impl HireSettleContract {
         // Issue #501: who asked and when, for the engagement timeline.
         Self::record_replacement(&env, &engagement_id, replacement_index, &company);
 
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
         Self::emit_engagement_status_changed(
             &env,
             &engagement_id,
@@ -1146,7 +1132,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
         Self::emit_engagement_status_changed(
             &env,
             &engagement_id,
@@ -1271,7 +1257,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
         Self::emit_engagement_status_changed(
             &env,
             &engagement_id,
@@ -1462,7 +1448,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
         env.storage().persistent().remove(&key);
         Self::emit_engagement_status_changed(
             &env,
@@ -1595,7 +1581,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(env, engagement_id);
+        Self::bump_engagement_ttl(env, engagement_id);
 
         env.events().publish(
             (Symbol::new(env, "escrow_topped_up"), engagement_id.clone()),
@@ -1734,7 +1720,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
 
         let entry = SplitAmendmentEntry {
             proposer: proposal.proposer.clone(),
