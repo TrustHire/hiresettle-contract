@@ -579,4 +579,7 @@ pub enum DataKey3 {
     /// Candidate's co-signature on a Placement proof, keyed by
     /// `(engagement_id, milestone_index)` (issue #654).
     PlacementAttestation(String, u32),
+    /// Approvals collected for an N-way split renegotiation (issue #574):
+    /// all listed recruiters plus the company must approve before it applies.
+    SplitAmendmentApprovals(String),
 }

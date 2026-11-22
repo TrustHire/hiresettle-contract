@@ -688,6 +688,38 @@ impl HireSettleContract {
                 );
             }
         };
+        // Issue #574: N-way split. Integer division can leave dust; it is
+        // credited to the primary recruiter so transfers sum to net_payment
+        // exactly. The old co-recruiter path below is unchanged.
+        if let Some(splits) = &engagement.recruiter_splits {
+            let mut shares: Vec<(Address, i128)> = Vec::new(env);
+            let mut allocated = 0i128;
+            let mut primary_index: Option<u32> = None;
+            for i in 0..splits.len() {
+                let (recipient, bps) = splits.get(i).unwrap();
+                let amount = (net_payment * bps as i128) / (FULL_SPLIT_BPS as i128);
+                allocated += amount;
+                if recipient == engagement.recruiter.clone() {
+                    primary_index = Some(shares.len());
+                }
+                shares.push_back((recipient, amount));
+            }
+            let dust = net_payment - allocated;
+            match primary_index {
+                Some(idx) => {
+                    let (recipient, amount) = shares.get(idx).unwrap();
+                    shares.set(idx, (recipient, amount + dust));
+                }
+                None => shares.push_back((engagement.recruiter.clone(), dust)),
+            }
+            for (recipient, amount) in shares.iter() {
+                if amount > 0 {
+                    pay(&recipient, amount);
+                }
+            }
+            return;
+        }
+
         match &engagement.co_recruiter {
             Some(co_recruiter) => {
                 let split = engagement.recruiter_split_bps as i128;

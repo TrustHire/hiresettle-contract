@@ -354,6 +354,27 @@ impl HireSettleContract {
             panic!("InvalidSplitBps");
         }
 
+        // Issue #574: an N-way split replaces the single co-recruiter and must
+        // be a complete, bounded allocation of the net payout.
+        if let Some(splits) = &config.recruiter_splits {
+            if config.co_recruiter.is_some() {
+                panic!("SplitConfigConflict");
+            }
+            if splits.is_empty() || splits.len() > MAX_RECRUITER_SPLITS {
+                panic!("InvalidSplitCount");
+            }
+            let mut total_bps: u32 = 0;
+            for (_, bps) in splits.iter() {
+                if bps > FULL_SPLIT_BPS {
+                    panic!("InvalidSplitBps");
+                }
+                total_bps += bps;
+            }
+            if total_bps != FULL_SPLIT_BPS {
+                panic!("InvalidSplitBps");
+            }
+        }
+
         // Issue #466: a zero-length stream would divide by zero when vesting.
         if config.stream_duration_ledgers == Some(0) {
             panic!("InvalidStreamDuration");
@@ -506,6 +527,7 @@ impl HireSettleContract {
                 EngagementStatus::Active
             },
             co_recruiter: config.co_recruiter,
+            recruiter_splits: config.recruiter_splits,
             recruiter_split_bps: config.recruiter_split_bps,
             contract_pdf_hash: config.contract_pdf_hash,
             referrer: config.referrer,
@@ -1610,17 +1632,38 @@ impl HireSettleContract {
         if engagement.status != EngagementStatus::Active {
             panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
         }
-        let co = engagement
-            .co_recruiter
-            .clone()
-            .unwrap_or_else(|| panic!("no co_recruiter"));
-
-        let proposed_by_recruiter = if proposer == engagement.recruiter {
+        // Issue #574: for N-way splits any listed recruiter (including the
+        // primary) may propose; the amendment only takes effect once every
+        // listed recruiter and the company have accepted.
+        let split_path = engagement.recruiter_splits.is_some();
+        let proposed_by_recruiter = if split_path {
+            let mut authorized = proposer == engagement.recruiter;
+            if !authorized {
+                if let Some(splits) = &engagement.recruiter_splits {
+                    for (address, _) in splits.iter() {
+                        if address == proposer {
+                            authorized = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !authorized {
+                panic!("{}", ERR_UNAUTHORIZED);
+            }
             true
-        } else if proposer == co {
-            false
         } else {
-            panic!("{}", ERR_UNAUTHORIZED);
+            let co = engagement
+                .co_recruiter
+                .clone()
+                .unwrap_or_else(|| panic!("no co_recruiter"));
+            if proposer == engagement.recruiter {
+                true
+            } else if proposer == co {
+                false
+            } else {
+                panic!("{}", ERR_UNAUTHORIZED);
+            }
         };
 
         // Issue #496: Check amendment reproposal cooldown
@@ -1649,6 +1692,11 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, 100_000, 6_300_000);
+        if split_path {
+            let mut approvals = Vec::new(&env);
+            approvals.push_back(proposer.clone());
+            Self::store_split_amendment_approvals(&env, &engagement_id, &approvals);
+        }
 
         env.events().publish(
             (
@@ -1690,10 +1738,45 @@ impl HireSettleContract {
             panic!("amendment_expired");
         }
 
-        Self::assert_split_amendment_counterparty(&engagement, &acceptor, &proposal);
+        if engagement.recruiter_splits.is_some() {
+            // Issue #574: collect approvals from every listed recruiter plus
+            // the company; the proposal applies only on the final acceptance.
+            let approvers = Self::split_amendment_approvers(&env, &engagement);
+            if !approvers.iter().any(|a| a == acceptor.clone()) {
+                panic!("{}", ERR_UNAUTHORIZED);
+            }
+            let approvals_key = DataKey3::SplitAmendmentApprovals(engagement_id.clone());
+            let mut approvals: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&approvals_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            if approvals.iter().any(|a| a == acceptor.clone()) {
+                panic!("AlreadyApproved");
+            }
+            approvals.push_back(acceptor.clone());
+            Self::store_split_amendment_approvals(&env, &engagement_id, &approvals);
+            if approvals.len() < approvers.len() {
+                env.events().publish(
+                    (
+                        Symbol::new(&env, "split_amendment_approval_recorded"),
+                        engagement_id,
+                    ),
+                    (acceptor, approvals.len(), approvers.len()),
+                );
+                return;
+            }
+            env.storage().persistent().remove(&approvals_key);
+        } else {
+            Self::assert_split_amendment_counterparty(&engagement, &acceptor, &proposal);
+        }
 
         let old = engagement.recruiter_split_bps;
-        engagement.recruiter_split_bps = proposal.new_split_bps;
+        if engagement.recruiter_splits.is_some() {
+            Self::apply_nway_split_amendment(&env, &mut engagement, proposal.new_split_bps);
+        } else {
+            engagement.recruiter_split_bps = proposal.new_split_bps;
+        }
         engagement.last_activity_ledger = env.ledger().sequence();
         env.storage()
             .persistent()
@@ -1738,7 +1821,17 @@ impl HireSettleContract {
             panic!("amendment_expired");
         }
 
-        Self::assert_split_amendment_counterparty(&engagement, &rejector, &proposal);
+        if engagement.recruiter_splits.is_some() {
+            let approvers = Self::split_amendment_approvers(&env, &engagement);
+            if !approvers.iter().any(|a| a == rejector.clone()) {
+                panic!("{}", ERR_UNAUTHORIZED);
+            }
+            env.storage()
+                .persistent()
+                .remove(&DataKey3::SplitAmendmentApprovals(engagement_id.clone()));
+        } else {
+            Self::assert_split_amendment_counterparty(&engagement, &rejector, &proposal);
+        }
         env.storage().persistent().remove(&key);
 
         // Issue #496: Record the rejection ledger for the proposer on this engagement
@@ -1783,6 +1876,100 @@ impl HireSettleContract {
             .persistent()
             .get(&DataKey2::SplitAmendmentLog(engagement_id))
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Parties that must approve an N-way split renegotiation (issue #574):
+    /// the company plus every listed recruiter, with the primary included even
+    /// if it was omitted from the split list. Deduplicated in insertion order.
+    /// Approvals collected so far on a pending N-way split renegotiation
+    /// (issue #574).
+    pub fn get_split_amendment_approvals(
+        env: Env,
+        engagement_id: String,
+    ) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::SplitAmendmentApprovals(engagement_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    fn split_amendment_approvers(env: &Env, engagement: &Engagement) -> Vec<Address> {
+        let mut approvers = Vec::new(env);
+        if let Some(splits) = &engagement.recruiter_splits {
+            for (address, _) in splits.iter() {
+                if !approvers.iter().any(|a| a == address.clone()) {
+                    approvers.push_back(address);
+                }
+            }
+        }
+        if !approvers.iter().any(|a| a == engagement.recruiter.clone()) {
+            approvers.push_back(engagement.recruiter.clone());
+        }
+        if !approvers.iter().any(|a| a == engagement.company.clone()) {
+            approvers.push_back(engagement.company.clone());
+        }
+        approvers
+    }
+
+    fn store_split_amendment_approvals(
+        env: &Env,
+        engagement_id: &String,
+        approvals: &Vec<Address>,
+    ) {
+        let key = DataKey3::SplitAmendmentApprovals(engagement_id.clone());
+        env.storage().persistent().set(&key, approvals);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+    }
+
+    /// Apply an accepted N-way split renegotiation: the primary recruiter takes
+    /// `new_split_bps`, the remaining recruiters keep their relative weights
+    /// within the remainder, and the total always stays at 10 000 bps.
+    fn apply_nway_split_amendment(
+        env: &Env,
+        engagement: &mut Engagement,
+        new_split_bps: u32,
+    ) {
+        if new_split_bps > FULL_SPLIT_BPS {
+            panic!("InvalidSplitBps");
+        }
+        let old = engagement
+            .recruiter_splits
+            .clone()
+            .unwrap_or_else(|| Vec::new(env));
+        let mut others: Vec<(Address, u32)> = Vec::new(env);
+        let mut old_other_bps: u32 = 0;
+        for (address, bps) in old.iter() {
+            if address != engagement.recruiter {
+                others.push_back((address, bps));
+                old_other_bps += bps;
+            }
+        }
+        let remaining = FULL_SPLIT_BPS - new_split_bps;
+        if others.is_empty() && remaining > 0 {
+            panic!("InvalidSplitBps");
+        }
+        let mut splits: Vec<(Address, u32)> = Vec::new(env);
+        splits.push_back((engagement.recruiter.clone(), new_split_bps));
+        let mut allocated: u32 = 0;
+        for i in 0..others.len() {
+            let (address, old_bps) = others.get(i).unwrap();
+            let bps = if i + 1 == others.len() {
+                remaining - allocated
+            } else if old_other_bps == 0 {
+                remaining / others.len()
+            } else {
+                (remaining * old_bps) / old_other_bps
+            };
+            allocated += bps;
+            splits.push_back((address, bps));
+        }
+        if splits.len() > MAX_RECRUITER_SPLITS {
+            panic!("InvalidSplitCount");
+        }
+        engagement.recruiter_split_bps = new_split_bps;
+        engagement.recruiter_splits = Some(splits);
     }
 
     fn assert_split_amendment_counterparty(
