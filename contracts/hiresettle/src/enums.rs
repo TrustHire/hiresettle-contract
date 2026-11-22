@@ -573,4 +573,7 @@ pub enum DataKey3 {
     /// Commitment submitted for an engagement's Placement milestone, keyed by
     /// `(engagement_id, milestone_index)` (issue #573).
     CandidateCommitment(String, u32),
+    /// Written-review hash anchored by `rate_recruiter_with_review`, keyed by
+    /// engagement (issue #595). Value is `(stars, review_hash)`.
+    EngagementReview(String),
 }
