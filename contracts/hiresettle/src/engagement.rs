@@ -367,6 +367,13 @@ impl HireSettleContract {
             panic!("milestone percentages must sum to 100");
         }
 
+        // Issue #662: persist the opt-in flag; premiums are charged at payout.
+        if config.insured {
+            env.storage()
+                .persistent()
+                .set(&DataKey3::EngagementInsured(engagement_id.clone()), &true);
+        }
+
         // Issue #461: prerequisite indices must be in range and acyclic.
         Self::validate_milestone_prerequisites(&milestones);
 

@@ -189,6 +189,7 @@ fn default_config() -> EngagementConfig {
         stream_duration_ledgers: None,
         recruiter_bond_amount: None,
         bundle_id: None,
+        insured: false,
         fund_from_pool: false,
         snapshot_fee_tier: false,
         co_recruiter_bond_amount: None,
@@ -1413,7 +1414,8 @@ fn test_metadata_hash_present() {
             stream_duration_ledgers: None,
             recruiter_bond_amount: None,
             bundle_id: None,
-            fund_from_pool: false,
+            insured: false,
+        fund_from_pool: false,
             snapshot_fee_tier: false,
             co_recruiter_bond_amount: None,
             pull_payouts: false,
@@ -1476,7 +1478,8 @@ fn test_metadata_hash_empty_string_rejected() {
             stream_duration_ledgers: None,
             recruiter_bond_amount: None,
             bundle_id: None,
-            fund_from_pool: false,
+            insured: false,
+        fund_from_pool: false,
             snapshot_fee_tier: false,
             co_recruiter_bond_amount: None,
             pull_payouts: false,
@@ -1508,6 +1511,7 @@ fn test_co_recruiter_60_40_split() {
         stream_duration_ledgers: None,
         recruiter_bond_amount: None,
         bundle_id: None,
+        insured: false,
         fund_from_pool: false,
         snapshot_fee_tier: false,
         co_recruiter_bond_amount: None,
@@ -1605,6 +1609,7 @@ fn test_split_bps_over_10000_rejected() {
         stream_duration_ledgers: None,
         recruiter_bond_amount: None,
         bundle_id: None,
+        insured: false,
         fund_from_pool: false,
         snapshot_fee_tier: false,
         co_recruiter_bond_amount: None,
@@ -1650,6 +1655,7 @@ fn test_co_recruiter_gets_remainder() {
         stream_duration_ledgers: None,
         recruiter_bond_amount: None,
         bundle_id: None,
+        insured: false,
         fund_from_pool: false,
         snapshot_fee_tier: false,
         co_recruiter_bond_amount: None,
@@ -1710,6 +1716,7 @@ fn test_co_recruiter_summary_fields() {
         stream_duration_ledgers: None,
         recruiter_bond_amount: None,
         bundle_id: None,
+        insured: false,
         fund_from_pool: false,
         snapshot_fee_tier: false,
         co_recruiter_bond_amount: None,
@@ -1759,6 +1766,7 @@ fn test_split_bps_10000_accepted() {
         stream_duration_ledgers: None,
         recruiter_bond_amount: None,
         bundle_id: None,
+        insured: false,
         fund_from_pool: false,
         snapshot_fee_tier: false,
         co_recruiter_bond_amount: None,
@@ -7719,6 +7727,7 @@ fn test_co_recruiter_split_with_platform_fee() {
         stream_duration_ledgers: None,
         recruiter_bond_amount: None,
         bundle_id: None,
+        insured: false,
         fund_from_pool: false,
         snapshot_fee_tier: false,
         co_recruiter_bond_amount: None,
@@ -8137,6 +8146,7 @@ fn test_co_recruiter_split_with_odd_percentage_remainder() {
         stream_duration_ledgers: None,
         recruiter_bond_amount: None,
         bundle_id: None,
+        insured: false,
         fund_from_pool: false,
         snapshot_fee_tier: false,
         co_recruiter_bond_amount: None,
@@ -9553,7 +9563,8 @@ fn test_split_amendment_applies_to_future_not_past() {
             stream_duration_ledgers: None,
             recruiter_bond_amount: None,
             bundle_id: None,
-            fund_from_pool: false,
+            insured: false,
+        fund_from_pool: false,
             snapshot_fee_tier: false,
             co_recruiter_bond_amount: None,
             pull_payouts: false,
@@ -9610,7 +9621,8 @@ fn test_split_amendment_proposer_cannot_accept() {
             metadata_hash: None, co_recruiter: Some(co.clone()), recruiter_split_bps: 7_000,
             contract_pdf_hash: None, referrer: None, tags: None, is_public: false,
             stream_duration_ledgers: None, recruiter_bond_amount: None, bundle_id: None,
-            fund_from_pool: false,
+            insured: false,
+        fund_from_pool: false,
             snapshot_fee_tier: false,
             co_recruiter_bond_amount: None,
             pull_payouts: false,
@@ -9638,7 +9650,8 @@ fn test_split_amendment_expires() {
             metadata_hash: None, co_recruiter: Some(co.clone()), recruiter_split_bps: 7_000,
             contract_pdf_hash: None, referrer: None, tags: None, is_public: false,
             stream_duration_ledgers: None, recruiter_bond_amount: None, bundle_id: None,
-            fund_from_pool: false,
+            insured: false,
+        fund_from_pool: false,
             snapshot_fee_tier: false,
             co_recruiter_bond_amount: None,
             pull_payouts: false,
@@ -14281,4 +14294,64 @@ fn test_non_admin_cannot_set_company_verified() {
     let (env, contract_id, _token_id, company, _recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
     client.set_company_verified(&arbiter, &company, &true, &0);
+}
+
+// ============================================================
+// #662 — engagement insurance pool
+// ============================================================
+
+#[test]
+fn test_insurance_pool_premium_and_claim_cap() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    client.set_insurance_config(&company, &100, &20_000);
+
+    let mut cfg = default_config();
+    cfg.insured = true;
+    let id = String::from_str(&env, "ENG-INSURED");
+    client.create_engagement(
+        &id, &company, &recruiter,
+        &ArbiterSetup { arbiters: vec![&env, arbiter.clone()], quorum: 1, weights: None },
+        &token_id, &1_000_000_000, &String::from_str(&env, "Engineer"),
+        &build_milestones(&env), &vec![&env, 30u32, 90u32], &cfg,
+    );
+    assert_eq!(
+        client.get_insurance_premium_quote(&id, &300_000_000),
+        3_000_000
+    );
+    client.submit_proof(&recruiter, &id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.confirm_milestone(&company, &id, &0);
+
+    let premium = 3_000_000;
+    assert_eq!(client.get_insurance_pool_balance(&token_id), premium);
+    assert_eq!(client.get_engagement_insurance_premium(&id), premium);
+
+    let recipient = Address::generate(&env);
+    let before = token_client.balance(&recipient);
+    client.pay_insurance_claim(&company, &id, &premium, &recipient);
+    assert_eq!(token_client.balance(&recipient), before + premium);
+    assert_eq!(client.get_insurance_pool_balance(&token_id), 0);
+}
+
+#[test]
+#[should_panic(expected = "InsuranceClaimCapExceeded")]
+fn test_insurance_claim_respects_multiplier_cap() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_insurance_config(&company, &100, &0);
+    let mut cfg = default_config();
+    cfg.insured = true;
+    let id = String::from_str(&env, "ENG-INSURED-2");
+    client.create_engagement(
+        &id, &company, &recruiter,
+        &ArbiterSetup { arbiters: vec![&env, arbiter.clone()], quorum: 1, weights: None },
+        &token_id, &1_000_000_000, &String::from_str(&env, "Engineer"),
+        &build_milestones(&env), &vec![&env, 30u32, 90u32], &cfg,
+    );
+    client.submit_proof(&recruiter, &id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.confirm_milestone(&company, &id, &0);
+    client.pay_insurance_claim(
+        &company, &id, &3_000_000, &Address::generate(&env),
+    );
 }

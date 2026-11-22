@@ -348,6 +348,10 @@ pub struct EngagementConfig {
     /// company's pooled balance instead of a fresh token transfer
     /// (issue #472). Default `false` preserves existing behaviour.
     pub fund_from_pool: bool,
+    /// Issue #662: when `true`, each payout also collects the admin-configured
+    /// insurance premium into the per-token pool. Premiums are separate from,
+    /// and excluded from, platform-fee calculations.
+    pub insured: bool,
     /// When `true`, the platform-fee tier is resolved once at creation and
     /// reused for every later payout on this engagement, so admin changes to
     /// `set_fee_tiers` no longer affect it (issue #505). Referral discounts

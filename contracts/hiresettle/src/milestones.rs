@@ -453,7 +453,15 @@ impl HireSettleContract {
             let effective_bps = Self::payout_fee_bps(&env, &engagement_id, &engagement);
             let fee_amount =
                 Self::platform_fee_amount(&env, &engagement_id, payment, effective_bps);
-            let net_payment = payment - fee_amount;
+            // Issue #662: premium is separate from, and excluded from, the
+            // platform-fee base.
+            let insurance_premium = Self::collect_insurance_premium(
+                &env,
+                &engagement,
+                &engagement_id,
+                payment,
+            );
+            let net_payment = payment - fee_amount - insurance_premium;
             engagement.released_amount += payment;
             // Issue #578: payout releases escrow.
             Self::add_token_locked(&env, &engagement.token, -payment);
@@ -981,7 +989,15 @@ impl HireSettleContract {
             let payment = (engagement.total_amount * m.payment_percent as i128) / 100;
             let fee_amount =
                 Self::platform_fee_amount(&env, &engagement_id, payment, effective_bps);
-            let net_payment = payment - fee_amount;
+            // Issue #662: premium is separate from, and excluded from, the
+            // platform-fee base.
+            let insurance_premium = Self::collect_insurance_premium(
+                &env,
+                &engagement,
+                &engagement_id,
+                payment,
+            );
+            let net_payment = payment - fee_amount - insurance_premium;
             engagement.released_amount += payment;
             // Issue #578: payout releases escrow.
             Self::add_token_locked(&env, &engagement.token, -payment);

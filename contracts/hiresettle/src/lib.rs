@@ -76,6 +76,7 @@ mod ratings;
 mod bonds;
 mod features;
 mod timeline;
+mod insurance;
 
 pub(crate) use constants::*;
 pub(crate) use errors::*;

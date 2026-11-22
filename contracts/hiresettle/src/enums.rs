@@ -571,4 +571,14 @@ pub enum DataKey3 {
     CompanyVerified(Address),
     /// Issue #660: ledger at which a company verification badge expires (0 = never).
     CompanyVerificationExpiry(Address),
+    /// Issue #662: insurance premium in basis points charged on insured payouts.
+    InsurancePremiumBps,
+    /// Issue #662: maximum claim, as a multiple of premiums paid by an engagement.
+    InsuranceClaimMultiplierBps,
+    /// Issue #662: insurance pool balance per token.
+    InsurancePool(Address),
+    /// Issue #662: premiums paid by (engagement, token).
+    EngagementInsurancePremiums(String, Address),
+    /// Issue #662: whether an engagement opted into insurance at creation.
+    EngagementInsured(String),
 }
