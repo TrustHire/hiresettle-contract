@@ -977,7 +977,8 @@ impl HireSettleContract {
 
         // Reject unknown IDs so a typo cannot silently create a quarantine
         // record that later blocks a legitimately created engagement.
-        let _ = Self::get_engagement_internal(&env, &engagement_id);
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        Self::pause_retainer_clocks(&env, &engagement);
 
         if reason.is_empty() {
             panic!("EmptyPauseReason");
@@ -1040,11 +1041,12 @@ impl HireSettleContract {
     pub fn unpause_engagement(env: Env, caller: Address, engagement_id: String) {
         Self::assert_pauser(&env, &caller);
 
-        let _ = Self::get_engagement_internal(&env, &engagement_id);
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
 
         env.storage()
             .persistent()
             .remove(&DataKey::EngagementPaused(engagement_id.clone()));
+        Self::unpause_retainer_clocks(&env, engagement);
 
         // Issue #590: unpausing resets the escape-hatch timer.
         env.storage().persistent().remove(&DataKey::Config(
@@ -1147,12 +1149,13 @@ impl HireSettleContract {
 
         let old_engagement_status = engagement.status.clone();
         engagement.status = EngagementStatus::Cancelled;
+            Self::clear_candidate_ownership(&env, &engagement);
         engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
         Self::emit_engagement_status_changed(
             &env,
             &engagement_id,
@@ -1611,6 +1614,9 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        // Issues #676 / #677: an expired offer leaves no pending counter-offer
+        // or open-offer allowlist behind.
+        Self::clear_offer_state(&env, &engagement_id);
         Self::emit_engagement_status_changed(
             &env,
             &engagement_id,
@@ -1638,13 +1644,112 @@ impl HireSettleContract {
 
 
     /// Helper to extend TTL for engagement storage.
-    pub(crate) fn extend_engagement_ttl(env: &Env, engagement_id: &String) {
+    pub(crate) fn bump_engagement_ttl(env: &Env, engagement_id: &String) {
         let extend_to = DEFAULT_STORAGE_TTL_EXTEND_TO;
         env.storage().persistent().extend_ttl(
             &DataKey::Engagement(engagement_id.clone()),
             100_000,
             extend_to,
         );
+    }
+
+    /// Extend a persistent entry to at least `extend_to` ledgers, if it exists.
+    fn extend_persistent_if_present<K>(env: &Env, key: &K, extend_to: u32)
+    where
+        K: soroban_sdk::IntoVal<Env, soroban_sdk::Val>,
+    {
+        if env.storage().persistent().has(key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(key, extend_to, extend_to);
+        }
+    }
+
+    /// Permissionless keep-alive for an engagement's persistent storage
+    /// (issue #664).
+    ///
+    /// State-changing calls extend TTL as a side effect, so an engagement that
+    /// sits idle through a long Retention window can drift toward archival.
+    /// Anyone (a keeper, the company, the recruiter) can call this to extend
+    /// the engagement's entries to the configured storage TTL
+    /// (`DEFAULT_STORAGE_TTL_EXTEND_TO` ledgers). An entry whose TTL is
+    /// already longer keeps it; TTL is never shortened.
+    ///
+    /// Extends, when present:
+    /// - the engagement record, which holds every milestone;
+    /// - per-milestone records: proof cooldown, Merkle root, streamed payout,
+    ///   confirmation receipt and proof history;
+    /// - engagement-level records that hold funds or audit history: recruiter
+    ///   and co-recruiter bonds, split-vote withheld and no-show forfeited
+    ///   balances, fee snapshot / waiver, pool / pull-payout flags, dispute
+    ///   and status history;
+    /// - index entries listing the engagement: global, per-company,
+    ///   per-recruiter, per-token and per-tag.
+    ///
+    /// The key set is bounded by the engagement's milestone and tag counts so
+    /// the call stays within the transaction footprint limits.
+    ///
+    /// Requires no authorization, works while the contract (or the
+    /// engagement) is paused, and changes nothing but TTLs: no engagement
+    /// field (including `last_activity_ledger`) is written and no event is
+    /// emitted.
+    ///
+    /// Returns `false` and does nothing if the engagement record is absent,
+    /// i.e. archived or never created; otherwise returns `true`.
+    pub fn extend_engagement_ttl(env: Env, engagement_id: String) -> bool {
+        let engagement_key = DataKey::Engagement(engagement_id.clone());
+        let engagement: Engagement = match env.storage().persistent().get(&engagement_key) {
+            Some(e) => e,
+            None => return false,
+        };
+        let extend_to = DEFAULT_STORAGE_TTL_EXTEND_TO;
+        env.storage()
+            .persistent()
+            .extend_ttl(&engagement_key, extend_to, extend_to);
+
+        for i in 0..engagement.milestones.len() {
+            let id = engagement_id.clone();
+            Self::extend_persistent_if_present(&env, &DataKey::LastProofAt(id.clone(), i), extend_to);
+            Self::extend_persistent_if_present(&env, &DataKey::StreamedPayout(id.clone(), i), extend_to);
+            Self::extend_persistent_if_present(&env, &DataKey2::ProofMerkleRoot(id.clone(), i), extend_to);
+            Self::extend_persistent_if_present(&env, &DataKey3::MilestoneReceipt(id.clone(), i), extend_to);
+            Self::extend_persistent_if_present(&env, &DataKey3::ProofHistory(id, i), extend_to);
+        }
+
+        let id = engagement_id;
+        Self::extend_persistent_if_present(&env, &DataKey2::RecruiterBond(id.clone()), extend_to);
+        Self::extend_persistent_if_present(&env, &DataKey2::CoRecruiterBond(id.clone()), extend_to);
+        Self::extend_persistent_if_present(&env, &DataKey2::SplitWithheld(id.clone()), extend_to);
+        Self::extend_persistent_if_present(&env, &DataKey::NoShowForfeited(id.clone()), extend_to);
+        Self::extend_persistent_if_present(&env, &DataKey2::FeeTierSnapshot(id.clone()), extend_to);
+        Self::extend_persistent_if_present(&env, &DataKey::FeeWaived(id.clone()), extend_to);
+        Self::extend_persistent_if_present(&env, &DataKey2::PoolFunded(id.clone()), extend_to);
+        Self::extend_persistent_if_present(&env, &DataKey2::PullPayouts(id.clone()), extend_to);
+        Self::extend_persistent_if_present(&env, &DataKey2::DisputeHistory(id.clone()), extend_to);
+        Self::extend_persistent_if_present(&env, &DataKey2::StatusHistory(id), extend_to);
+
+        Self::extend_persistent_if_present(&env, &DataKey::AllEngagements, extend_to);
+        Self::extend_persistent_if_present(
+            &env,
+            &DataKey::CompanyEngagements(engagement.company.clone()),
+            extend_to,
+        );
+        Self::extend_persistent_if_present(
+            &env,
+            &DataKey::RecruiterEngagements(engagement.recruiter.clone()),
+            extend_to,
+        );
+        Self::extend_persistent_if_present(
+            &env,
+            &DataKey3::TokenEngagements(engagement.token.clone()),
+            extend_to,
+        );
+        if let Some(tags) = engagement.tags {
+            for tag in tags.iter() {
+                Self::extend_persistent_if_present(&env, &DataKey::TagEngagements(tag), extend_to);
+            }
+        }
+        true
     }
 
     pub(crate) fn emit_milestone_status_changed(
@@ -1913,20 +2018,15 @@ impl HireSettleContract {
 
     /// Admin sets or clears the verification flag for a recruiter address.
     /// Foundation-only: does not gate any lifecycle behaviour.
+    /// Registered attesters can do the same within their scope via
+    /// `attest_recruiter` (issue #661).
     ///
     /// # Events
     /// Emits `("recruiter_verified_set",)` with `(recruiter, verified)`.
     pub fn set_recruiter_verified(env: Env, admin: Address, recruiter: Address, verified: bool) {
         Self::assert_admin(&env, &admin);
-        let key = DataKey2::RecruiterVerified(recruiter.clone());
-        if verified {
-            env.storage().persistent().set(&key, &true);
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, 100_000, 6_300_000);
-        } else {
-            env.storage().persistent().remove(&key);
-        }
+        // Issue #661: also records the admin as the badge issuer.
+        Self::write_recruiter_verification(&env, &recruiter, verified, &admin);
         env.events().publish(
             (Symbol::new(&env, "recruiter_verified_set"),),
             (recruiter, verified),

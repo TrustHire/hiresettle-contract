@@ -21,6 +21,42 @@ impl HireSettleContract {
     /// # Events
     /// Emits `("recruiter_rated", engagement_id)` with `(recruiter, stars)`.
     pub fn rate_recruiter(env: Env, company: Address, engagement_id: String, stars: u32) {
+        Self::rate_recruiter_internal(env, company, engagement_id, stars, None);
+    }
+
+    /// Rate the recruiter and anchor an off-chain written review by its hash
+    /// (issue #595). The hash follows the same size limit as a proof hash and
+    /// is queryable with [`Self::get_engagement_review`]. All rating rules are
+    /// identical to [`Self::rate_recruiter`].
+    pub fn rate_recruiter_with_review(
+        env: Env,
+        company: Address,
+        engagement_id: String,
+        stars: u32,
+        review_hash: String,
+    ) {
+        if review_hash.is_empty() {
+            panic!("InvalidReviewHash");
+        }
+        if review_hash.len() > Self::get_max_proof_hash_length_internal(&env) {
+            panic!("ReviewHashTooLong");
+        }
+        Self::rate_recruiter_internal(
+            env,
+            company,
+            engagement_id,
+            stars,
+            Some(review_hash),
+        );
+    }
+
+    fn rate_recruiter_internal(
+        env: Env,
+        company: Address,
+        engagement_id: String,
+        stars: u32,
+        review_hash: Option<String>,
+    ) {
         Self::assert_not_paused(&env);
         company.require_auth();
 
@@ -85,10 +121,38 @@ impl HireSettleContract {
             .persistent()
             .extend_ttl(&weighted_key, 100_000, 6_300_000);
 
+        // Issue #595: the review is keyed by engagement, so a recruiter
+        // transfer before completion attributes it to the recruiter that
+        // actually finishes the engagement (the address rated here).
+        if let Some(hash) = review_hash {
+            let review_key = DataKey3::EngagementReview(engagement_id.clone());
+            env.storage()
+                .persistent()
+                .set(&review_key, &(stars, hash.clone()));
+            env.storage()
+                .persistent()
+                .extend_ttl(&review_key, 100_000, 6_300_000);
+            env.events().publish(
+                (
+                    Symbol::new(&env, "recruiter_review_recorded"),
+                    engagement_id.clone(),
+                ),
+                (engagement.recruiter.clone(), hash),
+            );
+        }
+
         env.events().publish(
             (Symbol::new(&env, "recruiter_rated"), engagement_id),
             (engagement.recruiter, stars),
         );
+    }
+
+    /// Return the written-review hash anchored on an engagement together with
+    /// its star rating, or `None` when no review was supplied (issue #595).
+    pub fn get_engagement_review(env: Env, engagement_id: String) -> Option<(u32, String)> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::EngagementReview(engagement_id))
     }
 
     /// Return the recruiter's accumulated rating, or `None` if they have never
