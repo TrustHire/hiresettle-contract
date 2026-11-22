@@ -91,6 +91,12 @@ pub(crate) const FN_SET_REFERRAL_DISCOUNT_BPS: u32 = 3;
 pub(crate) const FN_SET_ARBITER_FEE: u32 = 4;
 pub(crate) const FN_SET_MIN_AMOUNT: u32 = 5;
 pub(crate) const FN_SET_FEE_REBATE_BPS: u32 = 6;
+/// `recover_stray_tokens` (issue #672). Mark it sensitive with
+/// `set_sensitive_functions` to require the config cosigner's acceptance.
+pub(crate) const FN_RECOVER_STRAY_TOKENS: u32 = 7;
+/// Maximum size of an open offer's `eligible_recruiters` allowlist
+/// (issue #677). Bounds the scan in `accept_engagement`.
+pub(crate) const MAX_ELIGIBLE_RECRUITERS: u32 = 20;
 /// Per-function pause ids for `set_function_paused` (issue #589). They share
 /// the same `u32` id scheme as the sensitive setters but live in a disjoint
 /// range so the two features never collide.

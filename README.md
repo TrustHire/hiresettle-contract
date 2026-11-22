@@ -1232,6 +1232,50 @@ While `Offered`:
 
 Events: `("engagement_offered", engagement_id)` with `(company, recruiter, total_amount)` after `engagement_created`; `("engagement_accepted", engagement_id)` with `recruiter`; `("offer_withdrawn", engagement_id)` with the refund. Acceptance and withdrawal also emit `status_changed` and are recorded in `get_status_history`.
 
+### Counter-offers (#676)
+
+While an engagement is `Offered`, the recruiter can propose different terms instead of accepting or ignoring the offer.
+
+| Function | Caller | Description | Panics |
+| --- | --- | --- | --- |
+| `counter_offer(recruiter, engagement_id, total_amount, milestone_percents)` | Recruiter or their cosigner (any eligible recruiter on an open offer) | Propose a new `total_amount` and a new `payment_percent` per milestone, by index. Only one counter-offer can be pending per engagement. | `EngagementNotOffered`, `unauthorized`, `RecruiterNotEligible`, `CounterOfferPending`, `AmountBelowMinimum`, `CounterOfferMilestoneMismatch`, `milestone percentages must sum to 100`, `CounterOfferUnchanged` |
+| `accept_counter_offer(company, engagement_id)` | Company or its cosigner | Apply the counter and make the engagement `Active`, in one call. The escrow difference moves at the same time: an increase is pulled from the caller (from the company pool if the engagement is pool-funded), and a decrease is returned to the company (to its pool if pool-funded). If the pool can't cover an increase, nothing changes. With `snapshot_fee_tier`, the fee tier is re-resolved against the new total. | `EngagementNotOffered`, `unauthorized`, `NoCounterOffer`, `InsufficientCompanyBalance` |
+| `reject_counter_offer(company, engagement_id)` | Company or its cosigner | Discard the counter. The offer stays `Offered` on its original terms. | `EngagementNotOffered`, `unauthorized`, `NoCounterOffer` |
+| `withdraw_counter_offer(recruiter, engagement_id)` | The countering recruiter or its cosigner | Discard your own counter so you can make a different one. | `NoCounterOffer`, `unauthorized` |
+| `get_counter_offer(engagement_id)` → `Option<CounterOffer>` | Anyone | The pending counter, if any. | — |
+
+`accept_engagement`, `withdraw_offer` and `expire_engagement` all discard a pending counter. Accepting a counter makes the engagement active because the recruiter has already agreed to those terms by proposing them.
+
+Events: `counter_offer_proposed` with `(recruiter, total_amount, milestone_percents)`; `counter_offer_accepted` with `(company, old_total, new_total)`, followed by `engagement_accepted`; `counter_offer_rejected` with `(company, recruiter)`; `counter_offer_withdrawn` with `recruiter`.
+
+### Open offers (#677)
+
+`create_open_engagement(engagement_id, company, eligible_recruiters, arbiter_setup, token, total_amount, job_title, milestones, retention_days, config)` takes the same arguments as `create_engagement`, except that `eligible_recruiters` (1–20 distinct addresses) replaces `recruiter`. The engagement is always created `Offered`. The first eligible recruiter, or the cosigner of one, to call `accept_engagement` becomes its recruiter. An eligible recruiter can also send a `counter_offer`, and if the company accepts it, that recruiter becomes the recruiter.
+
+This is a separate entry point rather than an optional `recruiter` on `create_engagement`. That's because `recruiter` is a required argument of the existing ABI, and `create_engagement` already uses Soroban's 10-argument limit.
+
+- Until someone claims the offer, `Engagement::recruiter` holds the contract's own address as a placeholder. The engagement does not appear in any recruiter's index. Use `get_eligible_recruiters(engagement_id)` and `is_open_offer(engagement_id)` to see who can claim it.
+- The company's active-engagement slot is taken at creation, the same as for any `Offered` engagement. A recruiter's caps (`set_recruiter_active_cap`, `set_max_active_per_recruiter`) are checked when it accepts, and a recruiter at its cap can't claim the offer. Role collisions with the company and the arbiter panel are checked again at that point.
+- `withdraw_offer` and `expire_engagement` work as they do for any other offer.
+- `recruiter_bond_amount` is rejected (`OpenOfferBondUnsupported`), because there is no recruiter to post the bond at creation. Co-recruiter bonds still work.
+
+Panics: `NoEligibleRecruiters`, `TooManyEligibleRecruiters`, `DuplicateEligibleRecruiter`, `CompanyRecruiterCollision`, `RecruiterArbiterCollision`, `OpenOfferBondUnsupported`, plus everything `create_engagement` can raise. `accept_engagement` adds `RecruiterNotEligible` and `RecruiterActiveLimitReached`.
+
+Events: `open_offer_created` with `(company, eligible_recruiters, total_amount)`; `open_offer_claimed` with the bound recruiter, emitted before `engagement_accepted`.
+
+## Book-keeping Invariants and Stray Tokens (#671, #672)
+
+Every token the contract holds is in one of six tracked buckets, and each bucket keeps a running total per token: engagement escrow (`get_token_tvl`), pooled company balances, pull-payout credits, unsettled bonds, redeemable fee rebates, and unclaimed streamed payouts. Each engagement also tracks its own escrow balance and a cumulative `refunded` amount. `refunded` covers money returned to the company on cancellation, expiry, a withdrawn offer, or a no-show forfeit, none of which is added to `released_amount`. `get_escrow_balance` now returns `total_amount - released_amount - refunded`, so a cancelled engagement reports `0`.
+
+| Function | Caller | Description |
+| --- | --- | --- |
+| `check_escrow_invariants(engagement_id)` → `InvariantReport` | Anyone; read-only, works while paused | Compares the engagement's tracked escrow with `total_amount - released - refunded`. Also checks that the amounts are in range, the percentages sum to 100, the milestone states match the engagement status, and that a terminal engagement has no escrow left (a `Completed` engagement may keep at most one unit of rounding dust per milestone). `ok` is true only if every check passes. |
+| `check_token_invariants(token)` → `TokenInvariantReport` | Anyone; read-only, works while paused | Sums the per-engagement escrow, bonds and streams over the token's engagements and compares each sum with its running total. Then compares the total of all tracked buckets with the token balance the contract actually holds. `surplus > 0` means stray tokens and does not fail the check. `surplus < 0` is a shortfall and does. The query walks every engagement in the token, so run it in simulation. |
+| `get_stray_token_balance(token)` → `i128` | Anyone | Amount `recover_stray_tokens` would transfer right now. |
+| `recover_stray_tokens(admin, token, to)` → `i128` | Admin | Transfers `contract balance − tracked total` to `to`. Tracked funds can't be withdrawn this way. When a config cosigner is set and fn id `7` (`FN_RECOVER_STRAY_TOKENS`) is in `set_sensitive_functions`, the call only opens a pending config change and returns `0`. The transfer then happens on `accept_config_change`, using the stray amount at that moment. Panics: `ContractPaused`, `unauthorized`, `InvalidRecipient`, `NoStrayTokens`. Emits `("stray_tokens_recovered", token)` with `(to, amount)`. |
+
+The running totals only count balances created after they were introduced. On a contract upgraded from an earlier version, don't call `recover_stray_tokens` until `check_token_invariants` reports `totals_consistent`.
+
 ---
 
 ## Feedback Ratings
@@ -2327,6 +2371,13 @@ The contract emits Soroban events for all state transitions. Events are grouped 
 | `engagement_offered`    | `engagement_id` | `(company, recruiter, total_amount)`       | `create_engagement` with `require_recruiter_acceptance` |
 | `engagement_accepted`   | `engagement_id` | `recruiter`                                | `accept_engagement`                                     |
 | `offer_withdrawn`       | `engagement_id` | `refund`                                   | `withdraw_offer`                                        |
+| `open_offer_created`    | `engagement_id` | `(company, eligible_recruiters, total_amount)` | `create_open_engagement`                            |
+| `open_offer_claimed`    | `engagement_id` | `recruiter`                                | `accept_engagement` on an open offer                    |
+| `counter_offer_proposed` | `engagement_id` | `(recruiter, total_amount, milestone_percents)` | `counter_offer`                                    |
+| `counter_offer_accepted` | `engagement_id` | `(company, old_total, new_total)`         | `accept_counter_offer`                                  |
+| `counter_offer_rejected` | `engagement_id` | `(company, recruiter)`                    | `reject_counter_offer`                                  |
+| `counter_offer_withdrawn` | `engagement_id` | `recruiter`                              | `withdraw_counter_offer`                                |
+| `stray_tokens_recovered` | `token`        | `(to, amount)`                             | `recover_stray_tokens` / its accepted config change     |
 | `payout_credited`       | `recipient`     | `(engagement_id, token, amount)`           | Any payout on a `pull_payouts` engagement               |
 | `payouts_claimed`       | `recruiter`     | `(token, amount)`                          | `claim_payouts`                                         |
 | `engagement_cancelled`  | `engagement_id` | `refund`                                   | `cancel_engagement` (company + recruiter)               |

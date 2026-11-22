@@ -57,6 +57,9 @@
 //! | `ConflictReasonTooLong` | — | `arbiter_pool::declare_conflict_of_interest` | 1 |
 //! | `contract not initialised` | — | `admin::set_proof_cooldown` | 1 |
 //! | `ContractPaused` | — | `helpers::assert_not_paused` | 1 |
+//! | `CounterOfferMilestoneMismatch` | — | `offers::counter_offer` | 1 |
+//! | `CounterOfferPending` | — | `offers::counter_offer` | 1 |
+//! | `CounterOfferUnchanged` | — | `offers::counter_offer` | 1 |
 //! | `DelegateAlreadyAssigned` | — | `disputes::set_arbiter_vote_delegate` | 1 |
 //! | `discount too high` | — | `admin::set_referral_discount_bps` | 1 |
 //! | `dispute already resolvable without escalation` | — | `disputes::escalate_dispute` | 1 |
@@ -147,6 +150,8 @@
 //! | `MilestoneNameEmpty` | — | `engagement::create_engagement_impl` | 1 |
 //! | `MilestoneNameTooLong` | — | `engagement::create_engagement_impl` | 1 |
 //! | `MilestoneOnHold` | `ERR_MILESTONE_ON_HOLD` | `helpers::assert_milestone_not_on_hold` | 1 |
+//! | `missing recipient` | — | `features::apply_pending_config_change` | 1 |
+//! | `missing token` | — | `features::apply_pending_config_change` | 1 |
 //! | `missing treasury` | — | `features::apply_pending_config_change` | 1 |
 //! | `MixedVoteModes` | — | `disputes::cast_arbiter_split_vote`, `disputes::cast_arbiter_vote` | 2 |
 //! | `new signer already in emergency signer set` | — | `admin::propose_signer_rotation` | 1 |
@@ -174,6 +179,7 @@
 //! | `NoScheduledFee` | — | `admin::apply_scheduled_fee`, `admin::cancel_scheduled_fee` | 2 |
 //! | `NoShowDeadlineNotReached` | — | `milestones::trigger_no_show` | 1 |
 //! | `NoShowDisabled` | — | `milestones::trigger_no_show` | 1 |
+//! | `NoStrayTokens` | — | `invariants::execute_stray_token_recovery` | 1 |
 //! | `NoStreamedPayout` | — | `milestones::claim_streamed_payout` | 1 |
 //! | `NoteHashTooLong` | — | `milestones::confirm_milestone_with_note` | 1 |
 //! | `NotInPool` | — | `arbiter_pool::remove_arbiter_pool_member`, `arbiter_pool::suspend_arbiter_pool_member`, `arbiter_pool::unsuspend_arbiter_pool_member` | 3 |
@@ -196,8 +202,9 @@
 //! | `QuorumBelowMinRatio` | — | `engagement::create_engagement_impl` | 1 |
 //! | `QuorumUnreachable` | — | `transfers::admin_remove_arbiter` | 1 |
 //! | `ReasonTooLong` | — | `disputes::batch_raise_dispute`, `disputes::raise_dispute` | 2 |
-//! | `RecruiterActiveLimitReached` | — | `engagement::create_engagement_impl` | 1 |
-//! | `RecruiterArbiterCollision` | — | `engagement::create_engagement_impl`, `transfers::admin_add_arbiter` | 2 |
+//! | `RecruiterActiveLimitReached` | — | `engagement::assert_recruiter_below_cap` | 1 |
+//! | `RecruiterArbiterCollision` | — | `engagement::create_engagement_impl`, `offers::bind_open_offer_recruiter`, `offers::create_open_engagement`, `transfers::admin_add_arbiter` | 4 |
+//! | `RecruiterNotEligible` | — | `offers::resolve_eligible_recruiter` | 1 |
 //! | `referrer already exists` | — | `admin::add_referrer` | 1 |
 //! | `referrer not found` | — | `admin::remove_referrer` | 1 |
 //! | `replacement reason too long` | — | `engagement::request_replacement` | 1 |
@@ -222,6 +229,7 @@
 //! | `TokenNotAllowed` | — | `engagement::create_engagement_impl` | 1 |
 //! | `too many fee tiers` | — | `admin::set_fee_tiers` | 1 |
 //! | `too many IDs` | — | `queries::batch_get_engagement_summary` | 1 |
+//! | `TooManyEligibleRecruiters` | — | `offers::create_open_engagement` | 1 |
 //! | `TooManyMilestones` | — | `engagement::create_engagement_impl` | 1 |
 //! | `TooManyStakeTiers` | — | `staking::set_recruiter_stake_tiers` | 1 |
 //! | `TooManyTags` | — | `engagement::create_engagement_impl` | 1 |

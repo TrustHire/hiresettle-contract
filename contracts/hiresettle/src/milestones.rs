@@ -1019,6 +1019,7 @@ impl HireSettleContract {
             released = (payment * proposal.release_bps as i128) / (FULL_SPLIT_BPS as i128);
             refunded = payment - released;
             engagement.released_amount += payment;
+            Self::adjust_escrow(&env, &engagement_id, &engagement.token, -payment);
 
             let token_client = token::Client::new(&env, &engagement.token);
             if released > 0 {
@@ -1039,6 +1040,7 @@ impl HireSettleContract {
                     Some(duration) => Self::start_streamed_payout(
                         &env,
                         &engagement_id,
+                        &engagement.token,
                         milestone_index,
                         net_payment,
                         duration,
@@ -1306,7 +1308,7 @@ impl HireSettleContract {
             let net_payment = payment - fee_amount;
             engagement.released_amount += payment;
             // Issue #578: payout releases escrow.
-            Self::add_token_locked(&env, &engagement.token, -payment);
+            Self::adjust_escrow(&env, &engagement_id, &engagement.token, -payment);
 
             if fee_amount > 0 {
                 Self::collect_platform_fee(&env, &engagement, &engagement_id, idx, fee_amount);
@@ -1586,6 +1588,9 @@ impl HireSettleContract {
                 &forfeited,
             );
             env.storage().persistent().remove(&key);
+            // Issue #671: the forfeit was never added to `released_amount`.
+            Self::adjust_escrow(env, engagement_id, &engagement.token, -forfeited);
+            Self::record_escrow_refund(env, engagement_id, forfeited);
         }
     }
 
@@ -1600,10 +1605,13 @@ impl HireSettleContract {
     pub(crate) fn start_streamed_payout(
         env: &Env,
         engagement_id: &String,
+        token: &Address,
         milestone_index: u32,
         net_payment: i128,
         duration_ledgers: u32,
     ) {
+        // Issue #672: the net share stays in the contract until claimed.
+        Self::add_token_aggregate(env, DataKey3::TokenStreamed(token.clone()), net_payment);
         let key = DataKey::StreamedPayout(engagement_id.clone(), milestone_index);
         let carried_over = env
             .storage()
@@ -1674,6 +1682,7 @@ impl HireSettleContract {
         stream.claimed += amount;
         env.storage().persistent().set(&key, &stream);
         env.storage().persistent().extend_ttl(&key, 100_000, 6_300_000);
+        Self::add_token_aggregate(&env, DataKey3::TokenStreamed(engagement.token.clone()), -amount);
 
         let token_client = token::Client::new(&env, &engagement.token);
         Self::distribute_recruiter_payout(&env, &engagement, amount, &token_client, true);

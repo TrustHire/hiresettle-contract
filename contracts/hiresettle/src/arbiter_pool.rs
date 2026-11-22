@@ -209,6 +209,7 @@ impl HireSettleContract {
             milestones,
             retention_days,
             config,
+            false,
         )
     }
 
