@@ -359,7 +359,7 @@ impl HireSettleContract {
             .unwrap_or(DEFAULT_COMMIT_PHASE_LEDGERS)
     }
 
-    fn commit_reveal_enabled(env: &Env) -> bool {
+    pub(crate) fn commit_reveal_enabled(env: &Env) -> bool {
         env.storage()
             .instance()
             .get(&DataKey::Config(ConfigKey::CommitRevealVoting))
@@ -406,6 +406,7 @@ impl HireSettleContract {
         if milestone.status != MilestoneStatus::Disputed {
             panic!("milestone is not in disputed status");
         }
+        Self::assert_evidence_window_closed(&env, &engagement_id, milestone_index);
         if Self::is_arbiter_recused(&env, &engagement_id, milestone_index, &arbiter) {
             panic!("ArbiterRecused");
         }
@@ -485,6 +486,7 @@ impl HireSettleContract {
         if milestone.status != MilestoneStatus::Disputed {
             panic!("milestone is not in disputed status");
         }
+        Self::assert_evidence_window_closed(&env, &engagement_id, milestone_index);
         if Self::is_arbiter_recused(&env, &engagement_id, milestone_index, &arbiter) {
             panic!("ArbiterRecused");
         }
@@ -565,6 +567,128 @@ impl HireSettleContract {
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
         Self::extend_engagement_ttl(&env, &engagement_id);
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #657 — DISPUTE EVIDENCE WINDOW
+    // ----------------------------------------------------------
+
+    /// Set the ledger length of the post-dispute evidence window. `0` (the
+    /// default) keeps the legacy behaviour: arbiters may vote immediately.
+    pub fn set_evidence_window(env: Env, admin: Address, ledgers: u32) {
+        Self::assert_admin(&env, &admin);
+        env.storage().instance().set(
+            &DataKey::Config(ConfigKey::EvidenceWindowLedgers),
+            &ledgers,
+        );
+        env.events()
+            .publish((Symbol::new(&env, "evidence_window_set"),), ledgers);
+    }
+
+    /// Evidence-window length in ledgers (default `0`).
+    pub fn get_evidence_window(env: Env) -> u32 {
+        Self::evidence_window_internal(&env)
+    }
+
+    pub(crate) fn evidence_window_internal(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::EvidenceWindowLedgers))
+            .unwrap_or(DEFAULT_EVIDENCE_WINDOW_LEDGERS)
+    }
+
+    /// Last ledger of the evidence window for an active dispute.
+    fn evidence_window_end(env: &Env, engagement_id: &String, milestone_index: u32) -> u32 {
+        let raised_at: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeRaisedAt(
+                engagement_id.clone(),
+                milestone_index,
+            ))
+            .unwrap_or_else(|| panic!("no dispute in progress"));
+        raised_at.saturating_add(Self::evidence_window_internal(env))
+    }
+
+    /// Panic while the dispute's evidence window is open.
+    fn assert_evidence_window_closed(env: &Env, engagement_id: &String, milestone_index: u32) {
+        if env.ledger().sequence() < Self::evidence_window_end(env, engagement_id, milestone_index) {
+            panic!("EvidenceWindowOpen");
+        }
+    }
+
+    /// Attach an evidence hash (e.g. an IPFS CID or proof URI) while a
+    /// dispute's evidence window is open. Either the company side (including
+    /// a registered disputer) or the recruiter side may attach one hash.
+    pub fn attach_dispute_evidence(
+        env: Env,
+        party: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        evidence_hash: String,
+    ) {
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        party.require_auth();
+        if evidence_hash.is_empty() {
+            panic!("InvalidEvidenceHash");
+        }
+        if evidence_hash.len() > Self::get_max_proof_hash_length_internal(&env) {
+            panic!("EvidenceHashTooLong");
+        }
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.status != MilestoneStatus::Disputed {
+            panic!("milestone is not in disputed status");
+        }
+        if env.ledger().sequence() >= Self::evidence_window_end(&env, &engagement_id, milestone_index) {
+            panic!("EvidenceWindowClosed");
+        }
+
+        let company_side = Self::is_company_disputer(&env, &party, &engagement.company);
+        let recruiter_side = Self::is_authorized_recruiter(&env, &party, &engagement.recruiter);
+        if !company_side && !recruiter_side {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let key = DataKey3::DisputeEvidence(engagement_id.clone(), milestone_index);
+        let mut evidence: DisputeEvidence = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(DisputeEvidence {
+                company_hash: None,
+                recruiter_hash: None,
+            });
+        if company_side {
+            evidence.company_hash = Some(evidence_hash.clone());
+        }
+        if recruiter_side {
+            evidence.recruiter_hash = Some(evidence_hash.clone());
+        }
+        env.storage().persistent().set(&key, &evidence);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+        env.events().publish(
+            (
+                Symbol::new(&env, "dispute_evidence_attached"),
+                engagement_id,
+            ),
+            (milestone_index, party, evidence_hash),
+        );
+    }
+
+    /// Read the evidence hashes attached during an open (or past) window.
+    pub fn get_dispute_evidence(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Option<DisputeEvidence> {
+        env.storage().persistent().get(&DataKey3::DisputeEvidence(
+            engagement_id,
+            milestone_index,
+        ))
     }
 
     // ----------------------------------------------------------
@@ -688,6 +812,7 @@ impl HireSettleContract {
         if milestone.status != MilestoneStatus::Disputed {
             panic!("milestone is not in disputed status");
         }
+        Self::assert_evidence_window_closed(&env, &engagement_id, milestone_index);
 
         if Self::is_arbiter_recused(&env, &engagement_id, milestone_index, &arbiter) {
             panic!("ArbiterRecused");
@@ -853,6 +978,7 @@ impl HireSettleContract {
         if milestone.status != MilestoneStatus::Disputed {
             panic!("milestone is not in disputed status");
         }
+        Self::assert_evidence_window_closed(&env, &engagement_id, milestone_index);
 
         if Self::is_arbiter_recused(&env, &engagement_id, milestone_index, &arbiter) {
             panic!("ArbiterRecused");
@@ -1453,6 +1579,7 @@ impl HireSettleContract {
         if milestone.status != MilestoneStatus::Disputed {
             panic!("milestone is not in disputed status");
         }
+        Self::assert_evidence_window_closed(&env, &engagement_id, milestone_index);
 
         if Self::is_arbiter_recused(&env, &engagement_id, milestone_index, &arbiter) {
             panic!("ArbiterRecused");
@@ -1872,7 +1999,12 @@ impl HireSettleContract {
                 engagement_id.clone(),
                 milestone_index,
             ));
-        if !cap_reached && !deadline_enforced && current_ledger <= raised_at + dispute_window {
+        // Issue #657: the dispute window starts only after the evidence window.
+        let voting_opens_at = raised_at.saturating_add(Self::evidence_window_internal(&env));
+        if !cap_reached
+            && !deadline_enforced
+            && current_ledger <= voting_opens_at.saturating_add(dispute_window)
+        {
             panic!("DisputeWindowNotElapsed");
         }
 
@@ -3005,7 +3137,9 @@ impl HireSettleContract {
                 milestone_index,
             ))
             .unwrap_or_else(|| panic!("no dispute in progress"));
-        if env.ledger().sequence() <= raised_at.saturating_add(deadline) {
+        // Issue #657: the vote deadline starts when the evidence window closes.
+        let voting_opens_at = raised_at.saturating_add(Self::evidence_window_internal(&env));
+        if env.ledger().sequence() <= voting_opens_at.saturating_add(deadline) {
             panic!("VoteDeadlineNotReached");
         }
 

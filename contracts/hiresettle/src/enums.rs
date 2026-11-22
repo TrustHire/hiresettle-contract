@@ -78,6 +78,8 @@ pub enum ActionKind {
     /// Accept (or reject) a pending proposal: a recruiter transfer, a dispute
     /// window override, a split amendment, or a recruiter exit request.
     AcceptProposal,
+    /// Attach dispute evidence; the evidence window is still open (issue #657).
+    AwaitingEvidence,
 }
 /// Distinguishes the two business-logic types of milestones.
 #[contracttype]
@@ -228,6 +230,9 @@ pub enum ConfigKey {
     /// Length of the commit phase in ledgers, measured from dispute raise
     /// (issue #656). `0` disables commit-reveal entirely.
     CommitPhaseLedgers,
+    /// Ledgers after a dispute is raised during which arbiters may not vote,
+    /// while both parties may attach evidence (issue #657). Default 0.
+    EvidenceWindowLedgers,
     /// TTL in ledgers for pending config change proposals
     /// (default `DEFAULT_CONFIG_CHANGE_TTL`).
     ConfigChangeTTL,
@@ -598,4 +603,7 @@ pub enum DataKey3 {
     /// Hidden arbiter vote commitment for (engagement, milestone, arbiter slot)
     /// (issue #656).
     VoteCommit(String, u32, Address),
+    /// Evidence hashes attached during a dispute's evidence window
+    /// (issue #657), keyed by engagement and milestone.
+    DisputeEvidence(String, u32),
 }

@@ -14349,3 +14349,53 @@ fn test_commit_reveal_vote_hides_vote_until_reveal() {
         MilestoneStatus::Resolved
     );
 }
+
+#[test]
+fn test_dispute_evidence_window_blocks_votes_and_reports_next_action() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    assert_eq!(client.get_evidence_window(), 0);
+    assert_eq!(client.get_config_snapshot().evidence_window_ledgers, 0);
+    client.set_evidence_window(&company, &10);
+    assert_eq!(client.get_evidence_window(), 10);
+    assert_eq!(client.get_config_snapshot().evidence_window_ledgers, 10);
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-EVIDENCE",
+    );
+    let eng_id = String::from_str(&env, "ENG-EVIDENCE");
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.raise_dispute(
+        &company, &eng_id, &0, &String::from_str(&env, "terms mismatch"),
+        &DisputeCategory::TermsMismatch,
+    );
+
+    let next = client.get_next_action(&eng_id).unwrap();
+    assert_eq!(next.actor, ActorRole::Anyone);
+    assert_eq!(next.action, ActionKind::AwaitingEvidence);
+    assert_eq!(next.milestone_index, Some(0));
+    assert_eq!(next.available_at_ledger, env.ledger().sequence() + 10);
+
+    let company_hash = String::from_str(&env, "ipfs://company-evidence");
+    let recruiter_hash = String::from_str(&env, "ipfs://recruiter-evidence");
+    client.attach_dispute_evidence(&company, &eng_id, &0, &company_hash);
+    client.attach_dispute_evidence(&recruiter, &eng_id, &0, &recruiter_hash);
+    let evidence = client.get_dispute_evidence(&eng_id, &0).unwrap();
+    assert_eq!(evidence.company_hash, Some(company_hash));
+    assert_eq!(evidence.recruiter_hash, Some(recruiter_hash));
+    assert!(client
+        .try_attach_dispute_evidence(&arbiter, &eng_id, &0, &String::from_str(&env, "x"))
+        .is_err());
+
+    // Arbiter votes are rejected until the evidence window closes.
+    assert!(client.try_cast_arbiter_vote(&arbiter, &eng_id, &0, &true, &None).is_err());
+    advance_ledger(&env, 10);
+    assert!(client
+        .try_attach_dispute_evidence(&company, &eng_id, &0, &String::from_str(&env, "late"))
+        .is_err());
+    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &true, &None);
+    assert_eq!(
+        client.get_milestone(&eng_id, &0).status,
+        MilestoneStatus::Resolved
+    );
+}
