@@ -1,4 +1,4 @@
-use soroban_sdk::{contractimpl, token, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{contractimpl, token, Address, Bytes, BytesN, Env, String, Symbol, Vec};
 use crate::*;
 
 #[contractimpl]
@@ -52,6 +52,7 @@ impl HireSettleContract {
         engagement_id: String,
         milestone_index: u32,
         reason: String,
+        category: DisputeCategory,
     ) {
         Self::assert_engagement_not_paused(&env, &engagement_id);
         Self::assert_function_not_paused(&env, FN_RAISE_DISPUTE);
@@ -80,6 +81,7 @@ impl HireSettleContract {
             milestone_index,
             &company,
             &reason,
+            &category,
         );
 
         engagement.last_activity_ledger = env.ledger().sequence();
@@ -136,6 +138,7 @@ impl HireSettleContract {
         engagement_id: String,
         milestone_indices: Vec<u32>,
         reason: String,
+        category: DisputeCategory,
     ) {
         Self::assert_engagement_not_paused(&env, &engagement_id);
         Self::assert_function_not_paused(&env, FN_RAISE_DISPUTE);
@@ -178,6 +181,7 @@ impl HireSettleContract {
                 idx,
                 &company,
                 &reason,
+                &category,
             );
         }
 
@@ -192,7 +196,7 @@ impl HireSettleContract {
                 Symbol::new(&env, "disputes_batch_raised"),
                 engagement_id.clone(),
             ),
-            (milestone_indices, reason),
+            (milestone_indices, reason, category),
         );
     }
 
@@ -231,6 +235,7 @@ impl HireSettleContract {
         milestone_index: u32,
         company: &Address,
         reason: &String,
+        category: &DisputeCategory,
     ) {
         let current_ledger = env.ledger().sequence();
         let mut milestone = engagement.milestones.get(milestone_index).unwrap();
@@ -257,7 +262,14 @@ impl HireSettleContract {
 
         // Issue #501: durable record for the engagement timeline;
         // `DisputeReason` above is cleared once the dispute resolves.
-        Self::record_dispute_raised(env, engagement_id, milestone_index, company, reason);
+        Self::record_dispute_raised(
+            env,
+            engagement_id,
+            milestone_index,
+            company,
+            reason,
+            category,
+        );
 
         // Issue #468: every panel member is now on the hook for a vote.
         Self::record_arbiter_assignments(env, &engagement.arbiters);
@@ -283,11 +295,400 @@ impl HireSettleContract {
 
         env.events().publish(
             (Symbol::new(env, "dispute_raised"), engagement_id.clone()),
-            (milestone_index, reason.clone()),
+            (milestone_index, reason.clone(), category.clone()),
         );
 
         // Issue #581: count the newly raised dispute against the company.
         Self::record_dispute_raised_party(env, &engagement.company);
+
+        // Issue #656: a new dispute starts with no hidden votes, even if an
+        // earlier dispute on this milestone was never fully revealed.
+        for slot in engagement.arbiters.iter() {
+            env.storage().persistent().remove(&DataKey3::VoteCommit(
+                engagement_id.clone(),
+                milestone_index,
+                slot,
+            ));
+        }
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #656 — COMMIT-REVEAL ARBITER VOTING
+    // ----------------------------------------------------------
+
+    /// Admin toggle for commit-reveal voting. Enabled globally; each dispute's
+    /// commit phase runs for `commit_phase_ledgers` ledgers from the moment the
+    /// dispute is raised.
+    pub fn set_commit_reveal_voting(env: Env, admin: Address, enabled: bool) {
+        Self::assert_admin(&env, &admin);
+        env.storage().instance().set(
+            &DataKey::Config(ConfigKey::CommitRevealVoting),
+            &enabled,
+        );
+        env.events().publish(
+            (Symbol::new(&env, "commit_reveal_voting_set"),),
+            enabled,
+        );
+    }
+
+    /// Whether commit-reveal voting is currently enabled (default `false`).
+    pub fn is_commit_reveal_voting_enabled(env: Env) -> bool {
+        Self::commit_reveal_enabled(&env)
+    }
+
+    /// Set the commit-phase length in ledgers. `0` is rejected: an instant
+    /// commit phase cannot hide votes at all.
+    pub fn set_commit_phase_ledgers(env: Env, admin: Address, ledgers: u32) {
+        Self::assert_admin(&env, &admin);
+        if ledgers == 0 {
+            panic!("InvalidCommitPhaseLedgers");
+        }
+        env.storage().instance().set(
+            &DataKey::Config(ConfigKey::CommitPhaseLedgers),
+            &ledgers,
+        );
+        env.events()
+            .publish((Symbol::new(&env, "commit_phase_ledgers_set"),), ledgers);
+    }
+
+    /// Length of the commit phase in ledgers (default `DEFAULT_COMMIT_PHASE_LEDGERS`).
+    pub fn get_commit_phase_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::CommitPhaseLedgers))
+            .unwrap_or(DEFAULT_COMMIT_PHASE_LEDGERS)
+    }
+
+    pub(crate) fn commit_reveal_enabled(env: &Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::CommitRevealVoting))
+            .unwrap_or(false)
+    }
+
+    /// Hash a binary vote and salt exactly as `commit_vote` expects.
+    /// `vote` is one byte (`0x01` approve, `0x00` reject), followed verbatim by
+    /// the salt bytes: `sha256(vote || salt)`.
+    pub fn hash_vote_commitment(env: Env, vote: bool, salt: BytesN<32>) -> BytesN<32> {
+        let mut preimage = Bytes::new(&env);
+        preimage.push_back(if vote { 1 } else { 0 });
+        preimage.extend_from_array(&salt.to_array());
+        env.crypto().sha256(&preimage).to_bytes()
+    }
+
+    /// Commit a hidden vote during the commit phase. The commitment is
+    /// `sha256(vote || salt)` (see [`Self::hash_vote_commitment`]); it is stored
+    /// without revealing either input. Votes are only counted on reveal, so an
+    /// unrevealed commitment is automatically a non-vote.
+    pub fn commit_vote(
+        env: Env,
+        arbiter: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        commitment: BytesN<32>,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
+        arbiter.require_auth();
+        if !Self::commit_reveal_enabled(&env) {
+            panic!("CommitRevealDisabled");
+        }
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        if engagement.status != EngagementStatus::Active {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+        let caller = arbiter;
+        let (arbiter, _slot_index) =
+            Self::resolve_voting_arbiter(&env, &engagement, &engagement_id, &caller);
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.status != MilestoneStatus::Disputed {
+            panic!("milestone is not in disputed status");
+        }
+        Self::assert_evidence_window_closed(&env, &engagement_id, milestone_index);
+        if Self::is_arbiter_recused(&env, &engagement_id, milestone_index, &arbiter) {
+            panic!("ArbiterRecused");
+        }
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey2::ArbiterSplitVotes(
+                engagement_id.clone(),
+                milestone_index,
+            ))
+        {
+            panic!("MixedVoteModes");
+        }
+
+        let raised_at: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeRaisedAt(
+                engagement_id.clone(),
+                milestone_index,
+            ))
+            .unwrap_or_else(|| panic!("no dispute in progress"));
+        let commit_end = raised_at.saturating_add(Self::get_commit_phase_ledgers(env.clone()));
+        if env.ledger().sequence() > commit_end {
+            panic!("CommitPhaseClosed");
+        }
+
+        let key = DataKey3::VoteCommit(engagement_id.clone(), milestone_index, arbiter.clone());
+        if env.storage().persistent().has(&key) {
+            panic!("AlreadyCommitted");
+        }
+        let record = VoteCommitment {
+            commitment,
+            committed_at_ledger: env.ledger().sequence(),
+            revealed: false,
+            rationale_hash: String::from_str(&env, ""),
+        };
+        env.storage().persistent().set(&key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+        env.events().publish(
+            (Symbol::new(&env, "vote_committed"), engagement_id),
+            (milestone_index, caller),
+        );
+    }
+
+    /// Reveal a previously committed vote. Recomputes `sha256(vote || salt)`
+    /// and rejects a wrong vote or salt with `"InvalidVoteReveal"`. Reveals are
+    /// accepted only after the commit phase closes; unrevealed commitments do
+    /// not contribute to the tally.
+    pub fn reveal_vote(
+        env: Env,
+        arbiter: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        vote: bool,
+        salt: BytesN<32>,
+        rationale_hash: Option<String>,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
+        arbiter.require_auth();
+        if !Self::commit_reveal_enabled(&env) {
+            panic!("CommitRevealDisabled");
+        }
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+        if engagement.status != EngagementStatus::Active {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+        let caller = arbiter;
+        let (arbiter, slot_index) =
+            Self::resolve_voting_arbiter(&env, &engagement, &engagement_id, &caller);
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.status != MilestoneStatus::Disputed {
+            panic!("milestone is not in disputed status");
+        }
+        Self::assert_evidence_window_closed(&env, &engagement_id, milestone_index);
+        if Self::is_arbiter_recused(&env, &engagement_id, milestone_index, &arbiter) {
+            panic!("ArbiterRecused");
+        }
+
+        let raised_at: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeRaisedAt(
+                engagement_id.clone(),
+                milestone_index,
+            ))
+            .unwrap_or_else(|| panic!("no dispute in progress"));
+        let commit_end = raised_at.saturating_add(Self::get_commit_phase_ledgers(env.clone()));
+        if env.ledger().sequence() <= commit_end {
+            panic!("RevealPhaseNotOpen");
+        }
+
+        let key = DataKey3::VoteCommit(engagement_id.clone(), milestone_index, arbiter.clone());
+        let mut commitment: VoteCommitment = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("NoVoteCommitted"));
+        if commitment.revealed {
+            panic!("AlreadyRevealed");
+        }
+        let expected = Self::hash_vote_commitment(env.clone(), vote, salt);
+        if expected != commitment.commitment {
+            panic!("InvalidVoteReveal");
+        }
+        commitment.revealed = true;
+        env.storage().persistent().set(&key, &commitment);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+
+        let vote_key = DataKey::ArbiterVotes(engagement_id.clone(), milestone_index);
+        let mut record: ArbiterVoteRecord = env
+            .storage()
+            .persistent()
+            .get(&vote_key)
+            .unwrap_or_else(|| Self::empty_vote_record(&env));
+        for i in 0..record.voted.len() {
+            if record.voted.get(i).unwrap() == arbiter {
+                panic!("duplicate vote");
+            }
+        }
+        let weight = Self::arbiter_weight(&engagement, slot_index);
+        record.voted.push_back(arbiter.clone());
+        record.approvals.push_back(vote);
+        record.rationale_hashes.push_back(
+            rationale_hash.unwrap_or(String::from_str(&env, "")),
+        );
+        Self::record_arbiter_vote(&env, &arbiter, &engagement_id, milestone_index);
+        if vote {
+            record.approve_votes += 1;
+            record.approve_weight += weight;
+        } else {
+            record.reject_votes += 1;
+            record.reject_weight += weight;
+        }
+
+        env.events().publish(
+            (Symbol::new(&env, "vote_revealed"), engagement_id.clone()),
+            (milestone_index, arbiter.clone(), vote),
+        );
+        Self::settle_binary_vote(
+            &env,
+            &mut engagement,
+            &engagement_id,
+            milestone_index,
+            &record,
+            &arbiter,
+            &caller,
+        );
+        engagement.last_activity_ledger = env.ledger().sequence();
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #657 — DISPUTE EVIDENCE WINDOW
+    // ----------------------------------------------------------
+
+    /// Set the ledger length of the post-dispute evidence window. `0` (the
+    /// default) keeps the legacy behaviour: arbiters may vote immediately.
+    pub fn set_evidence_window(env: Env, admin: Address, ledgers: u32) {
+        Self::assert_admin(&env, &admin);
+        env.storage().instance().set(
+            &DataKey::Config(ConfigKey::EvidenceWindowLedgers),
+            &ledgers,
+        );
+        env.events()
+            .publish((Symbol::new(&env, "evidence_window_set"),), ledgers);
+    }
+
+    /// Evidence-window length in ledgers (default `0`).
+    pub fn get_evidence_window(env: Env) -> u32 {
+        Self::evidence_window_internal(&env)
+    }
+
+    pub(crate) fn evidence_window_internal(env: &Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::EvidenceWindowLedgers))
+            .unwrap_or(DEFAULT_EVIDENCE_WINDOW_LEDGERS)
+    }
+
+    /// Last ledger of the evidence window for an active dispute.
+    fn evidence_window_end(env: &Env, engagement_id: &String, milestone_index: u32) -> u32 {
+        let raised_at: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeRaisedAt(
+                engagement_id.clone(),
+                milestone_index,
+            ))
+            .unwrap_or_else(|| panic!("no dispute in progress"));
+        raised_at.saturating_add(Self::evidence_window_internal(env))
+    }
+
+    /// Panic while the dispute's evidence window is open.
+    fn assert_evidence_window_closed(env: &Env, engagement_id: &String, milestone_index: u32) {
+        if env.ledger().sequence() < Self::evidence_window_end(env, engagement_id, milestone_index) {
+            panic!("EvidenceWindowOpen");
+        }
+    }
+
+    /// Attach an evidence hash (e.g. an IPFS CID or proof URI) while a
+    /// dispute's evidence window is open. Either the company side (including
+    /// a registered disputer) or the recruiter side may attach one hash.
+    pub fn attach_dispute_evidence(
+        env: Env,
+        party: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        evidence_hash: String,
+    ) {
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        party.require_auth();
+        if evidence_hash.is_empty() {
+            panic!("InvalidEvidenceHash");
+        }
+        if evidence_hash.len() > Self::get_max_proof_hash_length_internal(&env) {
+            panic!("EvidenceHashTooLong");
+        }
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.status != MilestoneStatus::Disputed {
+            panic!("milestone is not in disputed status");
+        }
+        if env.ledger().sequence() >= Self::evidence_window_end(&env, &engagement_id, milestone_index) {
+            panic!("EvidenceWindowClosed");
+        }
+
+        let company_side = Self::is_company_disputer(&env, &party, &engagement.company);
+        let recruiter_side = Self::is_authorized_recruiter(&env, &party, &engagement.recruiter);
+        if !company_side && !recruiter_side {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let key = DataKey3::DisputeEvidence(engagement_id.clone(), milestone_index);
+        let mut evidence: DisputeEvidence = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(DisputeEvidence {
+                company_hash: None,
+                recruiter_hash: None,
+            });
+        if company_side {
+            evidence.company_hash = Some(evidence_hash.clone());
+        }
+        if recruiter_side {
+            evidence.recruiter_hash = Some(evidence_hash.clone());
+        }
+        env.storage().persistent().set(&key, &evidence);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+        env.events().publish(
+            (
+                Symbol::new(&env, "dispute_evidence_attached"),
+                engagement_id,
+            ),
+            (milestone_index, party, evidence_hash),
+        );
+    }
+
+    /// Read the evidence hashes attached during an open (or past) window.
+    pub fn get_dispute_evidence(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Option<DisputeEvidence> {
+        env.storage().persistent().get(&DataKey3::DisputeEvidence(
+            engagement_id,
+            milestone_index,
+        ))
     }
 
     // ----------------------------------------------------------
@@ -392,6 +793,9 @@ impl HireSettleContract {
         Self::assert_engagement_not_paused(&env, &engagement_id);
         Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         arbiter.require_auth();
+        if Self::commit_reveal_enabled(&env) {
+            panic!("CommitRevealRequired");
+        }
 
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
 
@@ -408,6 +812,7 @@ impl HireSettleContract {
         if milestone.status != MilestoneStatus::Disputed {
             panic!("milestone is not in disputed status");
         }
+        Self::assert_evidence_window_closed(&env, &engagement_id, milestone_index);
 
         if Self::is_arbiter_recused(&env, &engagement_id, milestone_index, &arbiter) {
             panic!("ArbiterRecused");
@@ -554,6 +959,9 @@ impl HireSettleContract {
         Self::assert_engagement_not_paused(&env, &engagement_id);
         Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         arbiter.require_auth();
+        if Self::commit_reveal_enabled(&env) {
+            panic!("CommitRevealRequired");
+        }
 
         let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
 
@@ -570,6 +978,7 @@ impl HireSettleContract {
         if milestone.status != MilestoneStatus::Disputed {
             panic!("milestone is not in disputed status");
         }
+        Self::assert_evidence_window_closed(&env, &engagement_id, milestone_index);
 
         if Self::is_arbiter_recused(&env, &engagement_id, milestone_index, &arbiter) {
             panic!("ArbiterRecused");
@@ -1143,6 +1552,11 @@ impl HireSettleContract {
         Self::assert_engagement_not_paused(&env, &engagement_id);
         Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
         arbiter.require_auth();
+        // Issue #656: split voting is explicitly not supported in
+        // commit-reveal mode; binary weighted votes are supported.
+        if Self::commit_reveal_enabled(&env) {
+            panic!("CommitRevealSplitUnsupported");
+        }
 
         if !Self::is_split_voting_enabled(env.clone(), engagement_id.clone()) {
             panic!("SplitVotingDisabled");
@@ -1166,6 +1580,7 @@ impl HireSettleContract {
         if milestone.status != MilestoneStatus::Disputed {
             panic!("milestone is not in disputed status");
         }
+        Self::assert_evidence_window_closed(&env, &engagement_id, milestone_index);
 
         if Self::is_arbiter_recused(&env, &engagement_id, milestone_index, &arbiter) {
             panic!("ArbiterRecused");
@@ -1585,7 +2000,12 @@ impl HireSettleContract {
                 engagement_id.clone(),
                 milestone_index,
             ));
-        if !cap_reached && !deadline_enforced && current_ledger <= raised_at + dispute_window {
+        // Issue #657: the dispute window starts only after the evidence window.
+        let voting_opens_at = raised_at.saturating_add(Self::evidence_window_internal(&env));
+        if !cap_reached
+            && !deadline_enforced
+            && current_ledger <= voting_opens_at.saturating_add(dispute_window)
+        {
             panic!("DisputeWindowNotElapsed");
         }
 
@@ -2725,7 +3145,9 @@ impl HireSettleContract {
                 milestone_index,
             ))
             .unwrap_or_else(|| panic!("no dispute in progress"));
-        if env.ledger().sequence() <= raised_at.saturating_add(deadline) {
+        // Issue #657: the vote deadline starts when the evidence window closes.
+        let voting_opens_at = raised_at.saturating_add(Self::evidence_window_internal(&env));
+        if env.ledger().sequence() <= voting_opens_at.saturating_add(deadline) {
             panic!("VoteDeadlineNotReached");
         }
 

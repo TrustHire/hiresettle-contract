@@ -1137,6 +1137,260 @@ impl HireSettleContract {
         }
     }
 
+    // ----------------------------------------------------------
+    // ISSUE #655 — PRO-RATA RETENTION REFUND ON EARLY DEPARTURE
+    // ----------------------------------------------------------
+
+    /// Report that a candidate left partway through a retention window. The
+    /// company proposes a pro-rata split of the milestone amount; the
+    /// recruiter must accept it via [`Self::accept_early_departure`] before
+    /// any funds move.
+    ///
+    /// Only an unpaid `Locked` or `Pending` retention milestone is eligible:
+    /// placement milestones and milestones already confirmed, disputed or in
+    /// another resolution path cannot use this flow.
+    pub fn report_early_departure(
+        env: Env,
+        company: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        departure_ledgers: u32,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
+        company.require_auth();
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        if engagement.status != EngagementStatus::Active {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+        if !Self::is_authorized_company(&env, &company, &engagement.company) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.kind != MilestoneKind::Retention {
+            panic!("only retention milestones can be reported early");
+        }
+        if milestone.status != MilestoneStatus::Locked
+            && milestone.status != MilestoneStatus::Pending
+        {
+            panic!("milestone is not eligible for early departure");
+        }
+
+        let retention_started_at: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::RetentionStartedAt(
+                engagement_id.clone(),
+                milestone_index,
+            ))
+            .unwrap_or(engagement.created_at_ledger);
+        let retention_window_ledgers = milestone
+            .valid_after_ledger
+            .saturating_sub(retention_started_at);
+        if retention_window_ledgers == 0 {
+            panic!("invalid retention window");
+        }
+        if departure_ledgers == 0 {
+            panic!("departure_ledgers must be positive");
+        }
+
+        let now = env.ledger().sequence();
+        let proposal = EarlyDepartureProposal {
+            proposer: company,
+            payment: (engagement.total_amount * milestone.payment_percent as i128) / 100
+                - milestone.replacement_paid_out,
+            retention_started_at,
+            retention_window_ledgers,
+            valid_after_ledger: milestone.valid_after_ledger,
+            departure_ledgers: departure_ledgers.min(retention_window_ledgers),
+            expires_at_ledger: now.saturating_add(Self::get_amendment_ttl(env.clone())),
+        };
+        let key = DataKey3::EarlyDepartureProposal(engagement_id.clone(), milestone_index);
+        env.storage().persistent().set(&key, &proposal);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "early_departure_reported"),
+                engagement_id.clone(),
+            ),
+            (
+                milestone_index,
+                proposal.departure_ledgers,
+                retention_window_ledgers,
+                proposal.expires_at_ledger,
+            ),
+        );
+    }
+
+    /// Accept a pending early-departure proposal. The recruiter receives
+    /// `payment * served_ledgers / retention_window_ledgers` through the
+    /// normal fee pipeline; the company gets the remainder back. Integer
+    /// division rounds down, so any rounding dust stays with the company and
+    /// the two amounts always sum to exactly the milestone payment.
+    ///
+    /// The milestone moves to the terminal `Resolved` state, which counts as
+    /// complete for engagement-completion purposes.
+    pub fn accept_early_departure(
+        env: Env,
+        recruiter: Address,
+        engagement_id: String,
+        milestone_index: u32,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
+        recruiter.require_auth();
+
+        let mut engagement = Self::get_engagement_internal(&env, &engagement_id);
+        if engagement.status != EngagementStatus::Active {
+            panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
+        }
+        if !Self::is_authorized_recruiter(&env, &recruiter, &engagement.recruiter) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let key = DataKey3::EarlyDepartureProposal(engagement_id.clone(), milestone_index);
+        let proposal: EarlyDepartureProposal = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic!("no pending early departure"));
+        if env.ledger().sequence() > proposal.expires_at_ledger {
+            panic!("EarlyDepartureExpired");
+        }
+
+        let mut milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.kind != MilestoneKind::Retention
+            || (milestone.status != MilestoneStatus::Locked
+                && milestone.status != MilestoneStatus::Pending)
+            || milestone.valid_after_ledger != proposal.valid_after_ledger
+            || (engagement.total_amount * milestone.payment_percent as i128) / 100
+                - milestone.replacement_paid_out
+                != proposal.payment
+        {
+            panic!("early departure proposal no longer valid");
+        }
+
+        env.storage().persistent().remove(&key);
+        env.storage().persistent().remove(&DataKey3::RetentionStartedAt(
+            engagement_id.clone(),
+            milestone_index,
+        ));
+
+        let payment = proposal.payment.max(0);
+        // README "Numeric Precision": non-negative i128 division rounds down;
+        // the subtracted side (the company refund) gets the rounding dust.
+        let earned = if payment > 0 {
+            (payment * proposal.departure_ledgers as i128)
+                / proposal.retention_window_ledgers as i128
+        } else {
+            0
+        };
+        let refunded = payment - earned;
+
+        if payment > 0 {
+            engagement.released_amount += payment;
+            Self::add_token_locked(&env, &engagement.token, -payment);
+            let token_client = token::Client::new(&env, &engagement.token);
+            if earned > 0 {
+                let effective_bps = Self::payout_fee_bps(&env, &engagement_id, &engagement);
+                let fee_amount =
+                    Self::platform_fee_amount(&env, &engagement_id, earned, effective_bps);
+                let net_payment = earned - fee_amount;
+                if fee_amount > 0 {
+                    Self::collect_platform_fee(
+                        &env,
+                        &engagement,
+                        &engagement_id,
+                        milestone_index,
+                        fee_amount,
+                    );
+                }
+                match engagement.stream_duration_ledgers {
+                    Some(duration) => Self::start_streamed_payout(
+                        &env,
+                        &engagement_id,
+                        milestone_index,
+                        net_payment,
+                        duration,
+                    ),
+                    None => Self::distribute_recruiter_payout(
+                        &env,
+                        &engagement,
+                        net_payment,
+                        &token_client,
+                        true,
+                    ),
+                }
+            }
+            Self::refund_company_escrow(&env, &engagement, &engagement_id, refunded);
+        }
+
+        let old_status = milestone.status.clone();
+        milestone.status = MilestoneStatus::Resolved;
+        engagement.milestones.set(milestone_index, milestone);
+        Self::bond_clear_rejection(&env, &engagement_id, milestone_index);
+
+        let all_done = (0..engagement.milestones.len()).all(|i| {
+            let s = engagement.milestones.get(i).unwrap().status;
+            s == MilestoneStatus::Confirmed || s == MilestoneStatus::Resolved
+        });
+        let old_engagement_status = engagement.status.clone();
+        if all_done {
+            engagement.status = EngagementStatus::Completed;
+            Self::settle_bonds(&env, &engagement);
+            Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
+            Self::decrement_company_active_count(&env, &engagement.company);
+            Self::refund_split_withheld(&env, &engagement_id, &mut engagement);
+        }
+        engagement.last_activity_ledger = env.ledger().sequence();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
+        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::emit_milestone_status_changed(
+            &env,
+            &engagement_id,
+            milestone_index,
+            old_status,
+            MilestoneStatus::Resolved,
+        );
+        Self::emit_engagement_status_changed(
+            &env,
+            &engagement_id,
+            old_engagement_status,
+            engagement.status.clone(),
+            Some(recruiter.clone()),
+        );
+        env.events().publish(
+            (
+                Symbol::new(&env, "retention_prorated"),
+                engagement_id.clone(),
+            ),
+            (milestone_index, earned, refunded),
+        );
+        if all_done {
+            env.events().publish(
+                (
+                    Symbol::new(&env, "engagement_completed"),
+                    engagement_id.clone(),
+                ),
+                (
+                    engagement_id.clone(),
+                    engagement.released_amount,
+                    env.ledger().sequence(),
+                ),
+            );
+        }
+    }
+
     /// Recruiter declines a pending partial confirmation. The proposal is
     /// discarded and the milestone stays `ProofSubmitted`, so the company can
     /// still confirm in full, raise a dispute, or propose again.

@@ -616,6 +616,9 @@ pub struct DisputeHistoryEntry {
     /// Ledger at which the company withdrew the dispute via
     /// `withdraw_dispute` (issue #565); `None` if it was not withdrawn.
     pub withdrawn_at: Option<u32>,
+    /// Category code supplied with the dispute (issue #658). Legacy entries
+    /// without this field are decoded as `DisputeCategory::Other`.
+    pub category: DisputeCategory,
 }
 /// One entry of `get_status_history` (issue #501).
 #[contracttype]
@@ -719,6 +722,70 @@ pub struct ConflictDeclaration {
     /// Whether the declaration is currently active. Admin can clear declarations
     /// if they were made in error, but the historical record is preserved.
     pub active: bool,
+}
+
+/// Evidence hashes attached by the two parties while a dispute's evidence
+/// window is open (issue #657). `None` means that side has not attached one.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisputeEvidence {
+    pub company_hash: Option<String>,
+    pub recruiter_hash: Option<String>,
+}
+
+/// Point-in-time view of every admin-configurable scalar (issue #657). The
+/// `evidence_window_ledgers` field is included so callers can tell when voting
+/// on a newly raised dispute is gated.
+#[contracttype]
+#[derive(Clone)]
+pub struct ConfigSnapshot {
+    pub version: String,
+    pub admin: Address,
+    pub admin_renounced: bool,
+    pub paused: bool,
+    pub platform_fee_bps: u32,
+    pub platform_fee_treasury: Address,
+    pub arbiter_fee_bps: u32,
+    pub super_arbiter: Option<Address>,
+    pub confirm_window_ledgers: u32,
+    pub dispute_window_ledgers: u32,
+    pub proof_cooldown_ledgers: u32,
+    pub amendment_ttl_ledgers: u32,
+    pub upgrade_lock_duration_ledgers: u32,
+    pub ledgers_per_day: u32,
+    pub max_replacements: u32,
+    pub max_active_per_company: u32,
+    pub max_proof_hash_length: u32,
+    pub min_engagement_amount: i128,
+    pub config_change_ttl_ledgers: u32,
+    pub evidence_window_ledgers: u32,
+    pub commit_reveal_voting: bool,
+    pub commit_phase_ledgers: u32,
+}
+
+/// A hidden arbiter vote, `sha256(vote || salt)` (issue #656). The vote byte is
+/// `0x01` for approve and `0x00` for reject; `salt` is a 32-byte arbiter secret.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoteCommitment {
+    pub commitment: BytesN<32>,
+    pub committed_at_ledger: u32,
+    pub revealed: bool,
+    pub rationale_hash: String,
+}
+
+/// Company-reported early departure from a retention window (issue #655),
+/// stored under `DataKey3::EarlyDepartureProposal` until the recruiter accepts.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct EarlyDepartureProposal {
+    pub proposer: Address,
+    pub payment: i128,
+    pub retention_started_at: u32,
+    pub retention_window_ledgers: u32,
+    pub valid_after_ledger: u32,
+    pub departure_ledgers: u32,
+    pub expires_at_ledger: u32,
 }
 
 /// Pending company-proposed partial release of a `ProofSubmitted` milestone

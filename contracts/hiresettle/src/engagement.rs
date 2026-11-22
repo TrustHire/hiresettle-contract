@@ -494,6 +494,12 @@ impl HireSettleContract {
                     }
                     m.valid_after_ledger = current_ledger + (days * lpd);
                     m.status = MilestoneStatus::Locked;
+                    // Issue #655: remember when this retention window began
+                    // for pro-rata early-departure refunds.
+                    env.storage().persistent().set(
+                        &DataKey3::RetentionStartedAt(engagement_id.clone(), i),
+                        &current_ledger,
+                    );
                 }
             }
             resolved_milestones.push_back(m);
@@ -972,6 +978,14 @@ impl HireSettleContract {
                             / Self::get_ledgers_per_day_internal(&env);
                         m.valid_after_ledger = current_ledger
                             + (original_days * Self::get_ledgers_per_day_internal(&env));
+                        // Issue #655: a replacement restarts the retention window.
+                        env.storage().persistent().set(
+                            &DataKey3::RetentionStartedAt(engagement_id.clone(), i),
+                            &current_ledger,
+                        );
+                        env.storage().persistent().remove(
+                            &DataKey3::EarlyDepartureProposal(engagement_id.clone(), i),
+                        );
                         let old_status = m.status.clone();
                         m.status = MilestoneStatus::Locked;
                         m.proof_hash = String::from_str(&env, "");
