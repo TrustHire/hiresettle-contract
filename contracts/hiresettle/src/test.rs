@@ -14244,3 +14244,41 @@ fn test_disputes_by_category_index_and_pagination() {
     );
     assert_eq!(client.get_dispute_count_by_category(&category), 1);
 }
+
+// ============================================================
+// #660 — company verification badge
+// ============================================================
+
+#[test]
+fn test_company_verification_badge_and_expiry() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    assert!(!client.is_company_verified(&company));
+
+    let expiry = env.ledger().sequence() + 20;
+    client.set_company_verified(&company, &company, &true, &expiry);
+    assert!(client.is_company_verified(&company));
+
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-COMPANY-VERIFIED",
+    );
+    let summary = client.get_engagement_summary(&String::from_str(&env, "ENG-COMPANY-VERIFIED"));
+    assert!(summary.company_verified);
+
+    advance_ledger(&env, 21);
+    assert!(!client.is_company_verified(&company));
+    assert!(!client
+        .get_engagement_summary(&String::from_str(&env, "ENG-COMPANY-VERIFIED"))
+        .company_verified);
+
+    client.set_company_verified(&company, &company, &false, &0);
+    assert!(!client.is_company_verified(&company));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_non_admin_cannot_set_company_verified() {
+    let (env, contract_id, _token_id, company, _recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_company_verified(&arbiter, &company, &true, &0);
+}

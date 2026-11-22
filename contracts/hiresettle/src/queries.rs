@@ -251,6 +251,7 @@ impl HireSettleContract {
         EngagementSummary {
             id: engagement.id,
             job_title: engagement.job_title,
+            company_verified: Self::is_company_verified(env.clone(), engagement.company.clone()),
             company: engagement.company,
             recruiter: engagement.recruiter,
             total_amount: engagement.total_amount,
@@ -294,6 +295,10 @@ impl HireSettleContract {
                 results.push_back(EngagementSummary {
                     id: engagement.id,
                     job_title: engagement.job_title,
+                    company_verified: Self::is_company_verified(
+                        env.clone(),
+                        engagement.company.clone(),
+                    ),
                     company: engagement.company,
                     recruiter: engagement.recruiter,
                     total_amount: engagement.total_amount,

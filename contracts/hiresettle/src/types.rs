@@ -123,6 +123,8 @@ pub struct EngagementSummary {
     pub job_title: String,
     /// The hiring company address.
     pub company: Address,
+    /// Issue #660: whether the company currently has a valid verification badge.
+    pub company_verified: bool,
     /// The recruiter address receiving milestone payments.
     pub recruiter: Address,
     /// Total fee locked in escrow at creation, in the token's smallest unit.

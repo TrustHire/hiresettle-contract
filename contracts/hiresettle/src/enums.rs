@@ -567,4 +567,8 @@ pub enum DataKey3 {
     DisputeCategory(String, u32),
     /// Issue #659: (engagement id, milestone index) pairs by dispute category.
     DisputesByCategory(String),
+    /// Issue #660: company verification badge.
+    CompanyVerified(Address),
+    /// Issue #660: ledger at which a company verification badge expires (0 = never).
+    CompanyVerificationExpiry(Address),
 }
