@@ -251,6 +251,26 @@ pub enum CompanyMemberRole {
     /// May call `raise_dispute` / `batch_raise_dispute`.
     Disputer,
 }
+
+/// Dispute category code (issue #658). The variant order is part of the
+/// contract's storage and event encoding: append new variants only.
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum DisputeCategory {
+    ProofInvalid,
+    CandidateNoShow,
+    EarlyDeparture,
+    TermsMismatch,
+    Other,
+}
+
+impl Default for DisputeCategory {
+    /// Legacy dispute history entries (written before issue #658) had no
+    /// category and are read back as `Other`.
+    fn default() -> Self {
+        Self::Other
+    }
+}
 /// Contract storage key space. Instance keys reset between transactions;
 /// persistent keys survive across ledgers.
 #[contracttype]

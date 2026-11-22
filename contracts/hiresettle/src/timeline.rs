@@ -2,8 +2,52 @@
 //! from the per-kind histories, plus the recorders and queries for the
 //! histories that did not previously survive their event.
 
-use soroban_sdk::{contractimpl, Address, Env, String, Vec};
+use soroban_sdk::{contractimpl, Address, Env, Map, String, Symbol, TryFromVal, TryIntoVal, Val, Vec};
 use crate::*;
+
+/// Decode a dispute-history entry, tolerating entries written before the
+/// `category` field was introduced (issue #658). Generated `#[contracttype]`
+/// struct decoding requires an exact field set, so old entries are read as a
+/// raw map and missing fields get their defaults.
+fn decode_dispute_entry(env: &Env, val: &Val) -> DisputeHistoryEntry {
+    let map: Map<Symbol, Val> = Map::try_from_val(env, val).unwrap();
+    let field = |name: &str| -> Val {
+        map.try_get(Symbol::new(env, name))
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| panic!("invalid dispute history entry"))
+    };
+    let category = match map.try_get(Symbol::new(env, "category")) {
+        Ok(Some(v)) => v.try_into_val(env).unwrap(),
+        _ => DisputeCategory::default(),
+    };
+    let withdrawn_at = match map.try_get(Symbol::new(env, "withdrawn_at")) {
+        Ok(Some(v)) => v.try_into_val(env).unwrap_or(None),
+        _ => None,
+    };
+    DisputeHistoryEntry {
+        milestone_index: field("milestone_index").try_into_val(env).unwrap(),
+        raised_by: field("raised_by").try_into_val(env).unwrap(),
+        reason: field("reason").try_into_val(env).unwrap(),
+        ledger: field("ledger").try_into_val(env).unwrap(),
+        withdrawn_at,
+        category,
+    }
+}
+
+/// Load the whole history through the compatibility decoder above.
+fn load_dispute_entries(env: &Env, engagement_id: &String) -> Vec<DisputeHistoryEntry> {
+    let raw: Vec<Val> = env
+        .storage()
+        .persistent()
+        .get(&DataKey2::DisputeHistory(engagement_id.clone()))
+        .unwrap_or_else(|| Vec::new(env));
+    let mut out = Vec::new(env);
+    for i in 0..raw.len() {
+        out.push_back(decode_dispute_entry(env, &raw.get(i).unwrap()));
+    }
+    out
+}
 
 #[contractimpl]
 impl HireSettleContract {
@@ -66,10 +110,7 @@ impl HireSettleContract {
     /// ones already resolved (issue #501). Capped at the most recent
     /// `MAX_DISPUTE_HISTORY_ENTRIES`.
     pub fn get_dispute_history(env: Env, engagement_id: String) -> Vec<DisputeHistoryEntry> {
-        env.storage()
-            .persistent()
-            .get(&DataKey2::DisputeHistory(engagement_id))
-            .unwrap_or_else(|| Vec::new(&env))
+        load_dispute_entries(&env, &engagement_id)
     }
 
     /// Return every engagement status transition, oldest first (issue #501).
@@ -107,13 +148,10 @@ impl HireSettleContract {
         milestone_index: u32,
         raised_by: &Address,
         reason: &String,
+        category: &DisputeCategory,
     ) {
         let key = DataKey2::DisputeHistory(engagement_id.clone());
-        let mut log: Vec<DisputeHistoryEntry> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| Vec::new(env));
+        let mut log = load_dispute_entries(env, engagement_id);
         if log.len() >= MAX_DISPUTE_HISTORY_ENTRIES {
             log.remove(0);
         }
@@ -123,6 +161,7 @@ impl HireSettleContract {
             reason: reason.clone(),
             ledger: env.ledger().sequence(),
             withdrawn_at: None,
+            category: category.clone(),
         });
         env.storage().persistent().set(&key, &log);
         env.storage()
@@ -138,11 +177,7 @@ impl HireSettleContract {
         milestone_index: u32,
     ) {
         let key = DataKey2::DisputeHistory(engagement_id.clone());
-        let mut log: Vec<DisputeHistoryEntry> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| Vec::new(env));
+        let mut log = load_dispute_entries(env, engagement_id);
         let mut i = log.len();
         while i > 0 {
             i -= 1;

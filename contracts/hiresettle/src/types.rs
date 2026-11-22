@@ -1,7 +1,10 @@
 //! Contract data structs (`#[contracttype]`).
 
 use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
-use crate::{ActionKind, ActorRole, EngagementStatus, MilestoneKind, MilestoneStatus, TimelineKind};
+use crate::{
+    ActionKind, ActorRole, DisputeCategory, EngagementStatus, MilestoneKind, MilestoneStatus,
+    TimelineKind,
+};
 
 /// A payment and workflow checkpoint belonging to an [`Engagement`]'s `milestones`.
 #[contracttype]
@@ -600,6 +603,9 @@ pub struct DisputeHistoryEntry {
     /// Ledger at which the company withdrew the dispute via
     /// `withdraw_dispute` (issue #565); `None` if it was not withdrawn.
     pub withdrawn_at: Option<u32>,
+    /// Category code supplied with the dispute (issue #658). Legacy entries
+    /// without this field are decoded as `DisputeCategory::Other`.
+    pub category: DisputeCategory,
 }
 /// One entry of `get_status_history` (issue #501).
 #[contracttype]

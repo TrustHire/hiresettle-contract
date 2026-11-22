@@ -52,6 +52,7 @@ impl HireSettleContract {
         engagement_id: String,
         milestone_index: u32,
         reason: String,
+        category: DisputeCategory,
     ) {
         Self::assert_engagement_not_paused(&env, &engagement_id);
         Self::assert_function_not_paused(&env, FN_RAISE_DISPUTE);
@@ -80,6 +81,7 @@ impl HireSettleContract {
             milestone_index,
             &company,
             &reason,
+            &category,
         );
 
         engagement.last_activity_ledger = env.ledger().sequence();
@@ -136,6 +138,7 @@ impl HireSettleContract {
         engagement_id: String,
         milestone_indices: Vec<u32>,
         reason: String,
+        category: DisputeCategory,
     ) {
         Self::assert_engagement_not_paused(&env, &engagement_id);
         Self::assert_function_not_paused(&env, FN_RAISE_DISPUTE);
@@ -178,6 +181,7 @@ impl HireSettleContract {
                 idx,
                 &company,
                 &reason,
+                &category,
             );
         }
 
@@ -192,7 +196,7 @@ impl HireSettleContract {
                 Symbol::new(&env, "disputes_batch_raised"),
                 engagement_id.clone(),
             ),
-            (milestone_indices, reason),
+            (milestone_indices, reason, category),
         );
     }
 
@@ -231,6 +235,7 @@ impl HireSettleContract {
         milestone_index: u32,
         company: &Address,
         reason: &String,
+        category: &DisputeCategory,
     ) {
         let current_ledger = env.ledger().sequence();
         let mut milestone = engagement.milestones.get(milestone_index).unwrap();
@@ -257,7 +262,14 @@ impl HireSettleContract {
 
         // Issue #501: durable record for the engagement timeline;
         // `DisputeReason` above is cleared once the dispute resolves.
-        Self::record_dispute_raised(env, engagement_id, milestone_index, company, reason);
+        Self::record_dispute_raised(
+            env,
+            engagement_id,
+            milestone_index,
+            company,
+            reason,
+            category,
+        );
 
         // Issue #468: every panel member is now on the hook for a vote.
         Self::record_arbiter_assignments(env, &engagement.arbiters);
@@ -283,7 +295,7 @@ impl HireSettleContract {
 
         env.events().publish(
             (Symbol::new(env, "dispute_raised"), engagement_id.clone()),
-            (milestone_index, reason.clone()),
+            (milestone_index, reason.clone(), category.clone()),
         );
 
         // Issue #581: count the newly raised dispute against the company.
