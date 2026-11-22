@@ -333,6 +333,27 @@ impl HireSettleContract {
             .unwrap_or(global_bps)
     }
 
+    /// Gross amount for a milestone (issue #668). Absolute plans use the exact
+    /// stored amounts; percent-based engagements are unchanged.
+    pub(crate) fn milestone_gross_amount(
+        env: &Env,
+        engagement: &Engagement,
+        milestone_index: u32,
+    ) -> i128 {
+        let key = DataKey3::AbsoluteMilestoneAmounts(engagement.id.clone());
+        if let Some(amounts) = env
+            .storage()
+            .persistent()
+            .get::<DataKey3, Vec<i128>>(&key)
+        {
+            if milestone_index < amounts.len() {
+                return amounts.get(milestone_index).unwrap();
+            }
+        }
+        let milestone = engagement.milestones.get(milestone_index).unwrap();
+        (engagement.total_amount * milestone.payment_percent as i128) / 100
+    }
+
     /// Platform fee owed on `payment` at `bps` (issue #478): the bps-derived
     /// amount raised to the admin fee floor, but never above `payment`
     /// itself. Waived engagements always pay zero, floor or not.

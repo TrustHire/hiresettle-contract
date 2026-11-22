@@ -581,4 +581,6 @@ pub enum DataKey3 {
     EngagementInsurancePremiums(String, Address),
     /// Issue #662: whether an engagement opted into insurance at creation.
     EngagementInsured(String),
+    /// Issue #668: exact absolute milestone amounts, parallel to milestones.
+    AbsoluteMilestoneAmounts(String),
 }

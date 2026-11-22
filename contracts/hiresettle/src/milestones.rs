@@ -447,7 +447,7 @@ impl HireSettleContract {
         // share (which may have grown via top_up_escrow) and what was already
         // paid — this ensures escrow added after a replacement still reaches
         // the recruiter instead of getting stuck in the contract.
-        let full_share = (engagement.total_amount * milestone.payment_percent as i128) / 100;
+        let full_share = Self::milestone_gross_amount(&env, &engagement, milestone_index);
         let payment = full_share - milestone.replacement_paid_out;
         if payment > 0 {
             let effective_bps = Self::payout_fee_bps(&env, &engagement_id, &engagement);
@@ -710,7 +710,7 @@ impl HireSettleContract {
 
         env.storage().persistent().remove(&key);
 
-        let full_share = (engagement.total_amount * milestone.payment_percent as i128) / 100;
+        let full_share = Self::milestone_gross_amount(&env, &engagement, milestone_index);
         let payment = full_share - milestone.replacement_paid_out;
         let mut released: i128 = 0;
         let mut refunded: i128 = 0;
@@ -986,7 +986,7 @@ impl HireSettleContract {
             let idx = milestone_indices.get(i).unwrap();
             let mut m = engagement.milestones.get(idx).unwrap();
 
-            let payment = (engagement.total_amount * m.payment_percent as i128) / 100;
+            let payment = Self::milestone_gross_amount(&env, &engagement, idx);
             let fee_amount =
                 Self::platform_fee_amount(&env, &engagement_id, payment, effective_bps);
             // Issue #662: premium is separate from, and excluded from, the
@@ -1196,7 +1196,7 @@ impl HireSettleContract {
 
         // Only the not-yet-paid part of the share is forfeited; anything paid
         // before a replacement reset (issue #183) is already gone.
-        let full_share = (engagement.total_amount * milestone.payment_percent as i128) / 100;
+        let full_share = Self::milestone_gross_amount(&env, &engagement, milestone_index);
         let forfeited = (full_share - milestone.replacement_paid_out).max(0);
         let forfeit_key = DataKey::NoShowForfeited(engagement_id.clone());
         let pending_forfeit: i128 = env.storage().persistent().get(&forfeit_key).unwrap_or(0);

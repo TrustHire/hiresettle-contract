@@ -2887,3 +2887,14 @@ MIT
 <!-- handsoff-issue-582 -->
 
 - #582: feat: get_protocol_stats query — global totals for dashboards
+
+## Absolute-amount milestones (issue #668)
+
+`create_engagement_payment_plan` accepts a plan of `MilestonePayment::Percent`
+or `MilestonePayment::Absolute` values. Absolute amounts must sum (with any
+percent-derived amounts) to `total_amount`; existing percent-only engagements
+are unaffected. Exact amounts are stored per engagement and drive gross payouts.
+For amendments and appended milestones, supply a complete plan whose absolute
+amounts sum to `total_amount`. `top_up_escrow` leaves absolute amounts
+unchanged, so a top-up needs a matching amendment before those funds can be
+paid out as milestone amounts.

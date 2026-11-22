@@ -14355,3 +14355,57 @@ fn test_insurance_claim_respects_multiplier_cap() {
         &company, &id, &3_000_000, &Address::generate(&env),
     );
 }
+
+// ============================================================
+// #668 — absolute-amount milestones
+// ============================================================
+
+#[test]
+fn test_absolute_milestone_amounts() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let id = String::from_str(&env, "ENG-ABSOLUTE");
+    client.create_engagement_payment_plan(
+        &id, &company, &recruiter,
+        &ArbiterSetup { arbiters: vec![&env, arbiter.clone()], quorum: 1, weights: None },
+        &PaymentPlanParams {
+            token: token_id, total_amount: 1_000_000_000,
+            job_title: String::from_str(&env, "Engineer"),
+            milestones: build_milestones(&env),
+            payment_plan: vec![&env,
+                MilestonePayment::Absolute(200_000_000),
+                MilestonePayment::Absolute(300_000_000),
+                MilestonePayment::Absolute(500_000_000),
+            ],
+            retention_days: vec![&env, 30u32, 90u32],
+            config: default_config(),
+        },
+    );
+    client.submit_proof(&recruiter, &id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.confirm_milestone(&company, &id, &0);
+    assert_eq!(token_client.balance(&recruiter), 200_000_000);
+}
+
+#[test]
+#[should_panic(expected = "milestone amounts must sum to total_amount")]
+fn test_absolute_milestone_amounts_must_sum() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.create_engagement_payment_plan(
+        &String::from_str(&env, "ENG-ABSOLUTE-BAD"), &company, &recruiter,
+        &ArbiterSetup { arbiters: vec![&env, arbiter.clone()], quorum: 1, weights: None },
+        &PaymentPlanParams {
+            token: token_id, total_amount: 1_000_000_000,
+            job_title: String::from_str(&env, "Engineer"),
+            milestones: build_milestones(&env),
+            payment_plan: vec![&env,
+                MilestonePayment::Absolute(200_000_000),
+                MilestonePayment::Absolute(300_000_000),
+                MilestonePayment::Absolute(400_000_000),
+            ],
+            retention_days: vec![&env, 30u32, 90u32],
+            config: default_config(),
+        },
+    );
+}

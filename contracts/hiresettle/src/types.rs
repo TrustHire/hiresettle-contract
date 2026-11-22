@@ -3,6 +3,30 @@
 use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
 use crate::{ActionKind, ActorRole, EngagementStatus, MilestoneKind, MilestoneStatus, TimelineKind};
 
+/// Issue #668: how a milestone's gross payment is specified.
+/// `Percent` preserves the original `payment_percent` behaviour; `Absolute`
+/// fixes the amount in the engagement's token.
+#[contracttype]
+#[derive(Clone)]
+pub enum MilestonePayment {
+    Percent(u32),
+    Absolute(i128),
+}
+
+/// Issue #668: bundled arguments for `create_engagement_payment_plan`, keeping
+/// the contract function within Soroban's 10-parameter limit.
+#[contracttype]
+#[derive(Clone)]
+pub struct PaymentPlanParams {
+    pub token: Address,
+    pub total_amount: i128,
+    pub job_title: String,
+    pub milestones: Vec<Milestone>,
+    pub payment_plan: Vec<MilestonePayment>,
+    pub retention_days: Vec<u32>,
+    pub config: EngagementConfig,
+}
+
 /// A payment and workflow checkpoint belonging to an [`Engagement`]'s `milestones`.
 #[contracttype]
 #[derive(Clone)]
