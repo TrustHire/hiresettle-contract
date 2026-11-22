@@ -1,7 +1,7 @@
 //! Contract enums (`#[contracttype]`), including the `DataKey`/`DataKey2`
 //! storage key space.
 
-use soroban_sdk::{contracttype, Address, String};
+use soroban_sdk::{contracttype, Address, BytesN, String};
 
 /// Lifecycle state of a single milestone.
 #[contracttype]

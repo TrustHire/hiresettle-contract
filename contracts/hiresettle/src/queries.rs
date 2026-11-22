@@ -70,6 +70,43 @@ impl HireSettleContract {
         Self::get_milestone_or_panic(&engagement, milestone_index)
     }
 
+    /// Return the configured candidate's co-signature on a Placement proof
+    /// (issue #654), or `None` if it has not been attested.
+    pub fn get_placement_attestation(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::PlacementAttestation(engagement_id, milestone_index))
+    }
+
+    /// Return the candidate commitment recorded for a Placement milestone
+    /// (issue #573), or `None` when plain `submit_proof` was used.
+    pub fn get_candidate_commitment(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> Option<BytesN<32>> {
+        env.storage().persistent().get(&DataKey3::CandidateCommitment(
+            engagement_id,
+            milestone_index,
+        ))
+    }
+
+    /// Return the engagement and ledger where `company` last committed this
+    /// candidate hash (issue #573), if any.
+    pub fn get_candidate_placement(
+        env: Env,
+        company: Address,
+        commitment: BytesN<32>,
+    ) -> Option<(String, u32)> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::CandidatePlacement(company, commitment))
+    }
+
     /// Returns the status of every milestone in the engagement, ordered by
     /// milestone index, in a single call (issue #37). Read-only, permissionless.
     pub fn get_all_milestone_statuses(env: Env, engagement_id: String) -> Vec<MilestoneStatus> {

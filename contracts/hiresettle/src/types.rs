@@ -89,8 +89,12 @@ pub struct Engagement {
     pub status: EngagementStatus,
     /// Optional co-recruiter address for split-fee engagements (issue #56).
     /// When `Some`, the milestone payout is split between `recruiter` and `co_recruiter`
-    /// according to `recruiter_split_bps`.
+    /// according to `recruiter_split_bps`. Mutually exclusive with `recruiter_splits`.
     pub co_recruiter: Option<Address>,
+    /// Optional N-way payout split (issue #574). Each `(Address, bps)` entry
+    /// pays that recruiter a share of the net payout; bps sum to 10 000 and at
+    /// most five entries are allowed. Rounding dust goes to `recruiter`.
+    pub recruiter_splits: Option<Vec<(Address, u32)>>,
     /// Primary recruiter's share of the net payout in basis points (issue #56).
     /// Default is 10 000 (100 % to recruiter). Must be ≤ 10 000.
     pub recruiter_split_bps: u32,
@@ -113,6 +117,9 @@ pub struct Engagement {
     /// Optional absolute deadline ledger copied from
     /// `EngagementConfig::end_ledger` (issue #571). `None` means no deadline.
     pub end_ledger: Option<u32>,
+    /// Optional candidate that must co-sign a Placement proof before the
+    /// company can confirm it (issue #654). `None` preserves existing flow.
+    pub candidate: Option<Address>,
 }
 /// A lightweight read-only view of an engagement, suitable for list/dashboard APIs.
 ///
@@ -320,7 +327,12 @@ pub struct EngagementConfig {
     /// Optional IPFS CID linking to full job description / contract terms off-chain.
     pub metadata_hash: Option<String>,
     /// Optional co-recruiter address that shares the milestone payout.
+    /// Mutually exclusive with `recruiter_splits`.
     pub co_recruiter: Option<Address>,
+    /// Optional N-way payout split (issue #574): at most five `(address, bps)`
+    /// entries whose bps sum to 10 000. Rounding dust goes to the primary
+    /// recruiter. Mutually exclusive with `co_recruiter`.
+    pub recruiter_splits: Option<Vec<(Address, u32)>>,
     /// Primary recruiter's share in basis points (10 000 = 100 %).
     /// If `co_recruiter` is `None` this field is ignored and the full payout goes to `recruiter`.
     /// Must be ≤ 10 000.

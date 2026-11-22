@@ -164,6 +164,173 @@ impl HireSettleContract {
         Self::submit_proof_internal(env, recruiter, engagement_id, milestone_index, proof_hash, None);
     }
 
+    /// Submit a Placement proof together with a salted hash of the candidate's
+    /// identity (issue #573).
+    ///
+    /// The commitment is a `BytesN<32>` hash derived off-chain by the company;
+    /// no plaintext identifier is ever stored on-chain. It is indexed per
+    /// company so a second placement of the same candidate inside the
+    /// admin-configured duplicate window is rejected with `DuplicateCandidate`.
+    /// A window of `0` disables the duplicate check but still records the
+    /// commitment and its index entry.
+    pub fn submit_proof_with_candidate(
+        env: Env,
+        recruiter: Address,
+        engagement_id: String,
+        milestone_index: u32,
+        proof_hash: String,
+        candidate_commitment: BytesN<32>,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_function_not_paused(&env, FN_SUBMIT_PROOF);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
+
+        if proof_hash.is_empty() {
+            panic!("InvalidProofHash");
+        }
+        if proof_hash.len() > Self::get_max_proof_hash_length_internal(&env) {
+            panic!("ProofHashTooLong");
+        }
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.kind != MilestoneKind::Placement {
+            panic!("CandidateCommitmentRequiresPlacement");
+        }
+
+        let current_ledger = env.ledger().sequence();
+        let window = Self::get_candidate_duplicate_window_internal(&env);
+        let placement_key = DataKey3::CandidatePlacement(
+            engagement.company.clone(),
+            candidate_commitment.clone(),
+        );
+        if window > 0 {
+            if let Some((_, placed_at)) =
+                env.storage().persistent().get::<DataKey3, (String, u32)>(&placement_key)
+            {
+                if current_ledger.saturating_sub(placed_at) <= window {
+                    panic!("DuplicateCandidate");
+                }
+            }
+        }
+
+        Self::submit_proof_internal(
+            env.clone(),
+            recruiter,
+            engagement_id.clone(),
+            milestone_index,
+            proof_hash,
+            None,
+        );
+
+        let commitment_key =
+            DataKey3::CandidateCommitment(engagement_id.clone(), milestone_index);
+        env.storage()
+            .persistent()
+            .set(&commitment_key, &candidate_commitment);
+        env.storage()
+            .persistent()
+            .extend_ttl(&commitment_key, 100_000, 6_300_000);
+        env.storage()
+            .persistent()
+            .set(&placement_key, &(engagement_id.clone(), current_ledger));
+        env.storage()
+            .persistent()
+            .extend_ttl(&placement_key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "candidate_commitment_recorded"),
+                engagement_id,
+            ),
+            (milestone_index, candidate_commitment, current_ledger),
+        );
+    }
+
+    /// Co-sign a Placement proof as the candidate configured on the engagement
+    /// (issue #654). Only while the milestone is `ProofSubmitted` and only the
+    /// configured candidate may attest.
+    pub fn attest_placement(
+        env: Env,
+        candidate: Address,
+        engagement_id: String,
+        milestone_index: u32,
+    ) {
+        Self::assert_not_paused(&env);
+        Self::assert_engagement_not_paused(&env, &engagement_id);
+        Self::assert_milestone_not_on_hold(&env, &engagement_id, milestone_index);
+        candidate.require_auth();
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let configured = engagement
+            .candidate
+            .clone()
+            .unwrap_or_else(|| panic!("NoCandidateConfigured"));
+        if candidate != configured {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+        if milestone.kind != MilestoneKind::Placement {
+            panic!("OnlyPlacementMilestonesCanBeAttested");
+        }
+        if milestone.status != MilestoneStatus::ProofSubmitted {
+            panic!("milestone proof not yet submitted");
+        }
+
+        let key = DataKey3::PlacementAttestation(engagement_id.clone(), milestone_index);
+        env.storage().persistent().set(&key, &candidate);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "placement_attested"),
+                engagement_id,
+                milestone_index,
+            ),
+            candidate,
+        );
+    }
+
+    /// Admin sets the candidate-duplicate window in ledgers (issue #573).
+    /// `0` disables duplicate detection while commitments are still recorded.
+    pub fn set_candidate_duplicate_window(env: Env, admin: Address, window_ledgers: u32) {
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey3::CandidateDuplicateWindow, &window_ledgers);
+        env.events().publish(
+            (Symbol::new(&env, "candidate_duplicate_window_set"),),
+            window_ledgers,
+        );
+    }
+
+    /// Alias of [`Self::set_candidate_duplicate_window`] kept for callers that
+    /// use the issue's wording (issue #573).
+    pub fn set_duplicate_candidate_window(env: Env, admin: Address, window_ledgers: u32) {
+        Self::set_candidate_duplicate_window(env, admin, window_ledgers);
+    }
+
+    /// Return the configured candidate-duplicate window; `0` means disabled.
+    pub fn get_candidate_duplicate_window(env: Env) -> u32 {
+        Self::get_candidate_duplicate_window_internal(&env)
+    }
+
+    /// Alias of [`Self::get_candidate_duplicate_window`] (issue #573).
+    pub fn get_duplicate_candidate_window(env: Env) -> u32 {
+        Self::get_candidate_duplicate_window_internal(&env)
+    }
+
+    pub(crate) fn get_candidate_duplicate_window_internal(env: &Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::CandidateDuplicateWindow)
+            .unwrap_or(0)
+    }
+
     /// Submit a Merkle root over several evidence items as a milestone's proof
     /// (issue #486) — the multi-item alternative to [`Self::submit_proof`].
     ///
@@ -706,6 +873,19 @@ impl HireSettleContract {
 
         if milestone.status != MilestoneStatus::ProofSubmitted {
             panic!("milestone proof not yet submitted");
+        }
+
+        // Issue #654: when a candidate is configured, a Placement proof cannot
+        // be confirmed until that candidate has co-signed it.
+        if milestone.kind == MilestoneKind::Placement {
+            if let Some(candidate) = &engagement.candidate {
+                let key =
+                    DataKey3::PlacementAttestation(engagement_id.clone(), milestone_index);
+                let attested: Option<Address> = env.storage().persistent().get(&key);
+                if attested.as_ref() != Some(candidate) {
+                    panic!("PlacementAttestationRequired");
+                }
+            }
         }
 
         // Issue #461 (replacing #67's flat "all lower indices" rule): every
