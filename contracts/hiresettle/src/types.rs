@@ -110,6 +110,9 @@ pub struct Engagement {
     /// Optional absolute deadline ledger copied from
     /// `EngagementConfig::end_ledger` (issue #571). `None` means no deadline.
     pub end_ledger: Option<u32>,
+    /// Per-engagement withholding: `(address, bps)` deducted from every
+    /// recruiter payout after platform fees (issue #670).
+    pub withholding: Option<(Address, u32)>,
 }
 /// A lightweight read-only view of an engagement, suitable for list/dashboard APIs.
 ///
@@ -371,6 +374,9 @@ pub struct EngagementConfig {
     /// retention milestone's earliest unlock when set. `None` keeps today's
     /// behaviour.
     pub end_ledger: Option<u32>,
+    /// Withholding destination and rate in basis points, applied to every
+    /// recruiter payout on this engagement (issue #670).
+    pub withholding: Option<(Address, u32)>,
 }
 /// Vesting record for a streamed milestone payout (issue #466), stored under
 /// `DataKey::StreamedPayout(engagement_id, milestone_index)`.
@@ -742,4 +748,29 @@ pub struct DisputeSettlementProposal {
     pub dispute_cycle: u32,
     /// Ledger at which the proposal was made.
     pub proposed_at_ledger: u32,
+}
+
+/// Owner of a candidate commitment for a company (issue #675).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CandidateOwner {
+    /// Recruiter that registered the commitment first.
+    pub recruiter: Address,
+    /// Engagement the commitment was registered against. Cleared when that
+    /// engagement is cancelled.
+    pub engagement_id: String,
+    /// Ledger at which ownership began; ownership expires
+    /// `ownership_window_ledgers` later.
+    pub registered_at_ledger: u32,
+}
+
+/// Fee quote / payout breakdown for a gross milestone amount (issues #670).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct PayoutBreakdown {
+    pub gross: i128,
+    pub platform_fee: i128,
+    pub withholding: i128,
+    pub net: i128,
+    pub total_bps: u32,
 }

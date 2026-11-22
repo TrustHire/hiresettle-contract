@@ -1147,6 +1147,7 @@ impl HireSettleContract {
 
         let old_engagement_status = engagement.status.clone();
         engagement.status = EngagementStatus::Cancelled;
+            Self::clear_candidate_ownership(&env, &engagement);
         engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()

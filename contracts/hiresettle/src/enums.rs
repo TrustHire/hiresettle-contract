@@ -229,6 +229,12 @@ pub enum ConfigKey {
     /// Quarantine escape delay in ledgers (issue #590). `0` (the default)
     /// disables `emergency_exit`.
     PauseEscapeDelay,
+    /// Ownership window, in ledgers, for candidate commitments (issue #675).
+    /// `0` disables ownership tracking entirely.
+    CandidateOwnershipWindow,
+    /// Maximum remaining escrow (in stroops) refunded to the company when an
+    /// engagement completes (issue #673). `0` disables dust sweeps.
+    DustThreshold,
     /// Ledger at which an engagement was last (re-)paused via
     /// `pause_engagement` (issue #590). Cleared by `unpause_engagement`
     /// so unpausing resets the escape timer.
@@ -563,4 +569,10 @@ pub enum DataKey3 {
     /// Rotation vote tally for replacing (current_signer, new_signer) in the
     /// emergency signer set.
     EmergencyRotationVotes(Address, Address),
+    /// Current owner of `(company, commitment)` (issue #675).
+    CandidateOwner(Address, String),
+    /// Escrow dust recorded per completed engagement (issue #673).
+    EscrowDustRefund(String),
+    /// Commitment hash registered by an engagement (issue #675).
+    CandidateCommitmentIndex(String),
 }

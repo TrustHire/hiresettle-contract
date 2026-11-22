@@ -513,6 +513,7 @@ impl HireSettleContract {
             is_public: config.is_public,
             stream_duration_ledgers: config.stream_duration_ledgers,
             end_ledger: config.end_ledger,
+            withholding: config.withholding.clone(),
         };
 
         env.storage()
@@ -770,6 +771,7 @@ impl HireSettleContract {
         Self::refund_company_escrow(&env, &engagement, &engagement_id, refund);
 
         engagement.status = EngagementStatus::Cancelled;
+            Self::clear_candidate_ownership(&env, &engagement);
         engagement.last_activity_ledger = env.ledger().sequence();
         env.storage()
             .persistent()
@@ -1106,6 +1108,7 @@ impl HireSettleContract {
 
         let old_engagement_status = engagement.status.clone();
         engagement.status = EngagementStatus::Cancelled;
+            Self::clear_candidate_ownership(&env, &engagement);
         engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
@@ -1229,6 +1232,7 @@ impl HireSettleContract {
 
         let old_engagement_status = engagement.status.clone();
         engagement.status = EngagementStatus::Cancelled;
+            Self::clear_candidate_ownership(&env, &engagement);
         engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
@@ -1420,6 +1424,7 @@ impl HireSettleContract {
 
         let old_engagement_status = engagement.status.clone();
         engagement.status = EngagementStatus::Cancelled;
+            Self::clear_candidate_ownership(&env, &engagement);
         engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
