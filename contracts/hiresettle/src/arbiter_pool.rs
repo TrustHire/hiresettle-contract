@@ -514,7 +514,7 @@ impl HireSettleContract {
 
     /// Check if an arbiter has an active conflict declaration for an engagement.
     /// Used internally to prevent conflicted arbiters from voting.
-    // Not yet called anywhere; kept for the feature it belongs to.
+    // Not wired into vote casting yet.
     #[allow(dead_code)]
     pub(crate) fn has_conflict_of_interest(
         env: &Env,

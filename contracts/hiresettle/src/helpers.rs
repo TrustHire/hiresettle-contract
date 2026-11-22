@@ -113,7 +113,7 @@ impl HireSettleContract {
 
     /// Assert that the caller is authorized as the arbiter pool manager role.
     /// Falls back to the main admin if no dedicated arbiter pool manager is set.
-    // Not yet called anywhere; kept for the feature it belongs to.
+    // Not wired to an entry point yet; kept for the role-based admin work.
     #[allow(dead_code)]
     pub(crate) fn assert_arbiter_pool_manager(env: &Env, caller: &Address) {
         caller.require_auth();

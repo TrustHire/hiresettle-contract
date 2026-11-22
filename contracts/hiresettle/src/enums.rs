@@ -251,6 +251,17 @@ pub enum CompanyMemberRole {
     /// May call `raise_dispute` / `batch_raise_dispute`.
     Disputer,
 }
+/// What an attester may verify (issue #661).
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum AttesterScope {
+    /// May set or clear recruiter verification only.
+    Recruiter,
+    /// May set or clear company verification only.
+    Company,
+    /// May set or clear both recruiter and company verification.
+    Both,
+}
 /// Contract storage key space. Instance keys reset between transactions;
 /// persistent keys survive across ledgers.
 #[contracttype]
@@ -563,29 +574,27 @@ pub enum DataKey3 {
     /// Rotation vote tally for replacing (current_signer, new_signer) in the
     /// emergency signer set.
     EmergencyRotationVotes(Address, Address),
-    /// Escrow currently held for one engagement (issue #671), maintained by
-    /// `adjust_escrow` independently of `total_amount` / `released_amount`
-    /// so `check_escrow_invariants` has two sources to compare.
-    EscrowBalance(String),
-    /// Cumulative escrow refunded to the company on an engagement without
-    /// being added to `released_amount` (cancellation, expiry, withdrawn
-    /// offers, no-show forfeits) (issue #671).
-    EngagementRefunded(String),
-    /// Running total of pull-payout credits owed in a token (issue #672).
-    TokenClaimable(Address),
-    /// Running total of unsettled recruiter and co-recruiter bonds held in a
-    /// token (issue #672).
-    TokenBonded(Address),
-    /// Running total of redeemable company fee rebates held in a token
-    /// (issue #672).
-    TokenRebate(Address),
-    /// Running total of vested-but-unclaimed and still-vesting streamed
-    /// payouts held in a token (issue #672).
-    TokenStreamed(Address),
-    /// The single pending recruiter counter-offer on an `Offered`
-    /// engagement (issue #676).
-    CounterOffer(String),
-    /// Allowlist of recruiters who may claim an open offer (issue #677).
-    /// Present only while the open offer is unclaimed.
-    EligibleRecruiters(String),
+    /// Stake token and tiers `(Address, Vec<RecruiterStakeTier>)` set by
+    /// `set_recruiter_stake_tiers` (issue #663). Absent ⇒ staking disabled.
+    RecruiterStakeConfig,
+    /// Ledgers unstaked recruiter stake waits before it can be withdrawn
+    /// (issue #663). Absent ⇒ `DEFAULT_STAKE_UNBONDING_DELAY_LEDGERS`.
+    StakeUnbondingDelay,
+    /// A recruiter's stake record (issue #663).
+    RecruiterStake(Address),
+    /// Confirmation receipt for (engagement_id, milestone_index) (issue #665).
+    MilestoneReceipt(String, u32),
+    /// FIFO-capped proof submission / withdrawal history for
+    /// (engagement_id, milestone_index) (issue #666).
+    ProofHistory(String, u32),
+}
+
+/// What a [`crate::ProofHistoryEntry`] records (issue #666).
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum ProofAction {
+    /// `submit_proof` / `submit_proof_root` moved the milestone to `ProofSubmitted`.
+    Submitted,
+    /// `withdraw_proof` moved it back to `Pending`.
+    Withdrawn,
 }

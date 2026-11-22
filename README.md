@@ -163,7 +163,10 @@ stellar contract invoke --id "$CONTRACT" --source company --network testnet \
   --config '{"metadata_hash":null,"co_recruiter":null,"recruiter_split_bps":10000,
     "contract_pdf_hash":null,"referrer":null,"tags":null,"is_public":false,
     "stream_duration_ledgers":null,"recruiter_bond_amount":null,
-    "bundle_id":null,"fund_from_pool":false}'
+    "bundle_id":null,"fund_from_pool":false,"snapshot_fee_tier":false,
+    "co_recruiter_bond_amount":null,"pull_payouts":false,
+    "require_recruiter_acceptance":false,"end_ledger":null,
+    "placement_oracle":null,"external_ref":null}'
 ```
 
 This call transfers 100 XLM from the company to the contract. The contract sets each milestone's `valid_after_ledger` and `status` itself, so pass `0`, `""` and the starting status shown in the command. `recruiter_split_bps: 10000` sends the whole payout to the recruiter because there is no co-recruiter.
@@ -303,7 +306,7 @@ flowchart TD
     errors["errors<br/>(panic messages)"]
 
     %% Core types & storage keys
-    enums["enums<br/>(MilestoneStatus, EngagementStatus,<br/>DataKey, ConfigKey, ExtKey, DataKey2)"]
+    enums["enums<br/>(MilestoneStatus, EngagementStatus,<br/>DataKey, ConfigKey, ExtKey, DataKey2, DataKey3)"]
     types["types<br/>(Engagement, Milestone, ArbiterVoteRecord,<br/>PlatformFee, FeeTier, ...)"]
 
     %% Internal utilities used by all feature modules
@@ -321,6 +324,7 @@ flowchart TD
     ratings["ratings<br/>(star ratings, summaries)"]
     bonds["bonds<br/>(collateral bonds, bundles)"]
     features["features<br/>(pooled escrow, emergency pause, rebate)"]
+    integrations["integrations<br/>(placement oracles, invoice refs,<br/>external refs, attesters)"]
 
     %% Dependency edges
     constants --> helpers
@@ -380,6 +384,13 @@ flowchart TD
     types --> features
     enums --> features
 
+    constants --> integrations
+    errors --> integrations
+    helpers --> integrations
+    types --> integrations
+    enums --> integrations
+    milestones --> integrations
+
     %% Styling
     classDef foundational fill:#f5f5f5,stroke:#999,stroke-width:1px;
     classDef core fill:#e8f4fd,stroke:#2196f3,stroke-width:2px;
@@ -389,7 +400,7 @@ flowchart TD
     class constants,errors foundational;
     class enums,types core;
     class helpers internal;
-    class admin,engagement,milestones,disputes,transfers,queries,arbiter_pool,payout,ratings,bonds,features feature;
+    class admin,engagement,milestones,disputes,transfers,queries,arbiter_pool,payout,ratings,bonds,features,integrations feature;
 ```
 
 ## Glossary

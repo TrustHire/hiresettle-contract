@@ -26,6 +26,10 @@ pub(crate) const MAX_REPLACEMENT_REASON_LEN: u32 = 128;
 pub(crate) const MAX_PAUSE_REASON_LEN: u32 = 128;
 /// Maximum length (in characters) of a `hold_milestone` reason string (issue #492).
 pub(crate) const MAX_HOLD_REASON_LEN: u32 = 128;
+/// Maximum length (in characters) of a milestone invoice reference (issue #669).
+pub(crate) const MAX_INVOICE_REF_LEN: u32 = 64;
+/// Maximum length (in characters) of an engagement external reference (issue #572).
+pub(crate) const MAX_EXTERNAL_REF_LEN: u32 = 64;
 pub(crate) const DEFAULT_MIN_ENGAGEMENT_AMOUNT: i128 = 100_000; // 0.01 USDC
 pub(crate) const DEFAULT_CONFIRM_WINDOW_LEDGERS: u32 = 86_400; // ~5 days
 pub(crate) const DEFAULT_DISPUTE_WINDOW_LEDGERS: u32 = 51_840; // ~3 days
@@ -118,7 +122,6 @@ pub(crate) const DEFAULT_RISK_EXTENSION_WEIGHT: u32 = 10;
 /// detect payload-shape changes instead of breaking silently. The value is
 /// appended as the last topic of every `env.events().publish` call and is
 /// exposed to off-chain consumers via `get_event_schema_version()`.
-// Not yet stamped onto events; kept for issue #585.
 #[allow(dead_code)]
 pub(crate) const EVENT_SCHEMA_VERSION: u32 = 1;
 
@@ -127,3 +130,11 @@ pub(crate) const WEIGHTED_RATING_SCALE: u64 = 1_000_000;
 
 /// Default TTL, in ledgers, for a pending config change proposal (~1 day).
 pub(crate) const DEFAULT_CONFIG_CHANGE_TTL: u32 = 17_280;
+
+/// Maximum number of recruiter stake tiers (issue #663).
+pub(crate) const MAX_RECRUITER_STAKE_TIERS: u32 = 10;
+/// Default ledgers unstaked recruiter stake waits before withdrawal
+/// (issue #663): ~7 days.
+pub(crate) const DEFAULT_STAKE_UNBONDING_DELAY_LEDGERS: u32 = 120_960;
+/// FIFO cap on per-milestone proof history entries (issue #666).
+pub(crate) const MAX_PROOF_HISTORY_ENTRIES: u32 = 20;

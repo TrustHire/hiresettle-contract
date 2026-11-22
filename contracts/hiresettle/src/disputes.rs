@@ -86,7 +86,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
         // Issue #575: identify the team member when the disputer is not the
         // company itself.
         if Self::company_member_role(&env, &engagement.company, &company).is_some() {
@@ -185,7 +185,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (
@@ -468,7 +468,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
     }
 
     /// Resolve the dispute if `record` has reached either quorum, otherwise
@@ -644,7 +644,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
     }
 
     /// Pay `payment` of escrow out on a dispute resolved by arbiter vote:
@@ -1025,7 +1025,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
     }
 
     /// Return the pending settlement proposal for a disputed milestone, or
@@ -1238,7 +1238,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
     }
 
     /// Settle a split-voted dispute at the weighted median of `record`: pay
@@ -1901,7 +1901,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
     }
 
     /// Admin sets how many ledgers the super-arbiter has to resolve an
@@ -2078,7 +2078,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
     }
 
     /// Increment the counter of disputes concluded via the super-arbiter
@@ -2361,7 +2361,7 @@ impl HireSettleContract {
     ///     (issue #461)
     ///
     /// Releases payment to the recruiter (with platform fee) and emits
-    /// `milestone_force_confirmed`. The recruiter's net share honours their
+    /// `milestone_force_confirmed` and `milestone_payout` (issue #669). The recruiter's net share honours their
     /// payout token preference (issue #458).
     pub fn force_confirm_milestone(
         env: Env,
@@ -2446,7 +2446,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
         Self::emit_engagement_status_changed(
             &env,
             &engagement_id,
@@ -2469,6 +2469,13 @@ impl HireSettleContract {
                 engagement_id.clone(),
             ),
             (milestone_index, payment),
+        );
+        Self::record_milestone_receipt(
+            &env,
+            &engagement_id,
+            milestone_index,
+            payment,
+            Some(caller.clone()),
         );
 
         if all_done {
@@ -2845,7 +2852,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
     }
 
     /// `quorum` scaled to the weight still sitting on a dispute, rounded up:
