@@ -711,6 +711,20 @@ pub struct ConflictDeclaration {
     pub active: bool,
 }
 
+/// Company-reported early departure from a retention window (issue #655),
+/// stored under `DataKey3::EarlyDepartureProposal` until the recruiter accepts.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct EarlyDepartureProposal {
+    pub proposer: Address,
+    pub payment: i128,
+    pub retention_started_at: u32,
+    pub retention_window_ledgers: u32,
+    pub valid_after_ledger: u32,
+    pub departure_ledgers: u32,
+    pub expires_at_ledger: u32,
+}
+
 /// Pending company-proposed partial release of a `ProofSubmitted` milestone
 /// (issue #550), stored under `DataKey2::PartialConfirmationProposal`.
 #[contracttype]

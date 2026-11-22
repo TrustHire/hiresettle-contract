@@ -14244,3 +14244,61 @@ fn test_dispute_category_recorded_in_history_and_event() {
     assert_eq!(history.get(0).unwrap().category, DisputeCategory::CandidateNoShow);
 
 }
+
+#[test]
+fn test_early_departure_prorates_and_refunds_dust_to_company() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let eng_id = String::from_str(&env, "ENG-EARLY-DEPARTURE");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Retained"),
+        &vec![
+            &env,
+            Milestone {
+                name: String::from_str(&env, "Retention"),
+                payment_percent: 100,
+                kind: MilestoneKind::Retention,
+                valid_after_ledger: 0,
+                proof_hash: String::from_str(&env, ""),
+                status: MilestoneStatus::Pending,
+                replacement_paid_out: 0,
+                prerequisites: Vec::new(&env),
+                proof_submitted_at: 0,
+            },
+        ],
+        &vec![&env, 30u32],
+        &default_config(),
+    );
+    let company_before = token_client.balance(&company);
+
+    client.report_early_departure(&company, &eng_id, &0, &1);
+    client.accept_early_departure(&recruiter, &eng_id, &0);
+
+    let earned = token_client.balance(&recruiter);
+    let refunded = token_client.balance(&company) - company_before;
+    // 30 days at 17,280 ledgers/day; one ledger served rounds down and all
+    // the remaining dust goes to the company.
+    assert_eq!(earned, 1_000_000_000 / (30 * 17_280));
+    assert_eq!(refunded, 1_000_000_000 - earned);
+    assert_eq!(earned + refunded, 1_000_000_000);
+    assert_eq!(token_client.balance(&contract_id), 0);
+    assert_eq!(
+        client.get_milestone(&eng_id, &0).status,
+        MilestoneStatus::Resolved
+    );
+    assert_eq!(
+        client.get_engagement(&eng_id).status,
+        EngagementStatus::Completed
+    );
+}

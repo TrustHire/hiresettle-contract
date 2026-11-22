@@ -583,4 +583,11 @@ pub enum DataKey3 {
     /// Rotation vote tally for replacing (current_signer, new_signer) in the
     /// emergency signer set.
     EmergencyRotationVotes(Address, Address),
+    /// Ledger at which a retention window started, per engagement/milestone
+    /// (issue #655). Absent for legacy engagements: fall back to
+    /// `created_at_ledger`.
+    RetentionStartedAt(String, u32),
+    /// Pending company-reported early departure for a retention milestone
+    /// (issue #655), awaiting recruiter acceptance.
+    EarlyDepartureProposal(String, u32),
 }

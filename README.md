@@ -2569,6 +2569,12 @@ Every `÷` above is Rust integer division on non-negative `i128`, which **rounds
 | Fee rebate credit                   | Company rebate     | Treasury                                                           |
 | Streamed vesting                    | Early claims       | Final claim (`vested == total` exactly once `elapsed >= duration`) |
 | Milestone share `total × pct ÷ 100` | Every milestone    | **Nobody** — see below                                             |
+| Early retention departure `payment × served_ledgers ÷ retention_ledgers` | Recruiter | Company refund (`payment − earned`) |
+
+For an early departure (issue #655) the recruiter's pro-rata share is rounded
+down and the company receives `payment − earned`, so all residual dust stays
+with the company and the two amounts always sum to the full milestone payment.
+Fees are then applied to the recruiter's earned amount as usual.
 
 Worked example: 1,000 USDC engagement (`10_000_000_000` units), 30% milestone, 250 bps fee, 60/40 co-recruiter split:
 
