@@ -113,6 +113,8 @@ impl HireSettleContract {
 
     /// Assert that the caller is authorized as the arbiter pool manager role.
     /// Falls back to the main admin if no dedicated arbiter pool manager is set.
+    // Not wired to an entry point yet; kept for the role-based admin work.
+    #[allow(dead_code)]
     pub(crate) fn assert_arbiter_pool_manager(env: &Env, caller: &Address) {
         caller.require_auth();
         
@@ -568,6 +570,71 @@ impl HireSettleContract {
     // ISSUE #462 — SPLIT-VOTE WITHHELD ESCROW
     // ----------------------------------------------------------
 
+    // ----------------------------------------------------------
+    // ISSUES #578 / #671 / #672 — ESCROW AND TOKEN AGGREGATES
+    // ----------------------------------------------------------
+
+    /// Add `delta` to a per-token running total stored under `key`,
+    /// clamped at zero so it is never negative.
+    pub(crate) fn add_token_aggregate(env: &Env, key: DataKey3, delta: i128) {
+        let current: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        let updated = current.saturating_add(delta).max(0);
+        env.storage().persistent().set(&key, &updated);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+    }
+
+    /// The single choke point for escrow entering or leaving an engagement
+    /// (issues #578, #671): moves the engagement's own escrow balance and the
+    /// token's running total (`get_token_tvl`) together. Call it wherever
+    /// tokens are added to or taken out of an engagement's escrow — funding,
+    /// top-up, every payout and every refund.
+    ///
+    /// The per-engagement balance is deliberately not clamped, so an
+    /// over-draw shows up in `check_escrow_invariants` instead of being
+    /// hidden.
+    pub(crate) fn adjust_escrow(env: &Env, engagement_id: &String, token: &Address, delta: i128) {
+        let key = DataKey3::EscrowBalance(engagement_id.clone());
+        let balance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&key, &balance.saturating_add(delta));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+        Self::add_token_aggregate(env, DataKey3::TokenLocked(token.clone()), delta);
+    }
+
+    /// Record `amount` of escrow refunded to the company without being added
+    /// to `released_amount` (issue #671).
+    pub(crate) fn record_escrow_refund(env: &Env, engagement_id: &String, amount: i128) {
+        if amount <= 0 {
+            return;
+        }
+        let key = DataKey3::EngagementRefunded(engagement_id.clone());
+        let refunded: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        env.storage().persistent().set(&key, &(refunded + amount));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+    }
+
+    /// Cumulative refund recorded by `record_escrow_refund` (issue #671).
+    pub(crate) fn escrow_refunded_internal(env: &Env, engagement_id: &String) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::EngagementRefunded(engagement_id.clone()))
+            .unwrap_or(0)
+    }
+
+    /// Running total of pooled company balances per token (issue #472 pots),
+    /// tracked separately from engagement escrow. Read via
+    /// `get_token_pooled_balance`.
+    pub(crate) fn add_token_pooled(env: &Env, token: &Address, delta: i128) {
+        Self::add_token_aggregate(env, DataKey3::TokenPooled(token.clone()), delta);
+    }
+
     /// Refund to the company any milestone share withheld by split-vote
     /// resolutions. Call whenever an engagement transitions to `Completed`;
     /// a no-op for engagements that never had a split resolution. Cancel and
@@ -577,37 +644,6 @@ impl HireSettleContract {
     /// The refund is added to `released_amount` so `total_amount -
     /// released_amount` keeps reporting the true escrow balance, and is capped
     /// at that balance so it can never over-draw escrow and block completion.
-    // ----------------------------------------------------------
-    // ISSUE #578 — TOKEN TVL AND POOLED BALANCE AGGREGATES
-    // ----------------------------------------------------------
-
-    /// Running total of engagement escrow locked per token, i.e. the sum of
-    /// `total_amount - released_amount` over that token's engagements.
-    /// Bumped at every mutation of those fields (funding, top-up, payouts)
-    /// so it always matches that sum. Clamped at zero: never negative.
-    pub(crate) fn add_token_locked(env: &Env, token: &Address, delta: i128) {
-        let key = DataKey3::TokenLocked(token.clone());
-        let locked: i128 = env.storage().persistent().get(&key).unwrap_or(0);
-        let updated = locked.saturating_add(delta).max(0);
-        env.storage().persistent().set(&key, &updated);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, 100_000, 6_300_000);
-    }
-
-    /// Running total of pooled company balances per token (issue #472 pots),
-    /// tracked separately from engagement escrow. Read via
-    /// `get_token_pooled_balance`.
-    pub(crate) fn add_token_pooled(env: &Env, token: &Address, delta: i128) {
-        let key = DataKey3::TokenPooled(token.clone());
-        let pooled: i128 = env.storage().persistent().get(&key).unwrap_or(0);
-        let updated = pooled.saturating_add(delta).max(0);
-        env.storage().persistent().set(&key, &updated);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, 100_000, 6_300_000);
-    }
-
     pub(crate) fn refund_split_withheld(
         env: &Env,
         engagement_id: &String,
@@ -625,7 +661,7 @@ impl HireSettleContract {
         }
         engagement.released_amount += withheld;
         // Issue #578: escrow shrank by the refunded remainder.
-        Self::add_token_locked(env, &engagement.token, -withheld);
+        Self::adjust_escrow(env, engagement_id, &engagement.token, -withheld);
         token::Client::new(env, &engagement.token).transfer(
             &env.current_contract_address(),
             &engagement.company,

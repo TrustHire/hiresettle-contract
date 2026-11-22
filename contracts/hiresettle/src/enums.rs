@@ -78,6 +78,8 @@ pub enum ActionKind {
     /// Accept (or reject) a pending proposal: a recruiter transfer, a dispute
     /// window override, a split amendment, or a recruiter exit request.
     AcceptProposal,
+    /// Attach dispute evidence; the evidence window is still open (issue #657).
+    AwaitingEvidence,
 }
 /// Distinguishes the two business-logic types of milestones.
 #[contracttype]
@@ -223,6 +225,14 @@ pub enum ConfigKey {
     /// Ledgers arbiters have to vote after a dispute is raised (issue #560).
     /// 0 (the default) disables `enforce_vote_deadline`.
     ArbiterVoteDeadline,
+    /// When true, panel votes must be committed and revealed (issue #656).
+    CommitRevealVoting,
+    /// Length of the commit phase in ledgers, measured from dispute raise
+    /// (issue #656). `0` disables commit-reveal entirely.
+    CommitPhaseLedgers,
+    /// Ledgers after a dispute is raised during which arbiters may not vote,
+    /// while both parties may attach evidence (issue #657). Default 0.
+    EvidenceWindowLedgers,
     /// TTL in ledgers for pending config change proposals
     /// (default `DEFAULT_CONFIG_CHANGE_TTL`).
     ConfigChangeTTL,
@@ -250,6 +260,17 @@ pub enum CompanyMemberRole {
     Confirmer,
     /// May call `raise_dispute` / `batch_raise_dispute`.
     Disputer,
+}
+/// What an attester may verify (issue #661).
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum AttesterScope {
+    /// May set or clear recruiter verification only.
+    Recruiter,
+    /// May set or clear company verification only.
+    Company,
+    /// May set or clear both recruiter and company verification.
+    Both,
 }
 /// Contract storage key space. Instance keys reset between transactions;
 /// persistent keys survive across ledgers.
@@ -563,23 +584,27 @@ pub enum DataKey3 {
     /// Rotation vote tally for replacing (current_signer, new_signer) in the
     /// emergency signer set.
     EmergencyRotationVotes(Address, Address),
-    /// Admin-configured window (in ledgers) in which the same candidate
-    /// commitment cannot be placed twice for one company (issue #573).
-    /// `0` disables the duplicate check.
-    CandidateDuplicateWindow,
-    /// Company-scoped index from `(company, commitment)` to the engagement and
-    /// ledger where the candidate was committed (issue #573).
-    CandidatePlacement(Address, BytesN<32>),
-    /// Commitment submitted for an engagement's Placement milestone, keyed by
-    /// `(engagement_id, milestone_index)` (issue #573).
-    CandidateCommitment(String, u32),
-    /// Written-review hash anchored by `rate_recruiter_with_review`, keyed by
-    /// engagement (issue #595). Value is `(stars, review_hash)`.
-    EngagementReview(String),
-    /// Candidate's co-signature on a Placement proof, keyed by
-    /// `(engagement_id, milestone_index)` (issue #654).
-    PlacementAttestation(String, u32),
-    /// Approvals collected for an N-way split renegotiation (issue #574):
-    /// all listed recruiters plus the company must approve before it applies.
-    SplitAmendmentApprovals(String),
+    /// Stake token and tiers `(Address, Vec<RecruiterStakeTier>)` set by
+    /// `set_recruiter_stake_tiers` (issue #663). Absent ⇒ staking disabled.
+    RecruiterStakeConfig,
+    /// Ledgers unstaked recruiter stake waits before it can be withdrawn
+    /// (issue #663). Absent ⇒ `DEFAULT_STAKE_UNBONDING_DELAY_LEDGERS`.
+    StakeUnbondingDelay,
+    /// A recruiter's stake record (issue #663).
+    RecruiterStake(Address),
+    /// Confirmation receipt for (engagement_id, milestone_index) (issue #665).
+    MilestoneReceipt(String, u32),
+    /// FIFO-capped proof submission / withdrawal history for
+    /// (engagement_id, milestone_index) (issue #666).
+    ProofHistory(String, u32),
+}
+
+/// What a [`crate::ProofHistoryEntry`] records (issue #666).
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum ProofAction {
+    /// `submit_proof` / `submit_proof_root` moved the milestone to `ProofSubmitted`.
+    Submitted,
+    /// `withdraw_proof` moved it back to `Pending`.
+    Withdrawn,
 }
