@@ -1,8 +1,8 @@
 //! Contract data structs (`#[contracttype]`).
 
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
 use crate::{
-    ActionKind, ActorRole, DisputeCategory, EngagementStatus, MilestoneKind, MilestoneStatus,
+    ActionKind, ActorRole, EngagementStatus, MilestoneKind, MilestoneStatus, ProofAction,
     TimelineKind,
 };
 
@@ -374,6 +374,16 @@ pub struct EngagementConfig {
     /// retention milestone's earliest unlock when set. `None` keeps today's
     /// behaviour.
     pub end_ledger: Option<u32>,
+    /// Optional registered placement oracle (issue #667), e.g. an HRIS
+    /// integration, allowed to confirm this engagement's `Placement`
+    /// milestones via `oracle_confirm_milestone`. Must be in the admin
+    /// registry at creation. The company keeps its manual confirm and
+    /// dispute rights. `None` keeps manual-only confirmation.
+    pub placement_oracle: Option<Address>,
+    /// Optional ATS / job-board identifier (issue #572), at most 64
+    /// characters and unique per company. Looked up with
+    /// `get_engagement_by_external_ref`.
+    pub external_ref: Option<String>,
 }
 /// Vesting record for a streamed milestone payout (issue #466), stored under
 /// `DataKey::StreamedPayout(engagement_id, milestone_index)`.
@@ -545,6 +555,9 @@ pub struct PendingConfigChange {
     pub bool_val: bool,
     pub address_val: Option<Address>,
     pub string_val: Option<String>,
+    /// Second address argument, for setters that take two (e.g. the
+    /// recipient of `recover_stray_tokens`, issue #672). `None` otherwise.
+    pub address_val2: Option<Address>,
     /// Admin who proposed the change; the only address that may cancel it.
     pub proposer: Address,
     /// Ledger when the proposal was made.
@@ -794,6 +807,99 @@ pub struct PartialConfirmationProposal {
     pub expires_at_ledger: u32,
 }
 
+/// Result of `check_escrow_invariants` (issue #671): one engagement's
+/// book-keeping, with a flag per invariant and `ok` set only if all hold.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvariantReport {
+    pub engagement_id: String,
+    pub status: EngagementStatus,
+    pub total_amount: i128,
+    pub released_amount: i128,
+    /// Escrow refunded to the company without touching `released_amount`.
+    pub refunded_amount: i128,
+    /// `total_amount - released_amount - refunded_amount`.
+    pub expected_escrow: i128,
+    /// Escrow tracked by the contract for this engagement. `None` for an
+    /// engagement created before escrow tracking existed.
+    pub escrow_balance: Option<i128>,
+    /// `escrow_balance == Some(expected_escrow)`.
+    pub balance_matches: bool,
+    /// `released_amount >= 0`, `refunded_amount >= 0` and
+    /// `released_amount + refunded_amount <= total_amount`.
+    pub amounts_in_range: bool,
+    /// Milestone `payment_percent`s sum to exactly 100.
+    pub percents_sum_to_100: bool,
+    /// Milestone statuses agree with the engagement status: `Completed`
+    /// ⇒ every milestone `Confirmed`/`Resolved`; `Offered` ⇒ nothing
+    /// released and every milestone still in its initial state.
+    pub milestone_states_consistent: bool,
+    /// `Cancelled`/`Expired` ⇒ no escrow left; `Completed` ⇒ at most one
+    /// unit of rounding dust per milestone left.
+    pub terminal_escrow_settled: bool,
+    pub ok: bool,
+}
+
+/// Result of `check_token_invariants` (issue #671): every balance the
+/// contract tracks for one token, cross-checked against per-engagement
+/// state and the token's actual balance held by the contract.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TokenInvariantReport {
+    pub token: Address,
+    /// Engagements in this token's index (issue #577) that were summed.
+    pub engagement_count: u32,
+    /// Sum of per-engagement escrow balances.
+    pub summed_escrow: i128,
+    /// Running escrow total (`get_token_tvl`).
+    pub tracked_escrow: i128,
+    /// Sum of unsettled bonds over the token's engagements.
+    pub summed_bonds: i128,
+    /// Running bond total.
+    pub tracked_bonds: i128,
+    /// Sum of unclaimed streamed payouts over the token's engagements.
+    pub summed_streamed: i128,
+    /// Running streamed-payout total.
+    pub tracked_streamed: i128,
+    /// Pooled company balances (`get_token_pooled_balance`).
+    pub pooled: i128,
+    /// Pull-payout credits not yet claimed.
+    pub claimable: i128,
+    /// Redeemable company fee rebates.
+    pub rebates: i128,
+    /// Escrow + bonds + streams + pooled + claimable + rebates, using the
+    /// running totals: everything the contract owes someone in this token.
+    pub tracked_total: i128,
+    /// The token's actual balance held by the contract.
+    pub contract_balance: i128,
+    /// `contract_balance - tracked_total`: positive is untracked (stray)
+    /// tokens, negative is a shortfall.
+    pub surplus: i128,
+    /// Every summed value equals its running total.
+    pub totals_consistent: bool,
+    /// `contract_balance >= tracked_total`.
+    pub solvent: bool,
+    pub ok: bool,
+}
+
+/// A recruiter's counter-proposal on an `Offered` engagement (issue #676),
+/// returned by `get_counter_offer`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CounterOffer {
+    /// Address that signed the counter (the recruiter or its co-signer).
+    pub proposer: Address,
+    /// Recruiter bound to the engagement if the company accepts. Differs
+    /// from the engagement's recruiter only on an open offer (issue #677).
+    pub recruiter: Address,
+    /// Proposed new `total_amount`.
+    pub total_amount: i128,
+    /// Proposed `payment_percent` per milestone, by index; sums to 100.
+    pub milestone_percents: Vec<u32>,
+    /// Ledger at which the counter was made.
+    pub proposed_at_ledger: u32,
+}
+
 /// Pending mutual settlement of a disputed milestone (issue #564), stored
 /// under `DataKey2::DisputeSettlementProposal`.
 #[contracttype]
@@ -812,4 +918,66 @@ pub struct DisputeSettlementProposal {
     pub dispute_cycle: u32,
     /// Ledger at which the proposal was made.
     pub proposed_at_ledger: u32,
+}
+
+/// One admin-defined recruiter stake tier (issue #663): a recruiter whose
+/// active stake is at least `min_stake` gets `extra_active_slots` added to the
+/// admin-wide active-engagement cap. Configured via `set_recruiter_stake_tiers`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecruiterStakeTier {
+    /// Minimum active stake (inclusive), in the stake token's smallest unit.
+    pub min_stake: i128,
+    /// Extra active-engagement slots granted on top of the base cap.
+    pub extra_active_slots: u32,
+}
+
+/// A recruiter's stake record (issue #663), stored under
+/// `DataKey3::RecruiterStake(recruiter)`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RecruiterStake {
+    /// Token the stake is held in. A recruiter holds stake in one token at a
+    /// time.
+    pub token: Address,
+    /// Active stake: counts toward the tier bonus.
+    pub amount: i128,
+    /// Stake queued by `unstake_recruiter`. It no longer counts toward the
+    /// tier bonus and is paid out by `withdraw_unbonded_stake`.
+    pub unbonding_amount: i128,
+    /// Ledger at or after which `unbonding_amount` can be withdrawn. Every
+    /// new `unstake_recruiter` call restarts it.
+    pub unbonding_release_ledger: u32,
+}
+
+/// Receipt written when the company confirms a milestone through
+/// `confirm_milestone`, `confirm_milestone_with_note` or
+/// `batch_confirm_milestones` (issue #665). A later confirmation of the same
+/// milestone (after a replacement reset) overwrites it.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MilestoneReceipt {
+    /// Address that confirmed: the company, its co-signer or a team member.
+    pub confirmed_by: Address,
+    /// Ledger of the confirmation.
+    pub confirmed_at_ledger: u32,
+    /// Gross amount released by the confirmation.
+    pub payment: i128,
+    /// Optional note hash (e.g. an IPFS CID) the company attached, recording
+    /// why or with what caveats it confirmed.
+    pub note_hash: Option<String>,
+}
+
+/// One entry of `get_proof_history` (issue #666).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProofHistoryEntry {
+    /// Whether the proof was submitted or withdrawn.
+    pub action: ProofAction,
+    /// The proof hash submitted, or the one withdrawn.
+    pub proof_hash: String,
+    /// Address that made the call (the recruiter or its co-signer).
+    pub actor: Address,
+    /// Ledger of the call.
+    pub ledger: u32,
 }

@@ -203,6 +203,11 @@ impl HireSettleContract {
     /// - `"unauthorized"` — caller is not the engagement's current company.
     /// - `"engagement is not active"` — engagement status is not `Active` or
     ///   `ReplacementRequested`.
+    /// - `"DuplicateExternalRef"` — the engagement has an external reference
+    ///   that `new_company` already uses (issue #572).
+    ///
+    /// The engagement's external reference, if any, is re-indexed under
+    /// `new_company` (issue #572).
     ///
     /// # Events
     /// - `("company_transferred", engagement_id)` with `(old_company, new_company)`.
@@ -229,13 +234,15 @@ impl HireSettleContract {
         }
 
         let old_company = engagement.company.clone();
+        // Issue #572: move the external reference to the new company's index.
+        Self::reindex_external_ref(&env, &engagement_id, &old_company, &new_company);
         engagement.company = new_company.clone();
         engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (
@@ -351,7 +358,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (
@@ -604,7 +611,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (Symbol::new(&env, "arbiter_added"), engagement_id),
@@ -681,7 +688,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
-        Self::extend_engagement_ttl(&env, &engagement_id);
+        Self::bump_engagement_ttl(&env, &engagement_id);
 
         env.events().publish(
             (Symbol::new(&env, "arbiter_removed"), engagement_id),

@@ -261,25 +261,16 @@ pub enum CompanyMemberRole {
     /// May call `raise_dispute` / `batch_raise_dispute`.
     Disputer,
 }
-
-/// Dispute category code (issue #658). The variant order is part of the
-/// contract's storage and event encoding: append new variants only.
+/// What an attester may verify (issue #661).
 #[contracttype]
 #[derive(Clone, PartialEq, Debug)]
-pub enum DisputeCategory {
-    ProofInvalid,
-    CandidateNoShow,
-    EarlyDeparture,
-    TermsMismatch,
-    Other,
-}
-
-impl Default for DisputeCategory {
-    /// Legacy dispute history entries (written before issue #658) had no
-    /// category and are read back as `Other`.
-    fn default() -> Self {
-        Self::Other
-    }
+pub enum AttesterScope {
+    /// May set or clear recruiter verification only.
+    Recruiter,
+    /// May set or clear company verification only.
+    Company,
+    /// May set or clear both recruiter and company verification.
+    Both,
 }
 /// Contract storage key space. Instance keys reset between transactions;
 /// persistent keys survive across ledgers.
@@ -593,17 +584,27 @@ pub enum DataKey3 {
     /// Rotation vote tally for replacing (current_signer, new_signer) in the
     /// emergency signer set.
     EmergencyRotationVotes(Address, Address),
-    /// Ledger at which a retention window started, per engagement/milestone
-    /// (issue #655). Absent for legacy engagements: fall back to
-    /// `created_at_ledger`.
-    RetentionStartedAt(String, u32),
-    /// Pending company-reported early departure for a retention milestone
-    /// (issue #655), awaiting recruiter acceptance.
-    EarlyDepartureProposal(String, u32),
-    /// Hidden arbiter vote commitment for (engagement, milestone, arbiter slot)
-    /// (issue #656).
-    VoteCommit(String, u32, Address),
-    /// Evidence hashes attached during a dispute's evidence window
-    /// (issue #657), keyed by engagement and milestone.
-    DisputeEvidence(String, u32),
+    /// Stake token and tiers `(Address, Vec<RecruiterStakeTier>)` set by
+    /// `set_recruiter_stake_tiers` (issue #663). Absent ⇒ staking disabled.
+    RecruiterStakeConfig,
+    /// Ledgers unstaked recruiter stake waits before it can be withdrawn
+    /// (issue #663). Absent ⇒ `DEFAULT_STAKE_UNBONDING_DELAY_LEDGERS`.
+    StakeUnbondingDelay,
+    /// A recruiter's stake record (issue #663).
+    RecruiterStake(Address),
+    /// Confirmation receipt for (engagement_id, milestone_index) (issue #665).
+    MilestoneReceipt(String, u32),
+    /// FIFO-capped proof submission / withdrawal history for
+    /// (engagement_id, milestone_index) (issue #666).
+    ProofHistory(String, u32),
+}
+
+/// What a [`crate::ProofHistoryEntry`] records (issue #666).
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum ProofAction {
+    /// `submit_proof` / `submit_proof_root` moved the milestone to `ProofSubmitted`.
+    Submitted,
+    /// `withdraw_proof` moved it back to `Pending`.
+    Withdrawn,
 }
