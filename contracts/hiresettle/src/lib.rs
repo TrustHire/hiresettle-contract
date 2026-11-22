@@ -79,6 +79,7 @@ mod timeline;
 mod candidate_ownership;
 mod retainer;
 mod withholding;
+mod dust;
 
 pub(crate) use constants::*;
 pub(crate) use errors::*;

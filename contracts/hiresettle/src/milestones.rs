@@ -498,6 +498,7 @@ impl HireSettleContract {
         let old_engagement_status = engagement.status.clone();
         if all_done {
             engagement.status = EngagementStatus::Completed;
+            Self::sweep_dust_on_completion(&env, &mut engagement);
             Self::settle_bonds(&env, &engagement);
             Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
             Self::decrement_company_active_count(&env, &engagement.company);
@@ -764,6 +765,7 @@ impl HireSettleContract {
         let old_engagement_status = engagement.status.clone();
         if all_done {
             engagement.status = EngagementStatus::Completed;
+            Self::sweep_dust_on_completion(&env, &mut engagement);
             Self::settle_bonds(&env, &engagement);
             Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
             Self::decrement_company_active_count(&env, &engagement.company);
@@ -1032,6 +1034,7 @@ impl HireSettleContract {
         let old_engagement_status = engagement.status.clone();
         if all_done {
             engagement.status = EngagementStatus::Completed;
+            Self::sweep_dust_on_completion(&env, &mut engagement);
             Self::settle_bonds(&env, &engagement);
             Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
             Self::decrement_company_active_count(&env, &engagement.company);
@@ -1202,6 +1205,7 @@ impl HireSettleContract {
         let old_engagement_status = engagement.status.clone();
         if all_done {
             engagement.status = EngagementStatus::Completed;
+            Self::sweep_dust_on_completion(&env, &mut engagement);
             Self::settle_bonds(&env, &engagement);
             Self::refund_no_show_forfeit(&env, &engagement_id, &engagement);
             Self::decrement_company_active_count(&env, &engagement.company);
