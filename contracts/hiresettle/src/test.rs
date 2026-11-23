@@ -14892,3 +14892,405 @@ fn test_withdraw_retention_proof_returns_to_unlocked_pending() {
     let m = client.get_engagement(&eng_id).milestones.get(1).unwrap();
     assert!(m.status == MilestoneStatus::Pending);
 }
+
+// ============================================================
+// ADDITIONAL COMPREHENSIVE TEST COVERAGE (5 NEW TESTS)
+// ============================================================
+
+/// Test complex multi-arbiter weighted voting across multiple disputed milestones
+/// with varying outcomes (approve/reject/split).
+#[test]
+fn test_weighted_arbiters_multi_milestone_disputes() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let a3 = Address::generate(&env);
+    
+    let eng_id = String::from_str(&env, "ENG-MULTI-WEIGHTED");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
+            quorum: 4,
+            weights: Some(vec![&env, 3u32, 2u32, 1u32]),
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Senior Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+
+    // Milestone 0 - approve with weighted votes reaching quorum
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof0"));
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "verify"), &DisputeCategory::ProofInvalid);
+    
+    client.cast_arbiter_vote(&a1, &eng_id, &0, &true, &None); // 3 votes for approve
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Disputed);
+    
+    client.cast_arbiter_vote(&a3, &eng_id, &0, &true, &None); // 1 vote, total 4 -> quorum reached
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Resolved);
+    assert_eq!(token_client.balance(&recruiter), 300_000_000);
+    
+    // Milestone 1 - reject scenario with weighted votes
+    advance_ledger(&env, 31 * LEDGERS_PER_DAY);
+    client.unlock_milestone(&eng_id, &1);
+    client.submit_proof(&recruiter, &eng_id, &1, &String::from_str(&env, "ipfs://proof1"));
+    client.raise_dispute(&company, &eng_id, &1, &String::from_str(&env, "invalid"), &DisputeCategory::ProofInvalid);
+    
+    client.cast_arbiter_vote(&a1, &eng_id, &1, &false, &None); // 3 reject votes
+    // With total weight 6 and quorum 4, reject threshold = 6-4+1 = 3
+    // 3 reject votes meets threshold -> proof reset
+    assert_eq!(client.get_milestone(&eng_id, &1).status, MilestoneStatus::Pending);
+    assert_eq!(token_client.balance(&recruiter), 300_000_000); // No additional payment
+}
+
+/// Test comprehensive fee stack with co-recruiter, platform fees, arbiter fees,
+/// referrer fees, and rebates all applied simultaneously.
+#[test]
+fn test_complete_fee_stack_with_co_recruiter_and_rebates() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    
+    let treasury = Address::generate(&env);
+    let co_recruiter = Address::generate(&env);
+    let referrer = Address::generate(&env);
+    
+    // Configure all fee mechanisms
+    client.set_platform_fee(&company, &500, &treasury); // 5% platform fee
+    client.set_arbiter_fee(&company, &100); // 1% arbiter fee
+    client.set_fee_rebate_bps(&company, &1000); // 10% rebate on platform fee
+    client.add_referrer(&company, &referrer);
+    client.set_referrer_fee_share_bps(&company, &2000); // 20% of platform fee to referrer
+    
+    let mut config = default_config();
+    config.co_recruiter = Some(co_recruiter.clone());
+    config.recruiter_split_bps = 7_000; // 70/30 split between primary/co
+    config.referrer = Some(referrer.clone());
+    
+    let eng_id = String::from_str(&env, "ENG-FEE-STACK");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Complex Fee Test"),
+        &vec![
+            &env,
+            Milestone {
+                name: String::from_str(&env, "Placement"),
+                payment_percent: 100,
+                kind: MilestoneKind::Placement,
+                valid_after_ledger: 0,
+                proof_hash: String::from_str(&env, ""),
+                status: MilestoneStatus::Pending,
+                proof_submitted_at: 0,
+                replacement_paid_out: 0,
+                prerequisites: Vec::new(&env),
+            },
+        ],
+        &Vec::new(&env),
+        &config,
+    );
+    
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "verify"), &DisputeCategory::ProofInvalid);
+    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &true, &None);
+    
+    // Verify fee distribution
+    // Expected breakdown:
+    // Gross: 1,000,000,000
+    // Platform fee (5%): 50,000,000
+    //   - Treasury (80%): 40,000,000
+    //   - Referrer (20%): 10,000,000
+    //   - Rebate (10% of treasury): ~4,000,000
+    // After platform: 950,000,000
+    // Arbiter fee (1%): 9,500,000
+    // After arbiter: 940,500,000
+    // Primary recruiter (70%): 658,350,000
+    // Co-recruiter (30%): 282,150,000
+    
+    let primary_balance = token_client.balance(&recruiter);
+    let co_balance = token_client.balance(&co_recruiter);
+    let treasury_balance = token_client.balance(&treasury);
+    let referrer_balance = token_client.balance(&referrer);
+    let arbiter_balance = token_client.balance(&arbiter);
+    let rebate = client.get_company_rebate_balance(&company, &token_id);
+    
+    // Allow small rounding differences
+    assert!(primary_balance > 650_000_000 && primary_balance < 660_000_000);
+    assert!(co_balance > 280_000_000 && co_balance < 285_000_000);
+    assert!(treasury_balance > 39_000_000 && treasury_balance < 41_000_000);
+    assert!(referrer_balance > 9_000_000 && referrer_balance < 11_000_000);
+    assert!(arbiter_balance > 9_000_000 && arbiter_balance < 10_000_000);
+    assert!(rebate > 3_900_000 && rebate < 4_100_000);
+}
+
+/// Test complex engagement lifecycle with replacement, multiple disputes,
+/// arbiter succession, partial confirmation, and eventual completion.
+#[test]
+fn test_complex_lifecycle_replacement_succession_partial() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    
+    let eng_id = String::from_str(&env, "ENG-COMPLEX-LIFE");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-COMPLEX-LIFE",
+    );
+    
+    // Phase 1: Initial placement - dispute and reject
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof1"));
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "incomplete"), &DisputeCategory::ProofInvalid);
+    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &false, &None);
+    
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Pending);
+    
+    // Phase 2: Resubmit after cooldown and confirm
+    advance_ledger(&env, DEFAULT_PROOF_COOLDOWN);
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof2"));
+    client.confirm_milestone(&company, &eng_id, &0);
+    
+    assert_eq!(token_client.balance(&recruiter), 300_000_000);
+    
+    // Phase 3: Request replacement
+    client.request_replacement(&company, &eng_id, &String::from_str(&env, "terminated"));
+    assert_eq!(client.get_engagement(&eng_id).status, EngagementStatus::ReplacementRequested);
+    
+    // Phase 4: Arbiter succession during replacement
+    let new_arbiter = Address::generate(&env);
+    client.nominate_arbiter_successor(&arbiter, &eng_id, &new_arbiter);
+    client.claim_arbiter(&new_arbiter, &eng_id);
+    
+    // Phase 5: Submit replacement proof with partial confirmation
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://replacement"));
+    client.propose_partial_confirmation(&company, &eng_id, &0, &6_000); // 60%
+    client.accept_partial_confirmation(&recruiter, &eng_id, &0);
+    
+    // Phase 6: Complete remaining milestones
+    advance_ledger(&env, 31 * LEDGERS_PER_DAY);
+    client.unlock_milestone(&eng_id, &1);
+    client.submit_proof(&recruiter, &eng_id, &1, &String::from_str(&env, "ipfs://ret1"));
+    client.confirm_milestone(&company, &eng_id, &1);
+    
+    advance_ledger(&env, 60 * LEDGERS_PER_DAY);
+    client.unlock_milestone(&eng_id, &2);
+    client.submit_proof(&recruiter, &eng_id, &2, &String::from_str(&env, "ipfs://ret2"));
+    client.confirm_milestone(&company, &eng_id, &2);
+    
+    // Verify final state
+    let eng = client.get_engagement(&eng_id);
+    assert_eq!(eng.status, EngagementStatus::Completed);
+    assert_eq!(eng.arbiters.get(0).unwrap(), new_arbiter);
+    
+    // Total payout: 180M (60% of replacement) + 400M (m1) + 300M (m2) = 880M
+    assert_eq!(token_client.balance(&recruiter), 880_000_000);
+}
+
+/// Test recruiter staking tiers interacting with admin caps, self caps,
+/// and slot freeing through engagement completion and cancellation.
+#[test]
+fn test_stake_tiers_cap_interactions_and_slot_management() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::StellarAssetClient::new(&env, &token_id);
+    
+    // Setup: admin cap of 2, stake tiers giving +3 and +6 slots
+    client.set_max_active_per_recruiter(&company, &2);
+    client.set_recruiter_stake_tiers(
+        &company,
+        &token_id,
+        &vec![
+            &env,
+            RecruiterStakeTier { min_stake: 1_000, extra_active_slots: 3 },
+            RecruiterStakeTier { min_stake: 5_000, extra_active_slots: 6 },
+        ],
+    );
+    
+    token_client.mint(&recruiter, &10_000);
+    
+    // Test 1: Base cap only allows 2 active engagements
+    create_engagement_with_id(&env, &client, &token_id, &company, &recruiter, &arbiter, "STAKE-1");
+    create_engagement_with_id(&env, &client, &token_id, &company, &recruiter, &arbiter, "STAKE-2");
+    
+    let result = client.try_create_engagement(
+        &String::from_str(&env, "STAKE-3"),
+        &company,
+        &recruiter,
+        &ArbiterSetup { arbiters: vec![&env, arbiter.clone()], quorum: 1, weights: None },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+    assert!(result.is_err());
+    
+    // Test 2: Stake to tier 1 (cap becomes 2+3=5)
+    client.stake_recruiter(&recruiter, &token_id, &1_000);
+    assert_eq!(client.get_recruiter_effective_cap(&recruiter), 5);
+    
+    for id in ["STAKE-3", "STAKE-4", "STAKE-5"] {
+        create_engagement_with_id(&env, &client, &token_id, &company, &recruiter, &arbiter, id);
+    }
+    
+    // Test 3: Self-cap overrides if stricter
+    client.set_recruiter_active_cap(&recruiter, &3);
+    assert_eq!(client.get_recruiter_effective_cap(&recruiter), 3);
+    
+    // Test 4: Complete engagements to free slots
+    for id in ["STAKE-1", "STAKE-2"] {
+        let eng_id = String::from_str(&env, id);
+        client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://p"));
+        client.confirm_milestone(&company, &eng_id, &0);
+        
+        advance_ledger(&env, 31 * LEDGERS_PER_DAY);
+        client.unlock_milestone(&eng_id, &1);
+        client.submit_proof(&recruiter, &eng_id, &1, &String::from_str(&env, "ipfs://r1"));
+        client.confirm_milestone(&company, &eng_id, &1);
+        
+        advance_ledger(&env, 60 * LEDGERS_PER_DAY);
+        client.unlock_milestone(&eng_id, &2);
+        client.submit_proof(&recruiter, &eng_id, &2, &String::from_str(&env, "ipfs://r2"));
+        client.confirm_milestone(&company, &eng_id, &2);
+    }
+    
+    // Now can create more since 2 were completed
+    create_engagement_with_id(&env, &client, &token_id, &company, &recruiter, &arbiter, "STAKE-6");
+    create_engagement_with_id(&env, &client, &token_id, &company, &recruiter, &arbiter, "STAKE-7");
+    
+    // Test 5: Upgrade stake tier and remove self-cap
+    client.stake_recruiter(&recruiter, &token_id, &4_000);
+    client.set_recruiter_active_cap(&recruiter, &0); // Remove self-cap
+    assert_eq!(client.get_recruiter_effective_cap(&recruiter), 8); // 2 (admin) + 6 (tier 2)
+}
+
+/// Test super arbiter panel with vote deadline enforcement, recusals,
+/// split voting, and weighted quorum in complex dispute escalation.
+#[test]
+fn test_super_arbiter_deadline_enforcement_with_escalation() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    
+    // Setup: 3 arbiters with vote deadline, 2 super arbiters for escalation
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let a3 = Address::generate(&env);
+    let s1 = Address::generate(&env);
+    let s2 = Address::generate(&env);
+    
+    client.set_arbiter_vote_deadline(&company, &1_000);
+    client.set_super_arbiter_panel(&company, &vec![&env, s1.clone(), s2.clone()], &2);
+    
+    let eng_id = String::from_str(&env, "ENG-SUPER-COMPLEX");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
+            quorum: 2,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &vec![
+            &env,
+            Milestone {
+                name: String::from_str(&env, "Placement"),
+                payment_percent: 100,
+                kind: MilestoneKind::Placement,
+                valid_after_ledger: 0,
+                proof_hash: String::from_str(&env, ""),
+                status: MilestoneStatus::Pending,
+                proof_submitted_at: 0,
+                replacement_paid_out: 0,
+                prerequisites: Vec::new(&env),
+            },
+        ],
+        &Vec::new(&env),
+        &default_config(),
+    );
+    
+    client.set_split_voting_enabled(&company, &eng_id, &true);
+    
+    // Phase 1: Raise dispute, partial voting, then deadline enforcement
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "disputed"), &DisputeCategory::ProofInvalid);
+    
+    client.cast_arbiter_split_vote(&a1, &eng_id, &0, &40);
+    
+    advance_ledger(&env, 1_001);
+    client.enforce_vote_deadline(&eng_id, &0);
+    
+    // After enforcement, a2 and a3 recused, only a1 active
+    // Dispute remains unresolved and becomes escalatable
+    
+    // Phase 2: Escalate to super arbiter panel
+    advance_ledger(&env, DEFAULT_DISPUTE_WINDOW_LEDGERS);
+    client.escalate_dispute(&eng_id, &0);
+    
+    assert!(client.is_dispute_escalated(&eng_id, &0));
+    
+    // Phase 3: Super arbiters resolve unanimously
+    client.super_arbiter_resolve(&s1, &eng_id, &0, &true);
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Disputed);
+    
+    client.super_arbiter_resolve(&s2, &eng_id, &0, &true);
+    
+    // Dispute resolved by super panel
+    assert_eq!(client.get_milestone(&eng_id, &0).status, MilestoneStatus::Resolved);
+    assert!(token_client.balance(&recruiter) > 0);
+    
+    // Verify arbiter stats
+    let a1_stats = client.get_arbiter_stats(&a1).unwrap();
+    let a2_stats = client.get_arbiter_stats(&a2).unwrap();
+    
+    assert_eq!(a1_stats.votes_cast, 1);
+    assert_eq!(a1_stats.missed_vote_deadlines, 0);
+    assert_eq!(a2_stats.votes_cast, 0);
+    assert_eq!(a2_stats.missed_vote_deadlines, 1);
+}
+
+fn create_engagement_with_id(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    arbiter: &Address,
+    id: &str,
+) {
+    client.create_engagement(
+        &String::from_str(env, id),
+        company,
+        recruiter,
+        &ArbiterSetup {
+            arbiters: vec![env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        token_id,
+        &1_000_000_000,
+        &String::from_str(env, "Engineer"),
+        &build_milestones(env),
+        &vec![env, 30u32, 90u32],
+        &default_config(),
+    );
+}
