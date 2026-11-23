@@ -1,6 +1,6 @@
 //! Contract data structs (`#[contracttype]`).
 
-use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, Map, String, Vec};
 use crate::{
     ActionKind, ActorRole, EngagementStatus, MilestoneKind, MilestoneStatus, ProofAction,
     TimelineKind,
@@ -775,6 +775,22 @@ pub struct DisputeEvidence {
     pub recruiter_hash: Option<String>,
 }
 
+/// Rolling-window outflow accumulator backing the per-token circuit breaker
+/// (issue #690). `window_outflow` sums the token outflows since
+/// `window_start_ledger`; once the admin-configured per-token limit is exceeded
+/// the token flips to `tripped` and further transfers out panic with reason
+/// `CircuitBreaker`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CircuitBreakerState {
+    /// Ledger at which the current circuit-breaker window opened.
+    pub window_start_ledger: u32,
+    /// Outflow already counted against the limit in the current window.
+    pub window_outflow: i128,
+    /// Set once the per-token outflow limit has tripped.
+    pub tripped: bool,
+}
+
 /// Point-in-time view of every admin-configurable scalar (issue #657). The
 /// `evidence_window_ledgers` field is included so callers can tell when voting
 /// on a newly raised dispute is gated.
@@ -803,6 +819,18 @@ pub struct ConfigSnapshot {
     pub evidence_window_ledgers: u32,
     pub commit_reveal_voting: bool,
     pub commit_phase_ledgers: u32,
+    /// Admin-wide maximum engagement amount in stroops; `0` disables the cap
+    /// (issue #680).
+    pub max_engagement_amount: i128,
+    /// Per-token maximum engagement amount overrides (issue #680); absent
+    /// entry means the admin-wide value applies.
+    pub token_max_amounts: Map<Address, i128>,
+    /// Per-token TVL caps in stroops (issue #679); absent entry means
+    /// unlimited.
+    pub token_tvl_caps: Map<Address, i128>,
+    /// Per-token maximum allowed outflow limits in stroops (issue #690); absent
+    /// entry means unlimited.
+    pub token_outflow_limits: Map<Address, i128>,
 }
 
 /// A hidden arbiter vote, `sha256(vote || salt)` (issue #656). The vote byte is

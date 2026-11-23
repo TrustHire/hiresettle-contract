@@ -1,7 +1,7 @@
 //! Issues #472–#475: pooled company escrow, cosigned config, emergency pause,
 //! and platform fee rebate pool.
 
-use soroban_sdk::{contractimpl, token, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{contractimpl, token, Address, Env, Map, String, Symbol, Vec};
 use crate::*;
 
 #[contractimpl]
@@ -505,6 +505,25 @@ impl HireSettleContract {
                 // The stray amount is computed now, at acceptance, not when
                 // the change was proposed.
                 Self::execute_stray_token_recovery(env, &token, &to);
+            }
+            FN_SET_TOKEN_OUTFLOW_LIMIT => {
+                let token = pending
+                    .address_val
+                    .clone()
+                    .unwrap_or_else(|| panic!("missing token"));
+                let mut limits: Map<Address, i128> = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::Config(ConfigKey::TokenOutflowLimits))
+                    .unwrap_or_else(|| Map::new(env));
+                limits.set(token.clone(), pending.i128_val);
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::Config(ConfigKey::TokenOutflowLimits), &limits);
+                env.events().publish(
+                    (Symbol::new(&env, "token_outflow_limit_set"),),
+                    (token, pending.i128_val),
+                );
             }
             _ => panic!("unknown config change fn_id"),
         }

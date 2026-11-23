@@ -145,3 +145,9 @@ pub(crate) const MAX_RECRUITER_STAKE_TIERS: u32 = 10;
 pub(crate) const DEFAULT_STAKE_UNBONDING_DELAY_LEDGERS: u32 = 120_960;
 /// FIFO cap on per-milestone proof history entries (issue #666).
 pub(crate) const MAX_PROOF_HISTORY_ENTRIES: u32 = 20;
+/// Default rolling window, in ledgers, that a per-token outflow circuit
+/// breaker measures its outflow limit over (issue #690). ~1 day.
+pub(crate) const DEFAULT_CIRCUIT_BREAKER_WINDOW_LEDGERS: u32 = 17_280;
+/// Sensitive-setter function id for `set_token_outflow_limit` (issue #690):
+/// the per-token outflow cap may only be raised via a co-signed config change.
+pub(crate) const FN_SET_TOKEN_OUTFLOW_LIMIT: u32 = 18;
