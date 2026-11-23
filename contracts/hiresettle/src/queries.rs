@@ -1030,6 +1030,142 @@ impl HireSettleContract {
         }
     }
 
+    // ----------------------------------------------------------
+    // UPGRADE / MIGRATION QUERIES (issues #691, #692, #693)
+    // ----------------------------------------------------------
+
+    /// Return the pending WASM upgrade proposal, if any (issues #69, #692).
+    /// Includes the optional `audit_report_hash` supplied to `propose_upgrade`;
+    /// proposals written before that field was introduced are reported with
+    /// `None`. No authentication required and safe to call while paused.
+    pub fn get_pending_upgrade(env: Env) -> Option<UpgradeProposal> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
+    }
+
+    /// Return the emergency-signer veto tally for the pending upgrade
+    /// (issue #691), or `None` when no votes are outstanding.
+    pub fn get_upgrade_veto_tally(env: Env) -> Option<UpgradeVetoTally> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UpgradeVetoTally)
+    }
+
+    /// Stored storage layout version (issue #693). Fresh deployments report
+    /// `EXPECTED_STORAGE_SCHEMA_VERSION`; pre-versioning deployments report 0
+    /// until `migrate` is called.
+    pub fn get_storage_schema_version(env: Env) -> u32 {
+        Self::get_storage_schema_version_internal(&env)
+    }
+
+    // ----------------------------------------------------------
+    // FEE QUOTE (issue #542)
+    // ----------------------------------------------------------
+
+    /// Preview the complete fee breakdown for confirming `milestone_index`.
+    ///
+    /// Every component is computed with the same helpers `confirm_milestone`
+    /// and `release_dispute_payout` use (`payout_fee_bps`,
+    /// `platform_fee_amount`, `milestone_gross_amount`), so a quote cannot drift
+    /// from the amounts actually transferred. This is a pure read: no storage
+    /// writes, no auth, and deliberately no pause guard.
+    pub fn get_fee_quote(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> FeeQuote {
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+
+        let gross_amount = Self::milestone_gross_amount(&env, &engagement, milestone_index);
+        let payment = gross_amount - milestone.replacement_paid_out;
+
+        // Resolve the base rate through the same precedence as `payout_fee_bps`
+        // so the reported source always matches the effective rate below.
+        let (base_bps_source, base_bps) = if Self::is_fee_waived_internal(&env, &engagement_id) {
+            (FeeBpsSource::Waived, 0u32)
+        } else if let Some(company_bps) = env.storage().persistent().get::<DataKey2, u32>(
+            &DataKey2::CompanyPlatformFee(engagement.company.clone()),
+        ) {
+            (FeeBpsSource::Company, company_bps)
+        } else {
+            let global_bps = Self::get_platform_fee_internal(&env).bps;
+            let token_bps = Self::token_base_bps(&env, &engagement.token, global_bps);
+            let snapshot: Option<u32> = env
+                .storage()
+                .persistent()
+                .get(&DataKey2::FeeTierSnapshot(engagement_id.clone()));
+            if let Some(snapshot_bps) = snapshot {
+                (FeeBpsSource::Snapshot, snapshot_bps)
+            } else {
+                let tier_bps =
+                    Self::resolve_platform_fee_bps(&env, token_bps, engagement.total_amount);
+                if tier_bps != token_bps {
+                    (FeeBpsSource::Tier, tier_bps)
+                } else if token_bps != global_bps {
+                    (FeeBpsSource::Token, token_bps)
+                } else {
+                    (FeeBpsSource::Global, global_bps)
+                }
+            }
+        };
+
+        // The rate actually charged at confirmation, including referral discount.
+        let effective_bps = Self::payout_fee_bps(&env, &engagement_id, &engagement);
+        let referral_discount = base_bps.saturating_sub(effective_bps);
+
+        let platform_fee = Self::platform_fee_amount(&env, &engagement_id, payment, effective_bps);
+        let bps_fee = if payment > 0 {
+            (payment * effective_bps as i128) / 10_000
+        } else {
+            0
+        };
+        let floor_adjustment = platform_fee.saturating_sub(bps_fee).max(0);
+
+        // Mirror `collect_platform_fee` without mutating the stored rebate.
+        let rebate_key =
+            DataKey2::CompanyRebate(engagement.company.clone(), engagement.token.clone());
+        let existing_rebate: i128 = env.storage().persistent().get(&rebate_key).unwrap_or(0);
+        let offset = if existing_rebate < platform_fee {
+            existing_rebate
+        } else {
+            platform_fee
+        };
+        let remaining = platform_fee - offset;
+        let rebate_bps: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::FeeRebateBps))
+            .unwrap_or(0u32);
+        let rebate_credit = (remaining * rebate_bps as i128) / 10_000;
+
+        // A confirmation always sees `ProofSubmitted`, so the arbiter fee is
+        // only surfaced for a milestone currently in dispute. It is charged on
+        // the after-platform amount, exactly as in `release_dispute_payout`.
+        let arbiter_fee = if milestone.status == MilestoneStatus::Disputed {
+            let arbiter_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::Config(ConfigKey::ArbiterFee))
+                .unwrap_or(0u32);
+            Some(((payment - platform_fee) * arbiter_bps as i128) / 10_000)
+        } else {
+            None
+        };
+
+        let net_recruiter_amount = payment - platform_fee - arbiter_fee.unwrap_or(0);
+
+        FeeQuote {
+            gross_amount,
+            base_bps_source,
+            effective_bps,
+            referral_discount,
+            floor_adjustment,
+            rebate_credit,
+            arbiter_fee,
+            net_recruiter_amount,
+        }
+    }
+
     pub fn get_next_action(env: Env, engagement_id: String) -> Option<NextAction> {
         let engagement = Self::get_engagement_internal(&env, &engagement_id);
         let now = env.ledger().sequence();

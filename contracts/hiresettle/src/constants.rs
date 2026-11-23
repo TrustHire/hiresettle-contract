@@ -123,6 +123,15 @@ pub(crate) const DEFAULT_RISK_REPLACEMENT_WEIGHT: u32 = 20;
 /// Default risk-score points per granted milestone extension (issue #480).
 pub(crate) const DEFAULT_RISK_EXTENSION_WEIGHT: u32 = 10;
 
+/// Storage layout version this WASM expects (issue #693). `init` stamps this
+/// value on fresh deployments; contracts upgraded from an older WASM are left
+/// at their stored version and must call `migrate` before any state-changing
+/// entry point will accept calls.
+pub(crate) const EXPECTED_STORAGE_SCHEMA_VERSION: u32 = 1;
+/// Implicit version of storage written by deployments made before issue #693
+/// introduced explicit schema versioning.
+pub(crate) const LEGACY_STORAGE_SCHEMA_VERSION: u32 = 0;
+
 /// Schema version stamped onto every emitted event (issue #585).
 ///
 /// Bump this whenever any event's topics or data change so indexers can

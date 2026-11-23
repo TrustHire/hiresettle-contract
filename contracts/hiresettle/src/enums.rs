@@ -404,6 +404,11 @@ pub enum DataKey {
     EmergencySigners,
     /// Active emergency signer rotation vote.
     EmergencySignerRotationVote,
+    /// On-chain storage layout version, stamped by `init` and advanced by
+    /// `migrate` (issue #693).
+    StorageSchemaVersion,
+    /// Emergency-signer veto tally for the pending WASM upgrade (issue #691).
+    UpgradeVetoTally,
 }
 
 /// Secondary storage-key space nested under [`DataKey::Ext`] so the primary

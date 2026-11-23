@@ -14892,3 +14892,165 @@ fn test_withdraw_retention_proof_returns_to_unlocked_pending() {
     let m = client.get_engagement(&eng_id).milestones.get(1).unwrap();
     assert!(m.status == MilestoneStatus::Pending);
 }
+
+// ============================================================
+// Issues #691, #692, #693, #542 — upgrade veto, audit hash,
+// storage migration and fee quote
+// ============================================================
+
+#[test]
+fn test_fresh_deployment_has_current_storage_schema_version() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    assert_eq!(client.get_storage_schema_version(), EXPECTED_STORAGE_SCHEMA_VERSION);
+}
+
+#[test]
+fn test_migration_step_v1_is_idempotent() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::StorageSchemaVersion, &LEGACY_STORAGE_SCHEMA_VERSION);
+    });
+    assert_eq!(client.get_storage_schema_version(), 0);
+
+    client.migrate(&company, &1);
+    assert_eq!(client.get_storage_schema_version(), 1);
+    assert_eq!(client.get_platform_fee().bps, 0);
+    assert_eq!(client.get_upgrade_lock_duration(), LEDGERS_PER_DAY);
+
+    // Re-run from the legacy version with defaults already present.
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::StorageSchemaVersion, &LEGACY_STORAGE_SCHEMA_VERSION);
+    });
+    client.migrate(&company, &1);
+    assert_eq!(client.get_storage_schema_version(), 1);
+    assert_eq!(client.get_platform_fee().bps, 0);
+}
+
+#[test]
+#[should_panic(expected = "StorageSchemaOutdated")]
+fn test_state_changing_entry_point_blocked_while_schema_outdated() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::StorageSchemaVersion, &LEGACY_STORAGE_SCHEMA_VERSION);
+    });
+
+    client.set_upgrade_lock_duration(&company, &42u32);
+}
+
+#[test]
+#[should_panic(expected = "MigrationTargetNotNewer")]
+fn test_migrate_rejects_non_newer_target() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.migrate(&company, &EXPECTED_STORAGE_SCHEMA_VERSION);
+}
+
+#[test]
+#[should_panic(expected = "MigrationTargetUnsupported")]
+fn test_migrate_rejects_unknown_target() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.migrate(&company, &(EXPECTED_STORAGE_SCHEMA_VERSION + 1));
+}
+
+#[test]
+fn test_pending_upgrade_query_exposes_audit_report_hash() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    assert!(client.get_pending_upgrade().is_none());
+
+    let hash = soroban_sdk::BytesN::from_array(&env, &[9u8; 32]);
+    let audit = String::from_str(&env, "ipfs://audit-report");
+    client.propose_upgrade(&company, &hash, &Some(audit.clone()));
+
+    let proposal = client.get_pending_upgrade().unwrap();
+    assert_eq!(proposal.new_wasm_hash, hash);
+    assert_eq!(proposal.audit_report_hash, Some(audit));
+}
+
+#[test]
+fn test_audit_report_hash_none_round_trips() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let hash = soroban_sdk::BytesN::from_array(&env, &[10u8; 32]);
+    client.propose_upgrade(&company, &hash, &None);
+    assert_eq!(client.get_pending_upgrade().unwrap().audit_report_hash, None);
+}
+
+#[test]
+#[should_panic(expected = "no emergency signers")]
+fn test_upgrade_veto_requires_emergency_signers() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let hash = soroban_sdk::BytesN::from_array(&env, &[11u8; 32]);
+    client.propose_upgrade(&company, &hash, &None);
+    client.veto_upgrade(&company);
+}
+
+#[test]
+fn test_emergency_signer_veto_cancels_pending_upgrade() {
+    let (env, contract_id, _token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let signers = vec![&env, company.clone(), recruiter.clone()];
+    client.set_emergency_signers(&company, &signers, &2u32);
+    let hash = soroban_sdk::BytesN::from_array(&env, &[12u8; 32]);
+    client.propose_upgrade(&company, &hash, &None);
+
+    client.veto_upgrade(&company);
+    assert_eq!(client.get_upgrade_veto_tally().unwrap().voters.len(), 1);
+    assert!(client.get_pending_upgrade().is_some());
+
+    client.veto_upgrade(&recruiter);
+    assert!(client.get_pending_upgrade().is_none());
+    assert!(client.get_upgrade_veto_tally().is_none());
+}
+
+#[test]
+fn test_reproposal_resets_emergency_veto_votes() {
+    let (env, contract_id, _token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let signers = vec![&env, company.clone(), recruiter.clone()];
+    client.set_emergency_signers(&company, &signers, &2u32);
+    let hash = soroban_sdk::BytesN::from_array(&env, &[13u8; 32]);
+    client.propose_upgrade(&company, &hash, &None);
+    client.veto_upgrade(&company);
+
+    let hash2 = soroban_sdk::BytesN::from_array(&env, &[14u8; 32]);
+    client.propose_upgrade(&company, &hash2, &None);
+    assert!(client.get_upgrade_veto_tally().is_none());
+
+    // Same signer can vote again because the tally was cleared.
+    client.veto_upgrade(&company);
+    assert_eq!(client.get_upgrade_veto_tally().unwrap().voters.len(), 1);
+}
+
+#[test]
+fn test_fee_quote_works_while_paused_without_side_effects() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "FQ-001");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "FQ-001");
+
+    let quote = client.get_fee_quote(&eng_id, &0);
+    assert!(quote.gross_amount > 0);
+    let expected_fee = (quote.gross_amount * quote.effective_bps as i128) / 10_000;
+    assert_eq!(quote.net_recruiter_amount, quote.gross_amount - expected_fee);
+
+    client.pause(&company);
+    let paused_quote = client.get_fee_quote(&eng_id, &0);
+    assert_eq!(quote.gross_amount, paused_quote.gross_amount);
+    assert_eq!(quote.effective_bps, paused_quote.effective_bps);
+}

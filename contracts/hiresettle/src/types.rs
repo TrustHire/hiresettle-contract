@@ -305,6 +305,10 @@ pub struct UpgradeProposal {
     pub new_wasm_hash: BytesN<32>,
     /// Ledger sequence at or after which execute_upgrade may be called.
     pub execute_after_ledger: u32,
+    /// Optional hash/CID of the audit report for the pending upgrade
+    /// (issue #692). Proposals made before this field existed are read as
+    /// `None` by `get_pending_upgrade`.
+    pub audit_report_hash: Option<String>,
 }
 /// Platform fee configuration deducted from each milestone payment.
 #[contracttype]
@@ -1022,4 +1026,57 @@ pub struct ProofHistoryEntry {
     pub actor: Address,
     /// Ledger of the call.
     pub ledger: u32,
+}
+
+/// Running M-of-N emergency-signer veto tally for the pending WASM upgrade
+/// (issue #691). Cleared whenever a new proposal replaces the pending one and
+/// when the proposal is executed or cancelled.
+#[contracttype]
+#[derive(Clone)]
+pub struct UpgradeVetoTally {
+    pub voters: Vec<Address>,
+    pub started_at_ledger: u32,
+}
+
+/// Which configuration branch supplied the base platform-fee bps for a quote
+/// (issue #542). Mirrors the precedence in `payout_fee_bps`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum FeeBpsSource {
+    /// Contract-wide `PlatformFee.bps`.
+    Global,
+    /// Live fee tier resolved from `engagement.total_amount`.
+    Tier,
+    /// Per-token override configured with `set_token_platform_fee`.
+    Token,
+    /// Rate snapshotted at engagement creation (`snapshot_fee_tier`).
+    Snapshot,
+    /// Per-company override configured with `set_company_platform_fee`.
+    Company,
+    /// Admin waived the fee for this engagement, so the rate is zero.
+    Waived,
+}
+
+/// Read-only preview of every fee component applied to a hypothetical
+/// milestone payout (issue #542). Produced by `get_fee_quote` from the same
+/// helpers `confirm_milestone` uses, so the numbers cannot drift.
+#[contracttype]
+#[derive(Clone)]
+pub struct FeeQuote {
+    /// Full milestone share before any fee, including top-up growth.
+    pub gross_amount: i128,
+    /// Which branch of the fee configuration supplied the base rate.
+    pub base_bps_source: FeeBpsSource,
+    /// Rate after referral discount, in basis points (cap 10,000).
+    pub effective_bps: u32,
+    /// Basis points removed by a recognised referrer's discount.
+    pub referral_discount: u32,
+    /// Amount by which the admin fee floor raised the bps-derived fee.
+    pub floor_adjustment: i128,
+    /// New rebate credit created by this payout.
+    pub rebate_credit: i128,
+    /// Arbiter fee charged when the milestone is disputed; `None` otherwise.
+    pub arbiter_fee: Option<i128>,
+    /// Amount left for the recruiter side after platform and arbiter fees.
+    pub net_recruiter_amount: i128,
 }
