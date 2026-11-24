@@ -132,3 +132,6 @@ pub(crate) const MAX_PROOF_HISTORY_ENTRIES: u32 = 20;
 pub(crate) const MAX_ARBITER_SPECIALIZATIONS: u32 = 8;
 /// Maximum length, in bytes, of a cancellation reason (issue #700).
 pub(crate) const MAX_CANCEL_REASON_LEN: u32 = 128;
+/// Ledgers after the first public rating reply during which the recruiter may
+/// edit it (issue #685). ~1 day.
+pub(crate) const RATING_RESPONSE_EDIT_WINDOW_LEDGERS: u32 = 17_280;

@@ -430,6 +430,26 @@ pub struct ArbiterStats {
     /// for not voting before the vote deadline (issue #560).
     pub missed_vote_deadlines: u32,
 }
+/// A recruiter's public reply to a rating (issue #685).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RatingResponse {
+    /// Hash anchoring the off-chain reply text.
+    pub response_hash: String,
+    /// Ledger the reply was first posted. The edit window runs from here.
+    pub responded_at_ledger: u32,
+}
+/// A rating together with the recruiter's reply, as returned by
+/// `get_rating_detail` (issue #685).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RatingDetail {
+    /// Star rating (1–5) recorded for the engagement; `0` for ratings made
+    /// before issue #685 started storing the value.
+    pub stars: u32,
+    /// The recruiter's reply, if one has been posted.
+    pub response: Option<RatingResponse>,
+}
 /// Running total of star ratings a recruiter has received (issue #470).
 /// The average rating is `total_stars / rating_count`.
 #[contracttype]

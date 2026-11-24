@@ -583,6 +583,10 @@ pub enum DataKey3 {
     MaxEngagementDurationLedgers,
     /// Optional reason recorded when an engagement is cancelled (issue #700).
     CancellationReason(String),
+    /// Star value recorded for a rated engagement (issue #685).
+    EngagementStars(String),
+    /// The recruiter's public reply to a rating (issue #685).
+    RatingResponse(String),
 }
 
 /// What a [`crate::ProofHistoryEntry`] records (issue #666).
