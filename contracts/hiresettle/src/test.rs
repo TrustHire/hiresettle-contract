@@ -15054,3 +15054,297 @@ fn test_fee_quote_works_while_paused_without_side_effects() {
     assert_eq!(quote.gross_amount, paused_quote.gross_amount);
     assert_eq!(quote.effective_bps, paused_quote.effective_bps);
 }
+
+// ============================================================
+// ADDITIONAL COMPREHENSIVE TEST COVERAGE (5 NEW TESTS)
+// ============================================================
+
+/// Test that platform fee and arbiter fee interact correctly with co-recruiter splits
+#[test]
+fn test_fees_with_co_recruiter_split_distribution() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+    let co_recruiter = Address::generate(&env);
+
+    // Set both platform fee (2.5%) and arbiter fee (1%)
+    client.set_platform_fee(&company, &250, &treasury);
+    client.set_arbiter_fee(&company, &100);
+
+    let config = EngagementConfig {
+        metadata_hash: None,
+        co_recruiter: Some(co_recruiter.clone()),
+        recruiter_split_bps: 7_000, // 70/30 split
+        contract_pdf_hash: None,
+        referrer: None,
+        tags: None,
+        is_public: false,
+        stream_duration_ledgers: None,
+        recruiter_bond_amount: None,
+        bundle_id: None,
+        insured: false,
+        fund_from_pool: false,
+        snapshot_fee_tier: false,
+        co_recruiter_bond_amount: None,
+        pull_payouts: false,
+        require_recruiter_acceptance: false,
+        end_ledger: None,
+        placement_oracle: None,
+        external_ref: None,
+    };
+
+    let eng_id = String::from_str(&env, "ENG-FEE-CO");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &config,
+    );
+
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "verify"), &DisputeCategory::ProofInvalid);
+    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &true, &None);
+
+    // Milestone 0: 30% of 1B = 300M
+    // Platform fee: 300M * 2.5% = 7.5M → treasury
+    // After platform: 292.5M
+    // Arbiter fee: 292.5M * 1% = 2.925M → arbiter
+    // After arbiter: 289.575M
+    // Primary (70%): 289.575M * 0.7 = 202.7025M
+    // Co (30%): 289.575M * 0.3 = 86.8725M
+
+    assert_eq!(token_client.balance(&treasury), 7_500_000);
+    assert_eq!(token_client.balance(&arbiter), 2_925_000);
+    assert_eq!(token_client.balance(&recruiter), 202_702_500);
+    assert_eq!(token_client.balance(&co_recruiter), 86_872_500);
+}
+
+/// Test that milestone prerequisites prevent premature unlocking
+#[test]
+#[should_panic(expected = "PrerequisitesNotMet")]
+fn test_milestone_prerequisites_enforcement() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Create milestones where milestone 2 depends on both 0 and 1
+    let milestones = vec![
+        &env,
+        Milestone {
+            name: String::from_str(&env, "Phase 1"),
+            payment_percent: 30,
+            kind: MilestoneKind::Placement,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(&env, ""),
+            status: MilestoneStatus::Pending,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
+        },
+        Milestone {
+            name: String::from_str(&env, "Phase 2"),
+            payment_percent: 30,
+            kind: MilestoneKind::Placement,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(&env, ""),
+            status: MilestoneStatus::Pending,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
+        },
+        Milestone {
+            name: String::from_str(&env, "Phase 3"),
+            payment_percent: 40,
+            kind: MilestoneKind::Placement,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(&env, ""),
+            status: MilestoneStatus::Pending,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+            prerequisites: vec![&env, 0u32, 1u32], // Depends on both 0 and 1
+        },
+    ];
+
+    let eng_id = String::from_str(&env, "ENG-PREREQ");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Multi-Phase"),
+        &milestones,
+        &Vec::new(&env),
+        &default_config(),
+    );
+
+    // Complete milestone 0 but not 1
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://p0"));
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    // Try to submit proof for milestone 2 without completing milestone 1
+    client.submit_proof(&recruiter, &eng_id, &2, &String::from_str(&env, "ipfs://p2"));
+}
+
+/// Test that replacement request preserves dispute history
+#[test]
+fn test_replacement_request_preserves_dispute_history() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    let eng_id = String::from_str(&env, "ENG-REPLACE-HIST");
+    create_standard_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-REPLACE-HIST",
+    );
+
+    // Submit proof, raise dispute, and resolve it
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof1"));
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "initial_dispute"), &DisputeCategory::ProofInvalid);
+    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &true, &None);
+
+    // Record the dispute count before replacement
+    let disputes_before = client.get_dispute_history(&eng_id).len();
+    assert_eq!(disputes_before, 1);
+
+    // Request replacement
+    client.request_replacement(&company, &eng_id, &String::from_str(&env, "candidate_left"));
+
+    // Submit new proof and dispute it
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof2"));
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "second_dispute"), &DisputeCategory::ProofInvalid);
+
+    // Verify both disputes are in history
+    let disputes_after = client.get_dispute_history(&eng_id);
+    assert_eq!(disputes_after.len(), 2);
+    assert_eq!(disputes_after.get(0).unwrap().reason, String::from_str(&env, "initial_dispute"));
+    assert_eq!(disputes_after.get(1).unwrap().reason, String::from_str(&env, "second_dispute"));
+}
+
+/// Test complex scenario: staked recruiter with bond, co-recruiter, and streaming payout
+#[test]
+fn test_complex_engagement_with_stake_bond_co_recruiter_streaming() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let co_recruiter = Address::generate(&env);
+
+    // Setup staking
+    setup_staking(&env, &client, &token_id, &company, &recruiter);
+    client.stake_recruiter(&recruiter, &token_id, &5_000);
+    
+    // Mint funds for bonds
+    token_client.mint(&recruiter, &100_000_000);
+    token_client.mint(&co_recruiter, &100_000_000);
+
+    let mut config = default_config();
+    config.co_recruiter = Some(co_recruiter.clone());
+    config.recruiter_split_bps = 6_000; // 60/40 split
+    config.recruiter_bond_amount = Some(50_000_000);
+    config.co_recruiter_bond_amount = Some(25_000_000);
+    config.stream_duration_ledgers = Some(1_000);
+
+    let eng_id = create_single_milestone_engagement(
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        &arbiter,
+        "ENG-COMPLEX",
+        config,
+    );
+
+    // Verify effective cap increased by stake
+    assert_eq!(client.get_recruiter_effective_cap(&recruiter), 6);
+
+    // Verify bonds were taken
+    let recruiter_balance = token_client.balance(&recruiter);
+    assert_eq!(recruiter_balance, 100_000_000 - 50_000_000);
+    let co_balance = token_client.balance(&co_recruiter);
+    assert_eq!(co_balance, 100_000_000 - 25_000_000);
+
+    // Complete milestone
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    // Verify streaming started (no immediate payout)
+    assert_eq!(token_client.balance(&recruiter), 100_000_000 - 50_000_000);
+    assert_eq!(token_client.balance(&co_recruiter), 100_000_000 - 25_000_000);
+
+    // Advance halfway through stream
+    advance_ledger(&env, 500);
+    client.claim_streamed_payout(&recruiter, &eng_id, &0);
+
+    // Verify partial payout (50% of 60% of 1B = 300M) + bond return
+    let recruiter_final = token_client.balance(&recruiter);
+    assert_eq!(recruiter_final, 100_000_000 - 50_000_000 + 300_000_000 + 50_000_000);
+}
+
+/// Test that arbiter selection weight penalty compounds across multiple failures
+#[test]
+fn test_arbiter_selection_weight_multiple_failures() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let arbiter = Address::generate(&env);
+    
+    // Create three disputes where arbiter never votes
+    for i in 0..3 {
+        let eng_id = String::from_str(&env, &std::format!("ENG-WEIGHT-{}", i));
+        client.create_engagement(
+            &eng_id,
+            &company,
+            &recruiter,
+            &ArbiterSetup {
+                arbiters: vec![&env, arbiter.clone()],
+                quorum: 1,
+                weights: None,
+            },
+            &token_id,
+            &1_000_000_000,
+            &String::from_str(&env, "Engineer"),
+            &build_milestones(&env),
+            &vec![&env, 30u32, 90u32],
+            &default_config(),
+        );
+        
+        client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+        client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "dispute"), &DisputeCategory::ProofInvalid);
+        
+        // Arbiter doesn't vote - dispute resolves through other means
+        advance_ledger(&env, 52_000);
+        let super_arbiter = Address::generate(&env);
+        client.set_super_arbiter(&company, &super_arbiter);
+        client.escalate_dispute(&eng_id, &0);
+        client.super_arbiter_resolve(&super_arbiter, &eng_id, &0, &false);
+    }
+
+    let stats = client.get_arbiter_stats(&arbiter).unwrap();
+    assert_eq!(stats.disputes_assigned, 3);
+    assert_eq!(stats.votes_cast, 0);
+    
+    // Weight should be heavily penalized
+    let weight = client.get_arbiter_selection_weight(&arbiter);
+    assert!(weight < 10, "Expected weight < 10, got {}", weight);
+    assert_eq!(weight, 1); // Should be floored at 1
+}
