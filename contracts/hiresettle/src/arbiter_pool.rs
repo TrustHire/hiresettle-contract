@@ -12,6 +12,19 @@
 //! guarantee of fairness. Integrators should not rely on it alone for
 //! high-value disputes — pair it with a large, vetted pool, or supply an
 //! explicitly agreed panel via `create_engagement` instead.
+//!
+//! ## Specialization tags (issue #683)
+//! Pool members may carry up to `MAX_ARBITER_SPECIALIZATIONS` job-category
+//! symbols, set by the admin with `set_arbiter_specializations`.
+//! `create_category_panel` draws with a fixed priority:
+//! 1. Members whose tags contain the engagement's category are drawn first,
+//!    weighted as usual, until `panel_size` seats are filled or they run out.
+//! 2. Only the remaining seats are filled from the general pool, again
+//!    weighted and randomized.
+//!
+//! The fallback order is therefore deterministic: the general pool is never
+//! touched while a matching, eligible member is still available. Company,
+//! recruiter and suspended members are excluded from both tiers.
 
 use soroban_sdk::{contractimpl, Address, Env, String, Symbol, Vec};
 use crate::*;
@@ -51,6 +64,10 @@ impl HireSettleContract {
             .unwrap_or_else(|| panic!("NotInPool"));
         pool.remove(index);
         Self::set_arbiter_pool(&env, &pool);
+        // Issue #683: tags only mean something for current pool members.
+        env.storage()
+            .persistent()
+            .remove(&DataKey3::ArbiterSpecializations(address.clone()));
         env.events()
             .publish((Symbol::new(&env, "arbiter_pool_removed"),), address);
     }
@@ -173,36 +190,52 @@ impl HireSettleContract {
         retention_days: Vec<u32>,
         config: EngagementConfig,
     ) -> String {
-        Self::assert_not_paused(&env);
-        company.require_auth();
-
-        let pool = Self::get_arbiter_pool(env.clone());
-        let arbiters = Self::draw_arbiter_panel(
-            &env,
-            &pool,
-            random_setup.panel_size,
-            &company,
-            &recruiter,
-        );
-
-        env.events().publish(
-            (
-                Symbol::new(&env, "arbiters_drawn"),
-                engagement_id.clone(),
-            ),
-            arbiters.clone(),
-        );
-
-        Self::create_engagement_impl(
+        Self::create_random_panel_engagement(
             env,
             engagement_id,
             company,
             recruiter,
-            ArbiterSetup {
-                arbiters,
-                quorum: random_setup.quorum,
-                weights: None,
+            random_setup,
+            None,
+            token,
+            total_amount,
+            job_title,
+            milestones,
+            retention_days,
+            config,
+        )
+    }
+
+    /// Same as [`Self::create_engagement_random_panel`], but the panel is drawn
+    /// category-first (issue #683): pool members whose specialization tags
+    /// contain `job_category` are drawn before any general member. See the
+    /// module docs for the fallback order.
+    ///
+    /// # Panics
+    /// - Everything [`Self::create_engagement_random_panel`] panics on.
+    pub fn create_category_panel(
+        env: Env,
+        engagement_id: String,
+        company: Address,
+        recruiter: Address,
+        setup: CategoryArbiterSetup,
+        token: Address,
+        total_amount: i128,
+        job_title: String,
+        milestones: Vec<Milestone>,
+        retention_days: Vec<u32>,
+        config: EngagementConfig,
+    ) -> String {
+        Self::create_random_panel_engagement(
+            env,
+            engagement_id,
+            company,
+            recruiter,
+            RandomArbiterSetup {
+                panel_size: setup.panel_size,
+                quorum: setup.quorum,
             },
+            Some(setup.job_category),
             token,
             total_amount,
             job_title,
@@ -217,19 +250,24 @@ impl HireSettleContract {
     /// chance proportional to its selection weight (issue #468). Members with
     /// no history get the default weight, so with no history anywhere this is
     /// a uniform draw.
+    ///
+    /// When `job_category` is set (issue #683), eligible members tagged with
+    /// it are drawn first and the general pool only fills the seats they
+    /// cannot. With `None` the draw is the single general-pool draw above.
     pub(crate) fn draw_arbiter_panel(
         env: &Env,
         pool: &Vec<Address>,
         panel_size: u32,
         company: &Address,
         recruiter: &Address,
+        job_category: Option<&Symbol>,
     ) -> Vec<Address> {
         if pool.len() < panel_size {
             panic!("ArbiterPoolTooSmall");
         }
 
-        let mut candidates: Vec<Address> = Vec::new(env);
-        let mut weights: Vec<u32> = Vec::new(env);
+        let mut matching: Vec<Address> = Vec::new(env);
+        let mut general: Vec<Address> = Vec::new(env);
         for member in pool.iter() {
             // Issue #562: suspended members sit out future draws but keep
             // their stats (and stay seated on already-drawn panels).
@@ -237,16 +275,41 @@ impl HireSettleContract {
                 && member != *recruiter
                 && !Self::is_arbiter_suspended(env, &member)
             {
-                weights.push_back(Self::selection_weight(env, &member));
-                candidates.push_back(member);
+                let is_match = job_category
+                    .is_some_and(|cat| Self::arbiter_has_specialization(env, &member, cat));
+                if is_match {
+                    matching.push_back(member);
+                } else {
+                    general.push_back(member);
+                }
             }
         }
-        if candidates.len() < panel_size {
+        if matching.len() + general.len() < panel_size {
             panic!("ArbiterPoolTooSmall");
         }
 
         let mut panel: Vec<Address> = Vec::new(env);
-        for _ in 0..panel_size {
+        let from_matching = panel_size.min(matching.len());
+        Self::weighted_panel_draw(env, &mut panel, &matching, from_matching);
+        Self::weighted_panel_draw(env, &mut panel, &general, panel_size - from_matching);
+        panel
+    }
+
+    /// Append `count` members of `candidates` to `panel`, sampling without
+    /// replacement with each member's chance proportional to its selection
+    /// weight. Draws use `env.prng()` one seat at a time.
+    fn weighted_panel_draw(
+        env: &Env,
+        panel: &mut Vec<Address>,
+        candidates: &Vec<Address>,
+        count: u32,
+    ) {
+        let mut candidates = candidates.clone();
+        let mut weights: Vec<u32> = Vec::new(env);
+        for member in candidates.iter() {
+            weights.push_back(Self::selection_weight(env, &member));
+        }
+        for _ in 0..count {
             let total: u64 = weights.iter().map(|w| w as u64).sum();
             let mut ticket: u64 = env.prng().gen_range(0..total);
             let mut chosen = 0;
@@ -261,7 +324,75 @@ impl HireSettleContract {
             candidates.remove(chosen);
             weights.remove(chosen);
         }
-        panel
+    }
+
+    /// Whether `arbiter` carries `category` in its specialization tags.
+    fn arbiter_has_specialization(env: &Env, arbiter: &Address, category: &Symbol) -> bool {
+        env.storage()
+            .persistent()
+            .get::<_, Vec<Symbol>>(&DataKey3::ArbiterSpecializations(arbiter.clone()))
+            .is_some_and(|tags| tags.contains(category))
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #683 — ARBITER SPECIALIZATION TAGS
+    // ----------------------------------------------------------
+
+    /// Admin replaces a pool member's job-category specialization tags. An
+    /// empty `tags` vector clears them. Tags only affect
+    /// [`Self::create_category_panel`].
+    ///
+    /// # Panics
+    /// - `"NotInPool"` — the address is not a pool member.
+    /// - `"TooManySpecializations"` — more than `MAX_ARBITER_SPECIALIZATIONS` tags.
+    /// - `"DuplicateSpecialization"` — the same tag appears more than once.
+    ///
+    /// # Events
+    /// Emits `("arbiter_specializations_set",)` with `(arbiter, tags)`.
+    pub fn set_arbiter_specializations(
+        env: Env,
+        admin: Address,
+        arbiter: Address,
+        tags: Vec<Symbol>,
+    ) {
+        Self::assert_admin(&env, &admin);
+        if !Self::get_arbiter_pool(env.clone()).contains(&arbiter) {
+            panic!("NotInPool");
+        }
+        if tags.len() > MAX_ARBITER_SPECIALIZATIONS {
+            panic!("TooManySpecializations");
+        }
+        for i in 0..tags.len() {
+            let tag = tags.get(i).unwrap();
+            for j in (i + 1)..tags.len() {
+                if tags.get(j).unwrap() == tag {
+                    panic!("DuplicateSpecialization");
+                }
+            }
+        }
+
+        let key = DataKey3::ArbiterSpecializations(arbiter.clone());
+        if tags.is_empty() {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(&key, &tags);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, 100_000, 6_300_000);
+        }
+        env.events().publish(
+            (Symbol::new(&env, "arbiter_specializations_set"),),
+            (arbiter, tags),
+        );
+    }
+
+    /// Return a pool member's specialization tags, or an empty vector when
+    /// none are set.
+    pub fn get_arbiter_specializations(env: Env, arbiter: Address) -> Vec<Symbol> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::ArbiterSpecializations(arbiter))
+            .unwrap_or_else(|| Vec::new(&env))
     }
 
     // ----------------------------------------------------------
@@ -524,5 +655,64 @@ impl HireSettleContract {
         } else {
             false
         }
+    }
+}
+
+/// Non-contract helpers for the random-panel entry points (kept outside
+/// `#[contractimpl]` because the shared body exceeds the 10-parameter limit).
+impl HireSettleContract {
+    /// Shared body of the two random-panel entry points.
+    pub(crate) fn create_random_panel_engagement(
+        env: Env,
+        engagement_id: String,
+        company: Address,
+        recruiter: Address,
+        random_setup: RandomArbiterSetup,
+        job_category: Option<Symbol>,
+        token: Address,
+        total_amount: i128,
+        job_title: String,
+        milestones: Vec<Milestone>,
+        retention_days: Vec<u32>,
+        config: EngagementConfig,
+    ) -> String {
+        Self::assert_not_paused(&env);
+        company.require_auth();
+
+        let pool = Self::get_arbiter_pool(env.clone());
+        let arbiters = Self::draw_arbiter_panel(
+            &env,
+            &pool,
+            random_setup.panel_size,
+            &company,
+            &recruiter,
+            job_category.as_ref(),
+        );
+
+        env.events().publish(
+            (
+                Symbol::new(&env, "arbiters_drawn"),
+                engagement_id.clone(),
+            ),
+            arbiters.clone(),
+        );
+
+        Self::create_engagement_impl(
+            env,
+            engagement_id,
+            company,
+            recruiter,
+            ArbiterSetup {
+                arbiters,
+                quorum: random_setup.quorum,
+                weights: None,
+            },
+            token,
+            total_amount,
+            job_title,
+            milestones,
+            retention_days,
+            config,
+        )
     }
 }

@@ -1,6 +1,6 @@
 //! Contract data structs (`#[contracttype]`).
 
-use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, String, Symbol, Vec};
 use crate::{
     ActionKind, ActorRole, EngagementStatus, MilestoneKind, MilestoneStatus, ProofAction,
     TimelineKind,
@@ -401,6 +401,19 @@ pub struct RandomArbiterSetup {
     /// Number of votes required to resolve a dispute (M-of-N).
     /// Must be ≥ 1 and ≤ `panel_size`.
     pub quorum: u32,
+}
+/// Panel setup for `create_category_panel` (issue #683): a random panel drawn
+/// from the pool with category-tagged members preferred. Carries the category
+/// in the struct to stay within Soroban's 10-parameter limit.
+#[contracttype]
+#[derive(Clone)]
+pub struct CategoryArbiterSetup {
+    /// Number of distinct arbiters to draw from the pool.
+    pub panel_size: u32,
+    /// Number of votes required to resolve a dispute (M-of-N).
+    pub quorum: u32,
+    /// Job category whose tagged pool members are drawn first.
+    pub job_category: Symbol,
 }
 /// Historical dispute-response record for one arbiter (issue #468), updated
 /// by `raise_dispute`, `cast_arbiter_vote` and `enforce_vote_deadline`.
