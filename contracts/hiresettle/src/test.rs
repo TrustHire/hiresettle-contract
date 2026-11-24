@@ -15112,3 +15112,124 @@ fn test_category_panel_too_small_rejected() {
     );
     assert!(too_big.is_err());
 }
+
+// ============================================================
+// ISSUE #697 — MAXIMUM ENGAGEMENT DURATION
+// ============================================================
+
+fn create_with_duration_config(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    id: &str,
+    retention_days: Vec<u32>,
+    config: EngagementConfig,
+) -> String {
+    client.create_engagement(
+        &String::from_str(env, id),
+        company,
+        recruiter,
+        &ArbiterSetup {
+            arbiters: vec![env, Address::generate(env)],
+            quorum: 1,
+            weights: None,
+        },
+        token_id,
+        &1_000_000_000,
+        &String::from_str(env, "Senior Engineer"),
+        &build_milestones(env),
+        &retention_days,
+        &config,
+    )
+}
+
+#[test]
+fn test_max_duration_defaults_to_unlimited() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    assert_eq!(client.get_max_duration_ledgers(), 0);
+    let mut config = default_config();
+    config.end_ledger = Some(env.ledger().sequence() + 10_000_000);
+    let id = create_with_duration_config(
+        &env, &client, &token_id, &company, &recruiter, "DUR-1",
+        vec![&env, 30u32, 90u32], config,
+    );
+    assert_eq!(client.get_engagement(&id).status, EngagementStatus::Active);
+}
+
+#[test]
+fn test_max_duration_set_emits_event() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_max_duration_ledgers(&company, &500_000);
+    assert!(has_event(&env, "max_engagement_duration_set"));
+    assert_eq!(client.get_max_duration_ledgers(), 500_000);
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_max_duration_rejects_non_admin() {
+    let (env, contract_id, _token_id, _company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let stranger = Address::generate(&env);
+    client.set_max_duration_ledgers(&stranger, &500_000);
+}
+
+#[test]
+#[should_panic(expected = "DurationExceedsCap")]
+fn test_max_duration_rejects_end_ledger_past_cap() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_max_duration_ledgers(&company, &600_000);
+    // The end date clears the 1- and 2-day retention unlocks but lies 1M
+    // ledgers out, past the 600k cap.
+    let mut config = default_config();
+    config.end_ledger = Some(env.ledger().sequence() + 1_000_000);
+    create_with_duration_config(
+        &env, &client, &token_id, &company, &recruiter, "DUR-2",
+        vec![&env, 1u32, 2u32], config,
+    );
+}
+
+#[test]
+#[should_panic(expected = "DurationExceedsCap")]
+fn test_max_duration_counts_retention_windows() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    // A 90-day retention window is about 1.5M ledgers, well past this cap.
+    client.set_max_duration_ledgers(&company, &100_000);
+    create_with_duration_config(
+        &env, &client, &token_id, &company, &recruiter, "DUR-3",
+        vec![&env, 30u32, 90u32], default_config(),
+    );
+}
+
+#[test]
+fn test_max_duration_allows_engagement_within_cap() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_max_duration_ledgers(&company, &2_000_000);
+    let mut config = default_config();
+    config.end_ledger = Some(env.ledger().sequence() + 1_900_000);
+    let id = create_with_duration_config(
+        &env, &client, &token_id, &company, &recruiter, "DUR-4",
+        vec![&env, 30u32, 90u32], config,
+    );
+    assert_eq!(client.get_engagement(&id).status, EngagementStatus::Active);
+}
+
+#[test]
+fn test_max_duration_zero_removes_cap() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    client.set_max_duration_ledgers(&company, &100_000);
+    client.set_max_duration_ledgers(&company, &0);
+    assert_eq!(client.get_max_duration_ledgers(), 0);
+    let id = create_with_duration_config(
+        &env, &client, &token_id, &company, &recruiter, "DUR-5",
+        vec![&env, 30u32, 90u32], default_config(),
+    );
+    assert_eq!(client.get_engagement(&id).status, EngagementStatus::Active);
+}
