@@ -14978,11 +14978,7 @@ fn test_removing_member_clears_specializations() {
     let client = HireSettleContractClient::new(&env, &contract_id);
     let a = Address::generate(&env);
     client.add_arbiter_pool_member(&company, &a);
-    client.set_arbiter_specializations(
-        &company,
-        &a,
-        &vec![&env, Symbol::new(&env, "engineering")],
-    );
+    client.set_arbiter_specializations(&company, &a, &vec![&env, Symbol::new(&env, "engineering")]);
     client.remove_arbiter_pool_member(&company, &a);
     client.add_arbiter_pool_member(&company, &a);
     assert_eq!(client.get_arbiter_specializations(&a).len(), 0);
@@ -15006,7 +15002,15 @@ fn test_category_panel_draws_matching_members_first() {
 
     // Two seats, two matching members: the general pool is never touched.
     let id = create_category_panel_engagement(
-        &env, &client, &token_id, &company, &recruiter, "CAT-1", "engineering", 2, 1,
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        "CAT-1",
+        "engineering",
+        2,
+        1,
     );
     let panel = client.get_engagement(&id).arbiters;
     assert_eq!(panel.len(), 2);
@@ -15033,7 +15037,15 @@ fn test_category_panel_falls_back_to_general_pool() {
     // Three seats, one match: the match is always seated, the rest come from
     // the general pool.
     let id = create_category_panel_engagement(
-        &env, &client, &token_id, &company, &recruiter, "CAT-2", "engineering", 3, 2,
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        "CAT-2",
+        "engineering",
+        3,
+        2,
     );
     let panel = client.get_engagement(&id).arbiters;
     assert_eq!(panel.len(), 3);
@@ -15060,7 +15072,15 @@ fn test_category_panel_skips_suspended_matches() {
     client.suspend_arbiter_pool_member(&company, &e1, &until);
 
     let id = create_category_panel_engagement(
-        &env, &client, &token_id, &company, &recruiter, "CAT-3", "engineering", 1, 1,
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        "CAT-3",
+        "engineering",
+        1,
+        1,
     );
     assert_eq!(client.get_engagement(&id).arbiters, vec![&env, e2]);
 }
@@ -15153,8 +15173,14 @@ fn test_max_duration_defaults_to_unlimited() {
     let mut config = default_config();
     config.end_ledger = Some(env.ledger().sequence() + 10_000_000);
     let id = create_with_duration_config(
-        &env, &client, &token_id, &company, &recruiter, "DUR-1",
-        vec![&env, 30u32, 90u32], config,
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        "DUR-1",
+        vec![&env, 30u32, 90u32],
+        config,
     );
     assert_eq!(client.get_engagement(&id).status, EngagementStatus::Active);
 }
@@ -15188,8 +15214,14 @@ fn test_max_duration_rejects_end_ledger_past_cap() {
     let mut config = default_config();
     config.end_ledger = Some(env.ledger().sequence() + 1_000_000);
     create_with_duration_config(
-        &env, &client, &token_id, &company, &recruiter, "DUR-2",
-        vec![&env, 1u32, 2u32], config,
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        "DUR-2",
+        vec![&env, 1u32, 2u32],
+        config,
     );
 }
 
@@ -15201,8 +15233,14 @@ fn test_max_duration_counts_retention_windows() {
     // A 90-day retention window is about 1.5M ledgers, well past this cap.
     client.set_max_duration_ledgers(&company, &100_000);
     create_with_duration_config(
-        &env, &client, &token_id, &company, &recruiter, "DUR-3",
-        vec![&env, 30u32, 90u32], default_config(),
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        "DUR-3",
+        vec![&env, 30u32, 90u32],
+        default_config(),
     );
 }
 
@@ -15214,8 +15252,14 @@ fn test_max_duration_allows_engagement_within_cap() {
     let mut config = default_config();
     config.end_ledger = Some(env.ledger().sequence() + 1_900_000);
     let id = create_with_duration_config(
-        &env, &client, &token_id, &company, &recruiter, "DUR-4",
-        vec![&env, 30u32, 90u32], config,
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        "DUR-4",
+        vec![&env, 30u32, 90u32],
+        config,
     );
     assert_eq!(client.get_engagement(&id).status, EngagementStatus::Active);
 }
@@ -15228,8 +15272,14 @@ fn test_max_duration_zero_removes_cap() {
     client.set_max_duration_ledgers(&company, &0);
     assert_eq!(client.get_max_duration_ledgers(), 0);
     let id = create_with_duration_config(
-        &env, &client, &token_id, &company, &recruiter, "DUR-5",
-        vec![&env, 30u32, 90u32], default_config(),
+        &env,
+        &client,
+        &token_id,
+        &company,
+        &recruiter,
+        "DUR-5",
+        vec![&env, 30u32, 90u32],
+        default_config(),
     );
     assert_eq!(client.get_engagement(&id).status, EngagementStatus::Active);
 }
@@ -15243,14 +15293,19 @@ fn test_cancel_with_reason_records_reason() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
     let eng_id = String::from_str(&env, "CAN-1");
-    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-1");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-1",
+    );
 
     let reason = String::from_str(&env, "Role put on hold");
     client.cancel_engagement_with_reason(&company, &recruiter, &eng_id, &reason);
 
     assert!(has_event(&env, "cancellation_reason_recorded"));
     assert_eq!(client.get_cancellation_reason(&eng_id), Some(reason));
-    assert_eq!(client.get_engagement(&eng_id).status, EngagementStatus::Cancelled);
+    assert_eq!(
+        client.get_engagement(&eng_id).status,
+        EngagementStatus::Cancelled
+    );
 }
 
 #[test]
@@ -15258,7 +15313,9 @@ fn test_cancel_without_reason_records_none() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
     let eng_id = String::from_str(&env, "CAN-2");
-    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-2");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-2",
+    );
 
     client.cancel_engagement(&company, &recruiter, &eng_id);
 
@@ -15272,8 +15329,15 @@ fn test_cancel_reason_empty_rejected() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
     let eng_id = String::from_str(&env, "CAN-3");
-    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-3");
-    client.cancel_engagement_with_reason(&company, &recruiter, &eng_id, &String::from_str(&env, ""));
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-3",
+    );
+    client.cancel_engagement_with_reason(
+        &company,
+        &recruiter,
+        &eng_id,
+        &String::from_str(&env, ""),
+    );
 }
 
 #[test]
@@ -15282,7 +15346,9 @@ fn test_cancel_reason_too_long_rejected() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
     let eng_id = String::from_str(&env, "CAN-4");
-    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-4");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-4",
+    );
     let too_long = String::from_bytes(&env, &[b'a'; 129]);
     client.cancel_engagement_with_reason(&company, &recruiter, &eng_id, &too_long);
 }
@@ -15292,7 +15358,9 @@ fn test_cancel_reason_at_limit_accepted() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
     let eng_id = String::from_str(&env, "CAN-5");
-    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-5");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-5",
+    );
     let at_limit = String::from_bytes(&env, &[b'a'; 128]);
     client.cancel_engagement_with_reason(&company, &recruiter, &eng_id, &at_limit);
     assert_eq!(client.get_cancellation_reason(&eng_id), Some(at_limit));
@@ -15304,7 +15372,9 @@ fn test_cancel_with_reason_wrong_recruiter_rejected() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
     let eng_id = String::from_str(&env, "CAN-6");
-    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-6");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-6",
+    );
     let stranger = Address::generate(&env);
     client.cancel_engagement_with_reason(
         &company,
@@ -15331,7 +15401,12 @@ fn complete_and_rate(
 ) -> String {
     let eng_id = String::from_str(env, id);
     create_standard_engagement(env, client, token_id, company, recruiter, arbiter, id);
-    client.submit_proof(recruiter, &eng_id, &0, &String::from_str(env, "ipfs://offer"));
+    client.submit_proof(
+        recruiter,
+        &eng_id,
+        &0,
+        &String::from_str(env, "ipfs://offer"),
+    );
     client.confirm_milestone(company, &eng_id, &0);
     advance_ledger(env, 31 * 17_280);
     client.unlock_milestone(&eng_id, &1);
@@ -15350,7 +15425,9 @@ fn test_rating_detail_none_before_rating() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
     let eng_id = String::from_str(&env, "RSP-0");
-    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-0");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-0",
+    );
     assert_eq!(client.get_rating_detail(&eng_id), None);
 }
 
@@ -15358,7 +15435,9 @@ fn test_rating_detail_none_before_rating() {
 fn test_rating_response_returned_with_rating() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-1", 4);
+    let eng_id = complete_and_rate(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-1", 4,
+    );
 
     let detail = client.get_rating_detail(&eng_id).unwrap();
     assert_eq!(detail.stars, 4);
@@ -15379,15 +15458,27 @@ fn test_rating_response_returned_with_rating() {
 fn test_rating_response_edit_within_window_keeps_window_start() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-2", 5);
+    let eng_id = complete_and_rate(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-2", 5,
+    );
 
     client.respond_to_rating(&recruiter, &eng_id, &String::from_str(&env, "ipfs://first"));
-    let first_ledger = client.get_rating_detail(&eng_id).unwrap().responded_at_ledger;
+    let first_ledger = client
+        .get_rating_detail(&eng_id)
+        .unwrap()
+        .responded_at_ledger;
     advance_ledger(&env, 1_000);
-    client.respond_to_rating(&recruiter, &eng_id, &String::from_str(&env, "ipfs://edited"));
+    client.respond_to_rating(
+        &recruiter,
+        &eng_id,
+        &String::from_str(&env, "ipfs://edited"),
+    );
 
     let edited = client.get_rating_detail(&eng_id).unwrap();
-    assert_eq!(edited.response_hash, Some(String::from_str(&env, "ipfs://edited")));
+    assert_eq!(
+        edited.response_hash,
+        Some(String::from_str(&env, "ipfs://edited"))
+    );
     // The edit does not move the window start.
     assert_eq!(edited.responded_at_ledger, first_ledger);
 }
@@ -15397,7 +15488,9 @@ fn test_rating_response_edit_within_window_keeps_window_start() {
 fn test_rating_response_locked_after_window() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-3", 3);
+    let eng_id = complete_and_rate(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-3", 3,
+    );
     client.respond_to_rating(&recruiter, &eng_id, &String::from_str(&env, "ipfs://first"));
     advance_ledger(&env, 17_280 + 1);
     client.respond_to_rating(&recruiter, &eng_id, &String::from_str(&env, "ipfs://late"));
@@ -15409,7 +15502,9 @@ fn test_rating_response_requires_rating() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
     let eng_id = String::from_str(&env, "RSP-4");
-    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-4");
+    create_standard_engagement(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-4",
+    );
     client.respond_to_rating(&recruiter, &eng_id, &String::from_str(&env, "ipfs://early"));
 }
 
@@ -15418,7 +15513,9 @@ fn test_rating_response_requires_rating() {
 fn test_rating_response_only_recruiter() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-5", 2);
+    let eng_id = complete_and_rate(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-5", 2,
+    );
     client.respond_to_rating(&company, &eng_id, &String::from_str(&env, "ipfs://company"));
 }
 
@@ -15427,6 +15524,8 @@ fn test_rating_response_only_recruiter() {
 fn test_rating_response_rejects_empty_hash() {
     let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
     let client = HireSettleContractClient::new(&env, &contract_id);
-    let eng_id = complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-6", 1);
+    let eng_id = complete_and_rate(
+        &env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-6", 1,
+    );
     client.respond_to_rating(&recruiter, &eng_id, &String::from_str(&env, ""));
 }

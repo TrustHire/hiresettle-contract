@@ -149,13 +149,13 @@ impl HireSettleContract {
 
         let key = DataKey3::RatingResponse(engagement_id.clone());
         let now = env.ledger().sequence();
-        let responded_at = match env
-            .storage()
-            .persistent()
-            .get::<_, RatingResponse>(&key)
-        {
+        let responded_at = match env.storage().persistent().get::<_, RatingResponse>(&key) {
             Some(existing) => {
-                if now > existing.responded_at_ledger.saturating_add(RATING_RESPONSE_EDIT_WINDOW_LEDGERS) {
+                if now
+                    > existing
+                        .responded_at_ledger
+                        .saturating_add(RATING_RESPONSE_EDIT_WINDOW_LEDGERS)
+                {
                     panic!("RatingResponseLocked");
                 }
                 existing.responded_at_ledger
