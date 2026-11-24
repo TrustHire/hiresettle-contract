@@ -71,7 +71,9 @@
 //! | `DuplicateMilestoneIndex` | — | `disputes::batch_raise_dispute` | 1 |
 //! | `DuplicateMilestoneName` | — | `engagement::create_engagement_impl` | 1 |
 //! | `DuplicateProofHash` | — | `milestones::submit_proof_internal` | 1 |
+//! | `DuplicateSpecialization` | — | `arbiter_pool::set_arbiter_specializations` | 1 |
 //! | `DuplicateTreasury` | — | `admin::set_fee_treasuries` | 1 |
+//! | `DurationExceedsCap` | — | `engagement::create_engagement_impl` | 1 |
 //! | `emergency signers not configured` | — | `admin::expire_signer_rotation`, `admin::propose_signer_rotation`, `admin::vote_signer_rotation` | 3 |
 //! | `EmptyHoldReason` | — | `admin::hold_milestone` | 1 |
 //! | `EmptyIndices` | — | `disputes::batch_raise_dispute`, `milestones::batch_confirm_milestones` | 2 |
@@ -175,7 +177,7 @@
 //! | `NoShowDisabled` | — | `milestones::trigger_no_show` | 1 |
 //! | `NoStreamedPayout` | — | `milestones::claim_streamed_payout` | 1 |
 //! | `NoteHashTooLong` | — | `milestones::confirm_milestone_with_note` | 1 |
-//! | `NotInPool` | — | `arbiter_pool::remove_arbiter_pool_member`, `arbiter_pool::suspend_arbiter_pool_member`, `arbiter_pool::unsuspend_arbiter_pool_member` | 3 |
+//! | `NotInPool` | — | `arbiter_pool::remove_arbiter_pool_member`, `arbiter_pool::set_arbiter_specializations`, `arbiter_pool::suspend_arbiter_pool_member`, `arbiter_pool::unsuspend_arbiter_pool_member` | 4 |
 //! | `NotVoted` | — | `disputes::change_arbiter_vote` | 3 |
 //! | `NoUnbondingStake` | — | `staking::withdraw_unbonded_stake` | 2 |
 //! | `old signer not in emergency signer set` | — | `admin::propose_signer_rotation` | 1 |
@@ -219,6 +221,7 @@
 //! | `too many fee tiers` | — | `admin::set_fee_tiers` | 1 |
 //! | `too many IDs` | — | `queries::batch_get_engagement_summary` | 1 |
 //! | `TooManyMilestones` | — | `engagement::create_engagement_impl` | 1 |
+//! | `TooManySpecializations` | — | `arbiter_pool::set_arbiter_specializations` | 1 |
 //! | `TooManyStakeTiers` | — | `staking::set_recruiter_stake_tiers` | 1 |
 //! | `TooManyTags` | — | `engagement::create_engagement_impl` | 1 |
 //! | `TooManyTreasuries` | — | `admin::set_fee_treasuries` | 1 |
