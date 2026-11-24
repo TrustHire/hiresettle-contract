@@ -880,6 +880,177 @@ impl HireSettleContract {
             .publish((Symbol::new(&env, "token_min_amount_removed"),), token);
     }
 
+    // ----------------------------------------------------------
+    // ISSUE #680 — MAXIMUM ENGAGEMENT AMOUNT
+    // ----------------------------------------------------------
+
+    /// Admin sets the maximum engagement amount, in the raw smallest unit of
+    /// whichever token a given `create_engagement` call uses (issue #680).
+    /// `0` disables the cap (unlimited). The maximum must be greater than or
+    /// equal to the effective minimum when set.
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — caller is not the admin.
+    /// - `"InvalidMaxAmount"` — `amount` is below the effective minimum.
+    pub fn set_max_amount(env: Env, admin: Address, amount: i128) {
+        Self::assert_admin(&env, &admin);
+
+        if amount > 0 && amount < Self::get_min_amount(env.clone()) {
+            panic!("InvalidMaxAmount");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::Config(ConfigKey::MaxEngagementAmount), &amount);
+        env.events()
+            .publish((Symbol::new(&env, "max_amount_set"),), amount);
+    }
+
+    /// Admin sets a per-token maximum engagement amount override (issue #680).
+    /// Takes precedence over the admin-wide `MaxEngagementAmount` for `token`
+    /// specifically; the getter returns `None` when no override is set, in
+    /// which case the admin-wide value applies.
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — caller is not the admin.
+    /// - `"InvalidMaxAmount"` — `amount` is not positive or is below the
+    ///   token's effective minimum.
+    pub fn set_token_max_amount(env: Env, admin: Address, token: Address, amount: i128) {
+        Self::assert_admin(&env, &admin);
+        if amount <= 0 {
+            panic!("InvalidMaxAmount");
+        }
+        if amount < Self::get_effective_min_amount(env.clone(), token.clone()) {
+            panic!("InvalidMaxAmount");
+        }
+
+        let mut overrides: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenMaxAmounts))
+            .unwrap_or_else(|| Map::new(&env));
+        overrides.set(token.clone(), amount);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Config(ConfigKey::TokenMaxAmounts), &overrides);
+        env.events()
+            .publish((Symbol::new(&env, "token_max_amount_set"),), (token, amount));
+    }
+
+    /// Admin removes a token's maximum-amount override (issue #680), so it
+    /// falls back to the admin-wide `MaxEngagementAmount`. No-op if the token
+    /// had no override set.
+    pub fn remove_token_max_amount(env: Env, admin: Address, token: Address) {
+        Self::assert_admin(&env, &admin);
+
+        let mut overrides: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenMaxAmounts))
+            .unwrap_or_else(|| Map::new(&env));
+        overrides.remove(token.clone());
+        env.storage()
+            .persistent()
+            .set(&DataKey::Config(ConfigKey::TokenMaxAmounts), &overrides);
+        env.events()
+            .publish((Symbol::new(&env, "token_max_amount_removed"),), token);
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #679 — PER-TOKEN TVL CAP
+    // ----------------------------------------------------------
+
+    /// Admin sets a per-token TVL cap in stroops (issue #679). Funding
+    /// operations that would push `get_token_tvl(token)` above the cap panic.
+    /// No cap means unlimited (the entry is simply absent).
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — caller is not the admin.
+    /// - `"InvalidTvlCap"` — `cap` is not positive.
+    pub fn set_token_tvl_cap(env: Env, admin: Address, token: Address, cap: i128) {
+        Self::assert_admin(&env, &admin);
+        if cap <= 0 {
+            panic!("InvalidTvlCap");
+        }
+
+        let mut caps: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenTvlCaps))
+            .unwrap_or_else(|| Map::new(&env));
+        caps.set(token.clone(), cap);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Config(ConfigKey::TokenTvlCaps), &caps);
+        env.events()
+            .publish((Symbol::new(&env, "token_tvl_cap_set"),), (token, cap));
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #690 — PER-TOKEN OUTFLOW CIRCUIT BREAKER
+    // ----------------------------------------------------------
+
+    /// Admin configures the per-token maximum outflow limit in stroops
+    /// (issue #690). The limit is enforced over a rolling ledger window; once
+    /// hit, further transfers out of escrow panic with reason
+    /// `CircuitBreaker` and the token auto-pauses. Because the limit can only
+    /// be raised by a co-signed config change, callers defer to the
+    /// proposal/accept flow when the setter is cosigner-gated.
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — caller is not the admin.
+    /// - `"InvalidOutflowLimit"` — `limit` is not positive.
+    pub fn set_token_outflow_limit(env: Env, admin: Address, token: Address, limit: i128) {
+        Self::assert_admin(&env, &admin);
+        if limit <= 0 {
+            panic!("InvalidOutflowLimit");
+        }
+
+        if Self::defer_if_sensitive_with(
+            &env,
+            FN_SET_TOKEN_OUTFLOW_LIMIT,
+            0,
+            limit,
+            false,
+            Some(token.clone()),
+            None,
+            None,
+        ) {
+            return;
+        }
+
+        let mut limits: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenOutflowLimits))
+            .unwrap_or_else(|| Map::new(&env));
+        limits.set(token.clone(), limit);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Config(ConfigKey::TokenOutflowLimits), &limits);
+        env.events()
+            .publish((Symbol::new(&env, "token_outflow_limit_set"),), (token, limit));
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #681 — TOKEN DELISTING WITH GRACE PERIOD
+    // ----------------------------------------------------------
+
+    /// Deprecate a token from the allowlist with a grace period (issue #681):
+    /// new engagements are blocked immediately and top-ups against existing
+    /// engagements are blocked after the `sunset_ledger`. Existing engagements
+    /// continue to settle normally.
+    ///
+    /// # Panics
+    /// - `"unauthorized"` — caller is not the admin.
+    pub fn deprecate_token(env: Env, admin: Address, token: Address, sunset_ledger: u32) {
+        Self::assert_admin(&env, &admin);
+
+        Self::set_token_status_internal(&env, &token, &TokenStatus::Deprecated(sunset_ledger));
+        env.events()
+            .publish((Symbol::new(&env, "token_deprecated"),), (token, sunset_ledger));
+    }
+
     /// Pause state-changing contract operations.
     /// Can be called by the dedicated pauser role or main admin.
     pub fn pause(env: Env, caller: Address) {
@@ -1445,6 +1616,7 @@ impl HireSettleContract {
                 .persistent()
                 .set(&DataKey::AllowedTokens, &allowed);
         }
+        Self::set_token_status_internal(&env, &token, &TokenStatus::Allowed);
         env.events()
             .publish((Symbol::new(&env, "token_allowlisted"),), token);
     }
@@ -1466,6 +1638,7 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .set(&DataKey::AllowedTokens, &allowed);
+        Self::set_token_status_internal(&env, &token, &TokenStatus::Removed);
         env.events()
             .publish((Symbol::new(&env, "token_removed"),), token);
     }

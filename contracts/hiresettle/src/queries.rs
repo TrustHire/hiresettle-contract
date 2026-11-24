@@ -46,6 +46,67 @@ impl HireSettleContract {
         Self::get_token_min_amount(env.clone(), token).unwrap_or(Self::get_min_amount(env))
     }
 
+    /// Return the maximum engagement amount actually enforced for `token`
+    /// (issue #680): its per-token override if one is set, otherwise the
+    /// admin-wide `MaxEngagementAmount`. This is the ceiling that
+    /// `create_engagement` and `top_up_escrow` enforce. `0` means unlimited.
+    pub fn get_effective_max_amount(env: Env, token: Address) -> i128 {
+        Self::get_token_max_amount(env.clone(), token.clone())
+            .unwrap_or(Self::get_max_amount(env))
+    }
+
+    /// Return the admin-wide maximum engagement amount in stroops; `0`
+    /// disables the cap (issue #680).
+    pub fn get_max_amount(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::MaxEngagementAmount))
+            .unwrap_or(0)
+    }
+
+    /// Return the maximum engagement amount override for `token`, if the
+    /// admin set one (issue #680). `None` means the admin-wide value applies.
+    pub fn get_token_max_amount(env: Env, token: Address) -> Option<i128> {
+        let overrides: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenMaxAmounts))
+            .unwrap_or_else(|| Map::new(&env));
+        overrides.get(token)
+    }
+
+    /// Return the admin-configured per-token TVL cap for `token` (issue #679).
+    /// `None` means unlimited.
+    pub fn get_token_tvl_cap(env: Env, token: Address) -> Option<i128> {
+        let caps: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenTvlCaps))
+            .unwrap_or_else(|| Map::new(&env));
+        caps.get(token)
+    }
+
+    /// Return the admin-configured per-token maximum outflow limit in stroops
+    /// for `token` (issue #690). `0` means unlimited / disabled.
+    pub fn get_token_outflow_limit(env: Env, token: Address) -> i128 {
+        let limits: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenOutflowLimits))
+            .unwrap_or_else(|| Map::new(&env));
+        limits.get(token).unwrap_or(0)
+    }
+
+    /// Return the allowlisted-token lifecycle status for `token` (issue #681).
+    pub fn get_token_status(env: Env, token: Address) -> TokenStatus {
+        Self::get_token_status_internal(&env, &token)
+    }
+
+    /// Return the rolling-window outflow state for `token` (issue #690).
+    pub fn get_circuit_breaker_state(env: Env, token: Address) -> CircuitBreakerState {
+        Self::get_circuit_state_internal(&env, &token)
+    }
+
     /// Returns the full engagement record for a given engagement ID.
     ///
     /// # Returns
@@ -1027,6 +1088,22 @@ impl HireSettleContract {
             evidence_window_ledgers: Self::evidence_window_internal(&env),
             commit_reveal_voting: Self::commit_reveal_enabled(&env),
             commit_phase_ledgers: Self::get_commit_phase_ledgers(env.clone()),
+            max_engagement_amount: Self::get_max_amount(env.clone()),
+            token_max_amounts: env
+                .storage()
+                .persistent()
+                .get(&DataKey::Config(ConfigKey::TokenMaxAmounts))
+                .unwrap_or_else(|| Map::new(&env)),
+            token_tvl_caps: env
+                .storage()
+                .persistent()
+                .get(&DataKey::Config(ConfigKey::TokenTvlCaps))
+                .unwrap_or_else(|| Map::new(&env)),
+            token_outflow_limits: env
+                .storage()
+                .persistent()
+                .get(&DataKey::Config(ConfigKey::TokenOutflowLimits))
+                .unwrap_or_else(|| Map::new(&env)),
         }
     }
 

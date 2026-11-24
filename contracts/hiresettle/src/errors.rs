@@ -268,3 +268,16 @@ pub(crate) const ERR_ENGAGEMENT_PAUSED: &str = "EngagementPaused";
 /// callers can tell a one-milestone compliance hold from an engagement-wide
 /// quarantine.
 pub(crate) const ERR_MILESTONE_ON_HOLD: &str = "MilestoneOnHold";
+/// Raised when a token outflow would exceed the admin-configured per-token
+/// circuit-breaker limit (issue #690); the contract auto-pauses with reason
+/// `CircuitBreaker`.
+pub(crate) const ERR_CIRCUIT_BREAKER: &str = "CircuitBreaker";
+/// Raised when a funding operation would push a token's TVL above the
+/// admin-configured cap (issue #679).
+pub(crate) const ERR_TOKEN_TVL_CAP_EXCEEDED: &str = "TokenTvlCapExceeded";
+/// Raised when an engagement amount or top-up exceeds the configured maximum
+/// (issue #680).
+pub(crate) const ERR_AMOUNT_ABOVE_MAXIMUM: &str = "AmountAboveMaximum";
+/// Raised when an operation targets a delisted (deprecated) token
+/// (issue #681).
+pub(crate) const ERR_TOKEN_DEPRECATED: &str = "TokenDeprecated";

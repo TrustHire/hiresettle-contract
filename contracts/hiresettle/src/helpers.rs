@@ -1,4 +1,4 @@
-use soroban_sdk::{contractimpl, token, Address, Bytes, BytesN, Env, String, Vec};
+use soroban_sdk::{contractimpl, token, Address, Bytes, BytesN, Env, Map, String, Symbol, Vec};
 use crate::*;
 
 #[contractimpl]
@@ -625,6 +625,120 @@ impl HireSettleContract {
             .extend_ttl(&key, 100_000, 6_300_000);
     }
 
+    /// Return the allowlisted-token lifecycle status for `token` (issue #681).
+    /// Tokens that were never touched report `Allowed` so the allowlist flag
+    /// stays authoritative when no status write ever happened.
+    pub(crate) fn get_token_status_internal(env: &Env, token: &Address) -> TokenStatus {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::TokenStatus(token.clone()))
+            .unwrap_or(TokenStatus::Allowed)
+    }
+
+    /// Persist the allowlisted-token lifecycle status (issue #681).
+    pub(crate) fn set_token_status_internal(env: &Env, token: &Address, status: &TokenStatus) {
+        let key = DataKey3::TokenStatus(token.clone());
+        env.storage().persistent().set(&key, status);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+    }
+
+    /// Return the admin-configured per-token TVL cap for `token` (issue #679).
+    /// `None` means unlimited.
+    pub(crate) fn get_token_tvl_cap_internal(env: &Env, token: &Address) -> Option<i128> {
+        let caps: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenTvlCaps))
+            .unwrap_or_else(|| Map::new(env));
+        caps.get(token.clone())
+    }
+
+    /// Return the admin-wide maximum engagement amount in stroops; `0`
+    /// disables the cap (issue #680).
+    pub(crate) fn get_max_amount_internal(env: &Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::MaxEngagementAmount))
+            .unwrap_or(0)
+    }
+
+    /// Return the per-token maximum engagement amount override for `token`
+    /// (issue #680). `None` means the admin-wide value applies.
+    pub(crate) fn get_token_max_amount_internal(env: &Env, token: &Address) -> Option<i128> {
+        let overrides: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenMaxAmounts))
+            .unwrap_or_else(|| Map::new(env));
+        overrides.get(token.clone())
+    }
+
+    /// Return the admin-configured per-token maximum outflow limit in stroops
+    /// (issue #690). `0` means unlimited / disabled.
+    pub(crate) fn get_token_outflow_limit_internal(env: &Env, token: &Address) -> i128 {
+        let limits: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenOutflowLimits))
+            .unwrap_or_else(|| Map::new(env));
+        limits.get(token.clone()).unwrap_or(0)
+    }
+
+    /// Return the rolling-window outflow state for `token` (issue #690).
+    pub(crate) fn get_circuit_state_internal(env: &Env, token: &Address) -> CircuitBreakerState {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::TokenCircuitBreaker(token.clone()))
+            .unwrap_or(CircuitBreakerState {
+                window_start_ledger: env.ledger().sequence(),
+                window_outflow: 0,
+                tripped: false,
+            })
+    }
+
+    /// Persist the rolling-window outflow state for `token` (issue #690).
+    pub(crate) fn save_circuit_state_internal(env: &Env, token: &Address, state: &CircuitBreakerState) {
+        let key = DataKey3::TokenCircuitBreaker(token.clone());
+        env.storage().persistent().set(&key, state);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+    }
+
+    /// Per-token outflow circuit breaker (issue #690): enforce the
+    /// admin-configured per-token outflow limit over the rolling ledger
+    /// window. Once the limit is hit, further transfers out of escrow panic
+    /// with reason `CircuitBreaker` and the token auto-pauses.
+    pub(crate) fn enforce_outflow_limit(env: &Env, token: &Address, amount: i128) {
+        let limit = Self::get_token_outflow_limit_internal(env, token);
+        if limit <= 0 || amount <= 0 {
+            return;
+        }
+        let mut state = Self::get_circuit_state_internal(env, token);
+        if state.tripped {
+            panic!("{}", ERR_CIRCUIT_BREAKER);
+        }
+        let now = env.ledger().sequence();
+        if now >= state.window_start_ledger.saturating_add(DEFAULT_CIRCUIT_BREAKER_WINDOW_LEDGERS) {
+            state.window_start_ledger = now;
+            state.window_outflow = 0;
+        }
+        let projected = state.window_outflow.saturating_add(amount);
+        if projected > limit {
+            state.tripped = true;
+            Self::save_circuit_state_internal(env, token, &state);
+            env.events().publish(
+                (Symbol::new(&env, "circuit_breaker_tripped"), token.clone()),
+                (limit, projected),
+            );
+            panic!("{}", ERR_CIRCUIT_BREAKER);
+        }
+        state.window_outflow = projected;
+        Self::save_circuit_state_internal(env, token, &state);
+    }
+
     /// The single choke point for escrow entering or leaving an engagement
     /// (issues #578, #671): moves the engagement's own escrow balance and the
     /// token's running total (`get_token_tvl`) together. Call it wherever
@@ -635,6 +749,24 @@ impl HireSettleContract {
     /// over-draw shows up in `check_escrow_invariants` instead of being
     /// hidden.
     pub(crate) fn adjust_escrow(env: &Env, engagement_id: &String, token: &Address, delta: i128) {
+        if delta > 0 {
+            // Issue #679: funding must not push a token's TVL past the
+            // admin-configured cap.
+            if let Some(cap) = Self::get_token_tvl_cap_internal(env, token) {
+                let tvl: i128 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey3::TokenLocked(token.clone()))
+                    .unwrap_or(0);
+                if tvl.saturating_add(delta) > cap {
+                    panic!("{}", ERR_TOKEN_TVL_CAP_EXCEEDED);
+                }
+            }
+        }
+        if delta < 0 {
+            // Issue #690: outflows are bounded by the per-token circuit breaker.
+            Self::enforce_outflow_limit(env, token, delta.abs());
+        }
         let key = DataKey3::EscrowBalance(engagement_id.clone());
         let balance: i128 = env.storage().persistent().get(&key).unwrap_or(0);
         env.storage()
