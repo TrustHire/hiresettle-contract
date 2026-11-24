@@ -44,6 +44,8 @@
 //! | `BundleNotFound` | — | `bonds::load_bundle_for` | 1 |
 //! | `can only dispute a submitted proof` | — | `disputes::assert_milestone_disputable` | 1 |
 //! | `cancellation_expired` | — | `engagement::accept_cancellation` | 1 |
+//! | `CancelReasonEmpty` | — | `engagement::cancel_engagement_with_reason` | 1 |
+//! | `CancelReasonTooLong` | — | `engagement::cancel_engagement_with_reason` | 1 |
 //! | `Cannot expire completed engagement` | — | `admin::expire_engagement` | 1 |
 //! | `CompanyActiveLimitReached` | — | `engagement::create_engagement_impl` | 1 |
 //! | `CompanyAlreadyActed` | — | `milestones::withdraw_proof` | 1 |
