@@ -1,7 +1,7 @@
 //! Issues #472–#475: pooled company escrow, cosigned config, emergency pause,
 //! and platform fee rebate pool.
 
-use soroban_sdk::{contractimpl, token, Address, Env, String, Symbol, Vec};
+use soroban_sdk::{contractimpl, token, Address, Env, Map, String, Symbol, Vec};
 use crate::*;
 
 #[contractimpl]
@@ -129,6 +129,9 @@ impl HireSettleContract {
 
     /// Refund unreleased escrow: back to the pool for pool-funded engagements,
     /// otherwise an external transfer to the company.
+    ///
+    /// The refund leaves the engagement's escrow and is recorded as refunded
+    /// (issue #671), since callers do not add it to `released_amount`.
     pub(crate) fn refund_company_escrow(
         env: &Env,
         engagement: &Engagement,
@@ -138,13 +141,27 @@ impl HireSettleContract {
         if refund <= 0 {
             return;
         }
+        Self::return_escrow_to_company(env, engagement, engagement_id, refund);
+        Self::adjust_escrow(env, engagement_id, &engagement.token, -refund);
+        Self::record_escrow_refund(env, engagement_id, refund);
+    }
+
+    /// Send `amount` of escrow back to the company — to its pool for
+    /// pool-funded engagements, otherwise by transfer — without touching any
+    /// escrow book-keeping. Callers account for it themselves.
+    pub(crate) fn return_escrow_to_company(
+        env: &Env,
+        engagement: &Engagement,
+        engagement_id: &String,
+        amount: i128,
+    ) {
         if Self::is_pool_funded(env, engagement_id) {
-            Self::credit_company_pool(env, &engagement.company, &engagement.token, refund);
+            Self::credit_company_pool(env, &engagement.company, &engagement.token, amount);
         } else {
             token::Client::new(env, &engagement.token).transfer(
                 &env.current_contract_address(),
                 &engagement.company,
-                &refund,
+                &amount,
             );
         }
     }
@@ -225,6 +242,7 @@ impl HireSettleContract {
             0,
             0,
             false,
+            None,
             None,
             None,
         )
@@ -323,6 +341,30 @@ impl HireSettleContract {
         address_val: Option<Address>,
         string_val: Option<String>,
     ) -> bool {
+        Self::defer_if_sensitive_with(
+            env,
+            fn_id,
+            u32_val,
+            i128_val,
+            bool_val,
+            address_val,
+            string_val,
+            None,
+        )
+    }
+
+    /// `defer_if_sensitive` for setters that take a second address argument
+    /// (issue #672), stored as `PendingConfigChange::address_val2`.
+    pub(crate) fn defer_if_sensitive_with(
+        env: &Env,
+        fn_id: u32,
+        u32_val: u32,
+        i128_val: i128,
+        bool_val: bool,
+        address_val: Option<Address>,
+        string_val: Option<String>,
+        address_val2: Option<Address>,
+    ) -> bool {
         let cosigner: Option<Address> = env.storage().persistent().get(&DataKey2::ConfigCosigner);
         if cosigner.is_none() {
             return false;
@@ -345,6 +387,7 @@ impl HireSettleContract {
             bool_val,
             address_val,
             string_val,
+            address_val2,
         );
         true
     }
@@ -360,6 +403,7 @@ impl HireSettleContract {
         bool_val: bool,
         address_val: Option<Address>,
         string_val: Option<String>,
+        address_val2: Option<Address>,
     ) -> u64 {
         let change_id: u64 = env
             .storage()
@@ -375,6 +419,7 @@ impl HireSettleContract {
             bool_val,
             address_val,
             string_val,
+            address_val2,
             proposer,
             proposed_at_ledger: now,
             expires_at_ledger: now.saturating_add(Self::get_config_change_ttl(env.clone())),
@@ -446,6 +491,38 @@ impl HireSettleContract {
                 env.events().publish(
                     (Symbol::new(env, "fee_rebate_bps_set"),),
                     pending.u32_val,
+                );
+            }
+            FN_RECOVER_STRAY_TOKENS => {
+                let token = pending
+                    .address_val
+                    .clone()
+                    .unwrap_or_else(|| panic!("missing token"));
+                let to = pending
+                    .address_val2
+                    .clone()
+                    .unwrap_or_else(|| panic!("missing recipient"));
+                // The stray amount is computed now, at acceptance, not when
+                // the change was proposed.
+                Self::execute_stray_token_recovery(env, &token, &to);
+            }
+            FN_SET_TOKEN_OUTFLOW_LIMIT => {
+                let token = pending
+                    .address_val
+                    .clone()
+                    .unwrap_or_else(|| panic!("missing token"));
+                let mut limits: Map<Address, i128> = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::Config(ConfigKey::TokenOutflowLimits))
+                    .unwrap_or_else(|| Map::new(env));
+                limits.set(token.clone(), pending.i128_val);
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::Config(ConfigKey::TokenOutflowLimits), &limits);
+                env.events().publish(
+                    (Symbol::new(&env, "token_outflow_limit_set"),),
+                    (token, pending.i128_val),
                 );
             }
             _ => panic!("unknown config change fn_id"),
@@ -696,6 +773,7 @@ impl HireSettleContract {
             panic!("InsufficientRebateBalance");
         }
         env.storage().persistent().set(&key, &(bal - amount));
+        Self::add_token_aggregate(&env, DataKey3::TokenRebate(token.clone()), -amount);
         token::Client::new(&env, &token).transfer(
             &env.current_contract_address(),
             &company,
@@ -749,6 +827,14 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .extend_ttl(&rebate_key, 100_000, 6_300_000);
+        // Issue #672: the stored rebate moved by exactly `credit - offset`.
+        if credit != offset {
+            Self::add_token_aggregate(
+                env,
+                DataKey3::TokenRebate(engagement.token.clone()),
+                credit - offset,
+            );
+        }
 
         // Issue #543: the referrer's cut comes out of what would otherwise
         // reach the treasury, so treasury + referrer always sum to it.

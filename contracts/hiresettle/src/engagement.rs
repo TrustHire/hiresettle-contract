@@ -45,6 +45,11 @@ impl HireSettleContract {
     ///   [`Self::set_min_quorum_ratio_bps`] (issue #502). Never raised at the default ratio of 0.
     /// - `"InvalidPrerequisiteIndex"` / `"PrerequisiteCycle"` — a milestone's `prerequisites`
     ///   reference an out-of-range index or form a cycle (issue #461).
+    /// - `"OracleNotRegistered"` / `"OracleRecruiterCollision"` — `config.placement_oracle`
+    ///   is not in the oracle registry, or is the recruiter or co-recruiter (issue #667).
+    /// - `"ExternalRefEmpty"` / `"ExternalRefTooLong"` / `"DuplicateExternalRef"` —
+    ///   `config.external_ref` is empty, longer than 64 characters, or already used by
+    ///   this company (issue #572).
     ///
     /// These checks exist so a company cannot name itself (or a colluding address)
     /// as arbiter and vote on its own disputes, or name itself as recruiter to
@@ -76,7 +81,107 @@ impl HireSettleContract {
             milestones,
             retention_days,
             config,
+            false,
         )
+    }
+
+    /// Issue #668: create an engagement whose milestones specify either a
+    /// percentage or an absolute token amount. `payment_plan` must be parallel
+    /// to `milestones`. Absolute amounts must sum (together with the amounts
+    /// implied by any percent entries) to exactly `total_amount`.
+    /// Percent-only engagements behave exactly as with `create_engagement`.
+    pub fn create_engagement_payment_plan(
+        env: Env,
+        engagement_id: String,
+        company: Address,
+        recruiter: Address,
+        arbiter_setup: ArbiterSetup,
+        params: PaymentPlanParams,
+    ) -> String {
+        let PaymentPlanParams {
+            token,
+            total_amount,
+            job_title,
+            milestones,
+            payment_plan,
+            retention_days,
+            config,
+        } = params;
+        Self::assert_not_paused(&env);
+        company.require_auth();
+        if payment_plan.len() != milestones.len() {
+            panic!("InvalidPaymentPlanLength");
+        }
+        if total_amount <= 0 {
+            panic!("amount must be greater than zero");
+        }
+
+        let mut amounts: Vec<i128> = Vec::new(&env);
+        let mut sum: i128 = 0;
+        let mut percent_total: u32 = 0;
+        let mut updated = milestones.clone();
+        for i in 0..payment_plan.len() {
+            let amount = match payment_plan.get(i).unwrap() {
+                MilestonePayment::Percent(percent) => {
+                    if percent > 100 {
+                        panic!("InvalidPercentages");
+                    }
+                    percent_total += percent;
+                    (total_amount * percent as i128) / 100
+                }
+                MilestonePayment::Absolute(amount) => {
+                    if amount <= 0 {
+                        panic!("InvalidAmount");
+                    }
+                    amount
+                }
+            };
+            sum += amount;
+            amounts.push_back(amount);
+        }
+        if sum != total_amount || percent_total > 100 {
+            panic!("milestone amounts must sum to total_amount");
+        }
+
+        // Keep `payment_percent` coherent for metadata and existing queries.
+        // Exact amounts are stored separately and used for every gross payout.
+        let mut allocated_percent: u32 = 0;
+        for i in 0..updated.len() {
+            if let MilestonePayment::Absolute(_) = payment_plan.get(i).unwrap() {
+                let mut m = updated.get(i).unwrap();
+                let percent = if i == updated.len() - 1 {
+                    100u32.saturating_sub(allocated_percent)
+                } else {
+                    let p = ((amounts.get(i).unwrap() * 100) / total_amount) as u32;
+                    allocated_percent += p;
+                    p
+                };
+                m.payment_percent = percent;
+                updated.set(i, m);
+            } else {
+                allocated_percent += updated.get(i).unwrap().payment_percent;
+            }
+        }
+
+        let id = Self::create_engagement_impl(
+            env.clone(),
+            engagement_id.clone(),
+            company,
+            recruiter,
+            arbiter_setup,
+            token,
+            total_amount,
+            job_title,
+            updated,
+            retention_days,
+            config,
+        );
+        let key = DataKey3::AbsoluteMilestoneAmounts(engagement_id);
+        env.storage().persistent().set(&key, &amounts);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+        id
     }
 
     /// Shared engagement-creation logic behind `create_engagement`, factored
@@ -154,6 +259,53 @@ impl HireSettleContract {
         count
     }
 
+    /// Enforce the tighter of the recruiter's own cap and the admin-wide
+    /// recruiter cap (issue #482; 0 / unset means no limit) before binding
+    /// `recruiter` to one more engagement.
+    ///
+    /// # Panics
+    /// - `"RecruiterActiveLimitReached"`
+    pub(crate) fn assert_recruiter_below_cap(env: &Env, recruiter: &Address) {
+        let personal_cap: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey2::RecruiterActiveCap(recruiter.clone()))
+            .unwrap_or(0);
+        let admin_cap: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config(ConfigKey::MaxActivePerRecruiter))
+            .unwrap_or(0);
+        let recruiter_cap = match (personal_cap, admin_cap) {
+            (0, 0) => None,
+            (0, c) | (c, 0) => Some(c),
+            (p, a) => Some(p.min(a)),
+        };
+        if let Some(cap) = recruiter_cap {
+            if Self::recruiter_active_count(env, recruiter) >= cap {
+                panic!("RecruiterActiveLimitReached");
+            }
+        }
+    }
+
+    /// Append `engagement_id` to `recruiter`'s engagement index (issue #36).
+    pub(crate) fn index_recruiter_engagement(env: &Env, recruiter: &Address, engagement_id: &String) {
+        let key = DataKey::RecruiterEngagements(recruiter.clone());
+        let mut recruiter_ids: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| Vec::new(env));
+        recruiter_ids.push_back(engagement_id.clone());
+        env.storage().persistent().set(&key, &recruiter_ids);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+    }
+
+    /// With `open_offer` (issue #677), `recruiter` is a placeholder for a
+    /// recruiter bound later by `accept_engagement`: it skips the recruiter
+    /// cap and the per-recruiter index, which are applied at binding instead.
     pub(crate) fn create_engagement_impl(
         env: Env,
         engagement_id: String,
@@ -166,6 +318,7 @@ impl HireSettleContract {
         milestones: Vec<Milestone>,
         retention_days: Vec<u32>,
         config: EngagementConfig,
+        open_offer: bool,
     ) -> String {
         Self::assert_function_not_paused(&env, FN_CREATE_ENGAGEMENT);
         // Validate engagement_id format: non-empty, ≤ 64 chars, [A-Za-z0-9-] only.
@@ -255,6 +408,14 @@ impl HireSettleContract {
             panic!("AmountBelowMinimum");
         }
 
+        // Issue #680: maximum engagement amount validation, using the
+        // token's per-token override if the admin has set one, else the
+        // admin-wide cap. `0` (the default) means unlimited.
+        let max_amount = Self::get_effective_max_amount(env.clone(), token.clone());
+        if max_amount > 0 && total_amount > max_amount {
+            panic!("{}", ERR_AMOUNT_ABOVE_MAXIMUM);
+        }
+
         // Issue #26: reject token if allowlist is active and token not in it.
         let allowlist_enabled: bool = env
             .storage()
@@ -271,6 +432,15 @@ impl HireSettleContract {
             if !is_allowed {
                 panic!("TokenNotAllowed");
             }
+        }
+
+        // Issue #681: reject tokens that have been deprecated (with grace
+        // period) or removed from the allowlist.
+        let token_status = Self::get_token_status_internal(&env, &token);
+        match token_status {
+            TokenStatus::Allowed => {}
+            TokenStatus::Deprecated(_) => panic!("{}", ERR_TOKEN_DEPRECATED),
+            TokenStatus::Removed => panic!("TokenNotAllowed"),
         }
 
         let arbiters = arbiter_setup.arbiters;
@@ -349,14 +519,69 @@ impl HireSettleContract {
             }
         }
 
+        // Issue #667: an opted-in placement oracle must be registered and
+        // must not sit on the recruiter side.
+        if let Some(ref oracle) = config.placement_oracle {
+            Self::validate_placement_oracle(&env, oracle, &recruiter, &config.co_recruiter);
+        }
+
+        // Issue #572: bounded external reference, unique per company.
+        if let Some(ref external_ref) = config.external_ref {
+            Self::validate_external_ref(&env, &company, external_ref);
+        }
+
         // Issue #56: validate co-recruiter split basis points.
         if config.recruiter_split_bps > FULL_SPLIT_BPS {
             panic!("InvalidSplitBps");
         }
 
+        // Issue #574: an N-way split replaces the single co-recruiter and must
+        // be a complete, bounded allocation of the net payout.
+        if let Some(splits) = &config.recruiter_splits {
+            if config.co_recruiter.is_some() {
+                panic!("SplitConfigConflict");
+            }
+            if splits.is_empty() || splits.len() > MAX_RECRUITER_SPLITS {
+                panic!("InvalidSplitCount");
+            }
+            let mut total_bps: u32 = 0;
+            for (_, bps) in splits.iter() {
+                if bps > FULL_SPLIT_BPS {
+                    panic!("InvalidSplitBps");
+                }
+                total_bps += bps;
+            }
+            if total_bps != FULL_SPLIT_BPS {
+                panic!("InvalidSplitBps");
+            }
+        }
+
         // Issue #466: a zero-length stream would divide by zero when vesting.
         if config.stream_duration_ledgers == Some(0) {
             panic!("InvalidStreamDuration");
+        }
+
+        // Issue #670: withholding bps must be valid and, together with the
+        // platform and arbiter fees, must never exceed 10 000 bps so a payout
+        // cannot go negative.
+        if config.withholding_address.is_some() {
+            let bps = config.withholding_bps;
+            if bps > FULL_SPLIT_BPS {
+                panic!("InvalidWithholdingBps");
+            }
+            let platform_bps = Self::resolve_platform_fee_bps(
+                &env,
+                Self::get_platform_fee_internal(&env).bps,
+                total_amount,
+            );
+            let arbiter_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::Config(ConfigKey::ArbiterFee))
+                .unwrap_or(0);
+            if (bps as u64 + platform_bps as u64 + arbiter_bps as u64) > FULL_SPLIT_BPS as u64 {
+                panic!("InvalidWithholdingBps");
+            }
         }
 
         let mut total_percent: u32 = 0;
@@ -365,6 +590,13 @@ impl HireSettleContract {
         }
         if total_percent != 100 {
             panic!("milestone percentages must sum to 100");
+        }
+
+        // Issue #662: persist the opt-in flag; premiums are charged at payout.
+        if config.insured {
+            env.storage()
+                .persistent()
+                .set(&DataKey3::EngagementInsured(engagement_id.clone()), &true);
         }
 
         // Issue #461: prerequisite indices must be in range and acyclic.
@@ -415,6 +647,13 @@ impl HireSettleContract {
                     m.valid_after_ledger = 0;
                     m.status = MilestoneStatus::Pending;
                 }
+                MilestoneKind::Retainer(interval_ledgers) => {
+                    if interval_ledgers == 0 {
+                        panic!("InvalidRetainerInterval");
+                    }
+                    m.valid_after_ledger = current_ledger.saturating_add(interval_ledgers);
+                    m.status = MilestoneStatus::Pending;
+                }
                 MilestoneKind::Retention => {
                     let days = retention_days.get(retention_index).unwrap_or(30);
                     retention_index += 1;
@@ -429,6 +668,12 @@ impl HireSettleContract {
                     }
                     m.valid_after_ledger = current_ledger + (days * lpd);
                     m.status = MilestoneStatus::Locked;
+                    // Issue #655: remember when this retention window began
+                    // for pro-rata early-departure refunds.
+                    env.storage().persistent().set(
+                        &DataKey3::RetentionStartedAt(engagement_id.clone(), i),
+                        &current_ledger,
+                    );
                 }
             }
             resolved_milestones.push_back(m);
@@ -471,7 +716,7 @@ impl HireSettleContract {
             token_client.transfer(&company, &env.current_contract_address(), &total_amount);
         }
         // Issue #578: new engagement escrow locked (pool funds were never in TVL).
-        Self::add_token_locked(&env, &token, total_amount);
+        Self::adjust_escrow(&env, &engagement_id, &token, total_amount);
 
         // Issue #459: escrow the optional recruiter bond alongside the company's funding.
         if let Some(bond_amount) = config.recruiter_bond_amount {
@@ -506,6 +751,7 @@ impl HireSettleContract {
                 EngagementStatus::Active
             },
             co_recruiter: config.co_recruiter,
+            recruiter_splits: config.recruiter_splits,
             recruiter_split_bps: config.recruiter_split_bps,
             contract_pdf_hash: config.contract_pdf_hash,
             referrer: config.referrer,
@@ -513,6 +759,7 @@ impl HireSettleContract {
             is_public: config.is_public,
             stream_duration_ledgers: config.stream_duration_ledgers,
             end_ledger: config.end_ledger,
+            candidate: config.candidate,
         };
 
         env.storage()
@@ -520,6 +767,25 @@ impl HireSettleContract {
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
 
         Self::bump_engagement_ttl(&env, &engagement_id);
+
+        // Issue #667: remember the opted-in placement oracle.
+        if let Some(ref oracle) = config.placement_oracle {
+            let key = DataKey3::EngagementOracle(engagement_id.clone());
+            env.storage().persistent().set(&key, oracle);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, 100_000, 6_300_000);
+        }
+
+        // Issue #572: index the external reference under the company.
+        if let Some(ref external_ref) = config.external_ref {
+            Self::index_external_ref(&env, &company, external_ref, &engagement_id);
+            let key = DataKey3::EngagementExternalRef(engagement_id.clone());
+            env.storage().persistent().set(&key, external_ref);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, 100_000, 6_300_000);
+        }
 
         // Issue #547: credit payouts instead of pushing them.
         if config.pull_payouts {
@@ -591,17 +857,11 @@ impl HireSettleContract {
             6_300_000,
         );
 
-        // Issue #36: append engagement_id to the per-recruiter index.
-        let mut recruiter_ids: Vec<String> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::RecruiterEngagements(recruiter.clone()))
-            .unwrap_or_else(|| Vec::new(&env));
-        recruiter_ids.push_back(engagement_id.clone());
-        env.storage().persistent().set(
-            &DataKey::RecruiterEngagements(recruiter.clone()),
-            &recruiter_ids,
-        );
+        // Issue #36: append engagement_id to the per-recruiter index. An open
+        // offer (issue #677) is indexed when a recruiter accepts it.
+        if !open_offer {
+            Self::index_recruiter_engagement(&env, &recruiter, &engagement_id);
+        }
 
         // Issue #248 & #249: append engagement_id to per-tag indices.
         // Count/length were already validated above; here we only need to
@@ -630,12 +890,6 @@ impl HireSettleContract {
                 }
             }
         }
-
-        env.storage().persistent().extend_ttl(
-            &DataKey::RecruiterEngagements(recruiter.clone()),
-            100_000,
-            6_300_000,
-        );
 
         // Issue #577: append engagement_id to the per-token index.
         // Forward-only: engagements created before this deployment are not
@@ -684,19 +938,30 @@ impl HireSettleContract {
     // ISSUE #569 — RECRUITER ACCEPTANCE STEP
     // ----------------------------------------------------------
 
-    /// Recruiter (or their co-signer) accepts an `Offered` engagement, moving
-    /// it to `Active`. Placement milestones' no-show clocks start from this
-    /// ledger rather than from creation. Retention time gates are unchanged:
-    /// they were fixed relative to creation.
+    /// Recruiter (or their co-signer) accepts an `Offered` engagement on its
+    /// current terms, moving it to `Active`. Placement milestones' no-show
+    /// clocks start from this ledger rather than from creation. Retention
+    /// time gates are unchanged: they were fixed relative to creation. Any
+    /// pending counter-offer (issue #676) is discarded.
+    ///
+    /// On an open offer (issue #677) the first eligible recruiter to call
+    /// this is bound as the engagement's recruiter. The recruiter's active
+    /// engagement caps are checked at this point, since there was no
+    /// recruiter to check at creation.
     ///
     /// # Panics
     /// - `"ContractPaused"` / `"EngagementPaused"`
     /// - `"EngagementNotOffered"` — the engagement is not in `Offered` status.
     /// - `"unauthorized"` — caller is not the recruiter or their co-signer.
+    /// - `"RecruiterNotEligible"` — open offer, and the caller is not an
+    ///   eligible recruiter or the co-signer of one.
+    /// - `"RecruiterActiveLimitReached"` — open offer, and the recruiter is at
+    ///   its active engagement cap.
     ///
     /// # Events
     /// `("engagement_accepted", engagement_id)` with the recruiter address,
-    /// plus the `Offered → Active` status-change event.
+    /// plus the `Offered → Active` status-change event. An open offer also
+    /// emits `("open_offer_claimed", engagement_id)` with the bound recruiter.
     pub fn accept_engagement(env: Env, recruiter: Address, engagement_id: String) {
         Self::assert_not_paused(&env);
         Self::assert_engagement_not_paused(&env, &engagement_id);
@@ -706,14 +971,16 @@ impl HireSettleContract {
         if engagement.status != EngagementStatus::Offered {
             panic!("EngagementNotOffered");
         }
-        if !Self::is_authorized_recruiter(&env, &recruiter, &engagement.recruiter) {
-            panic!("{}", ERR_UNAUTHORIZED);
-        }
-
-        for i in 0..engagement.milestones.len() {
-            let m = engagement.milestones.get(i).unwrap();
-            if m.kind == MilestoneKind::Placement && m.status == MilestoneStatus::Pending {
-                Self::mark_milestone_pending_since(&env, &engagement_id, i);
+        let open_offer = Self::eligible_recruiters_internal(&env, &engagement_id);
+        match &open_offer {
+            Some(eligible) => {
+                let bound = Self::resolve_eligible_recruiter(&env, eligible, &recruiter);
+                Self::bind_open_offer_recruiter(&env, &mut engagement, &engagement_id, &bound);
+            }
+            None => {
+                if !Self::is_authorized_recruiter(&env, &recruiter, &engagement.recruiter) {
+                    panic!("{}", ERR_UNAUTHORIZED);
+                }
             }
         }
 
@@ -724,13 +991,15 @@ impl HireSettleContract {
             .set(&DataKey::Engagement(engagement_id.clone()), &engagement);
         Self::bump_engagement_ttl(&env, &engagement_id);
 
-        Self::emit_engagement_status_changed(
-            &env,
-            &engagement_id,
-            EngagementStatus::Offered,
-            EngagementStatus::Active,
-            Some(recruiter.clone()),
-        );
+        if open_offer.is_some() {
+            env.events().publish(
+                (
+                    Symbol::new(&env, "open_offer_claimed"),
+                    engagement_id.clone(),
+                ),
+                engagement.recruiter.clone(),
+            );
+        }
         env.events().publish(
             (
                 Symbol::new(&env, "engagement_accepted"),
@@ -743,7 +1012,9 @@ impl HireSettleContract {
     /// Company (or its co-signer) withdraws an `Offered` engagement before
     /// the recruiter accepts it. The full escrow is refunded (to the pool for
     /// pool-funded engagements), any bonds are returned, and the engagement
-    /// moves to `Cancelled`, freeing its active-engagement cap slots.
+    /// moves to `Cancelled`, freeing its active-engagement cap slots. Works
+    /// the same on an open offer (issue #677), and discards any pending
+    /// counter-offer (issue #676).
     ///
     /// # Panics
     /// - `"ContractPaused"` / `"EngagementPaused"`
@@ -770,6 +1041,7 @@ impl HireSettleContract {
         Self::refund_company_escrow(&env, &engagement, &engagement_id, refund);
 
         engagement.status = EngagementStatus::Cancelled;
+            Self::clear_candidate_ownership(&env, &engagement);
         engagement.last_activity_ledger = env.ledger().sequence();
         env.storage()
             .persistent()
@@ -880,6 +1152,10 @@ impl HireSettleContract {
                         Self::mark_milestone_pending_since(&env, &engagement_id, i);
                     }
                 }
+                MilestoneKind::Retainer(_) => {
+                    // Retainer instalments are not tied to a candidate; a
+                    // replacement request leaves them untouched.
+                }
                 MilestoneKind::Retention => {
                     if m.status != MilestoneStatus::Confirmed
                         && m.status != MilestoneStatus::Resolved
@@ -897,6 +1173,14 @@ impl HireSettleContract {
                             / Self::get_ledgers_per_day_internal(&env);
                         m.valid_after_ledger = current_ledger
                             + (original_days * Self::get_ledgers_per_day_internal(&env));
+                        // Issue #655: a replacement restarts the retention window.
+                        env.storage().persistent().set(
+                            &DataKey3::RetentionStartedAt(engagement_id.clone(), i),
+                            &current_ledger,
+                        );
+                        env.storage().persistent().remove(
+                            &DataKey3::EarlyDepartureProposal(engagement_id.clone(), i),
+                        );
                         let old_status = m.status.clone();
                         m.status = MilestoneStatus::Locked;
                         m.proof_hash = String::from_str(&env, "");
@@ -1182,6 +1466,7 @@ impl HireSettleContract {
 
         let old_engagement_status = engagement.status.clone();
         engagement.status = EngagementStatus::Cancelled;
+            Self::clear_candidate_ownership(&env, &engagement);
         engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
@@ -1245,7 +1530,8 @@ impl HireSettleContract {
     ///
     /// # Events
     /// Per auto-confirmed milestone `("milestone_confirmed", engagement_id)`
-    /// with `(milestone_index, payment)`, plus
+    /// with `(milestone_index, payment)` and `("milestone_payout",
+    /// engagement_id)` with `(milestone_index, payment, None, invoice_ref)`, plus
     /// `("engagement_closed_at_end", engagement_id)` with
     /// `(released_amount, refund)`.
     pub fn close_engagement_at_end(env: Env, engagement_id: String) {
@@ -1288,7 +1574,7 @@ impl HireSettleContract {
                     Self::platform_fee_amount(&env, &engagement_id, payment, effective_bps);
                 let net_payment = payment - fee_amount;
                 engagement.released_amount += payment;
-                Self::add_token_locked(&env, &engagement.token, -payment);
+                Self::adjust_escrow(&env, &engagement_id, &engagement.token, -payment);
                 if fee_amount > 0 {
                     Self::collect_platform_fee(&env, &engagement, &engagement_id, i, fee_amount);
                 }
@@ -1312,6 +1598,7 @@ impl HireSettleContract {
                 ),
                 (i, payment),
             );
+            Self::record_milestone_receipt(&env, &engagement_id, i, payment, None);
         }
 
         let refund = engagement.total_amount - engagement.released_amount;
@@ -1320,6 +1607,7 @@ impl HireSettleContract {
 
         let old_engagement_status = engagement.status.clone();
         engagement.status = EngagementStatus::Cancelled;
+            Self::clear_candidate_ownership(&env, &engagement);
         engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
@@ -1491,6 +1779,7 @@ impl HireSettleContract {
                 Self::platform_fee_amount(&env, &engagement_id, recruiter_amount, effective_bps);
             let net_payment = recruiter_amount - fee_amount;
             engagement.released_amount += recruiter_amount;
+            Self::adjust_escrow(&env, &engagement_id, &engagement.token, -recruiter_amount);
 
             let token_client = token::Client::new(&env, &engagement.token);
             if fee_amount > 0 {
@@ -1511,6 +1800,7 @@ impl HireSettleContract {
 
         let old_engagement_status = engagement.status.clone();
         engagement.status = EngagementStatus::Cancelled;
+            Self::clear_candidate_ownership(&env, &engagement);
         engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
@@ -1633,6 +1923,23 @@ impl HireSettleContract {
             panic!("amount must be greater than zero");
         }
 
+        // Issue #680: top-ups cannot exceed the effective maximum.
+        let max_amount = Self::get_effective_max_amount(env.clone(), engagement.token.clone());
+        if max_amount > 0 && amount > max_amount {
+            panic!("{}", ERR_AMOUNT_ABOVE_MAXIMUM);
+        }
+
+        // Issue #681: block top-ups on delisted tokens once the grace period
+        // has elapsed.
+        let token_status = Self::get_token_status_internal(env, &engagement.token);
+        if let TokenStatus::Deprecated(sunset_ledger) = &token_status {
+            if env.ledger().sequence() > *sunset_ledger {
+                panic!("{}", ERR_TOKEN_DEPRECATED);
+            }
+        } else if token_status == TokenStatus::Removed {
+            panic!("TokenNotAllowed");
+        }
+
         if from_pool {
             // Panics before any write if the pooled balance is insufficient.
             Self::debit_company_pool(env, company, &engagement.token, amount);
@@ -1643,7 +1950,7 @@ impl HireSettleContract {
 
         engagement.total_amount += amount;
         // Issue #578: top-up locks more escrow.
-        Self::add_token_locked(&env, &engagement.token, amount);
+        Self::add_token_locked(env, &engagement.token, amount);
         engagement.last_activity_ledger = env.ledger().sequence();
 
         env.storage()
@@ -1700,17 +2007,38 @@ impl HireSettleContract {
         if engagement.status != EngagementStatus::Active {
             panic!("{}", ERR_ENGAGEMENT_NOT_ACTIVE);
         }
-        let co = engagement
-            .co_recruiter
-            .clone()
-            .unwrap_or_else(|| panic!("no co_recruiter"));
-
-        let proposed_by_recruiter = if proposer == engagement.recruiter {
+        // Issue #574: for N-way splits any listed recruiter (including the
+        // primary) may propose; the amendment only takes effect once every
+        // listed recruiter and the company have accepted.
+        let split_path = engagement.recruiter_splits.is_some();
+        let proposed_by_recruiter = if split_path {
+            let mut authorized = proposer == engagement.recruiter;
+            if !authorized {
+                if let Some(splits) = &engagement.recruiter_splits {
+                    for (address, _) in splits.iter() {
+                        if address == proposer {
+                            authorized = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !authorized {
+                panic!("{}", ERR_UNAUTHORIZED);
+            }
             true
-        } else if proposer == co {
-            false
         } else {
-            panic!("{}", ERR_UNAUTHORIZED);
+            let co = engagement
+                .co_recruiter
+                .clone()
+                .unwrap_or_else(|| panic!("no co_recruiter"));
+            if proposer == engagement.recruiter {
+                true
+            } else if proposer == co {
+                false
+            } else {
+                panic!("{}", ERR_UNAUTHORIZED);
+            }
         };
 
         // Issue #496: Check amendment reproposal cooldown
@@ -1739,6 +2067,11 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, 100_000, 6_300_000);
+        if split_path {
+            let mut approvals = Vec::new(&env);
+            approvals.push_back(proposer.clone());
+            Self::store_split_amendment_approvals(&env, &engagement_id, &approvals);
+        }
 
         env.events().publish(
             (
@@ -1780,10 +2113,45 @@ impl HireSettleContract {
             panic!("amendment_expired");
         }
 
-        Self::assert_split_amendment_counterparty(&engagement, &acceptor, &proposal);
+        if engagement.recruiter_splits.is_some() {
+            // Issue #574: collect approvals from every listed recruiter plus
+            // the company; the proposal applies only on the final acceptance.
+            let approvers = Self::split_amendment_approvers(&env, &engagement);
+            if !approvers.iter().any(|a| a == acceptor.clone()) {
+                panic!("{}", ERR_UNAUTHORIZED);
+            }
+            let approvals_key = DataKey3::SplitAmendmentApprovals(engagement_id.clone());
+            let mut approvals: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&approvals_key)
+                .unwrap_or_else(|| Vec::new(&env));
+            if approvals.iter().any(|a| a == acceptor.clone()) {
+                panic!("AlreadyApproved");
+            }
+            approvals.push_back(acceptor.clone());
+            Self::store_split_amendment_approvals(&env, &engagement_id, &approvals);
+            if approvals.len() < approvers.len() {
+                env.events().publish(
+                    (
+                        Symbol::new(&env, "split_amendment_approval_recorded"),
+                        engagement_id,
+                    ),
+                    (acceptor, approvals.len(), approvers.len()),
+                );
+                return;
+            }
+            env.storage().persistent().remove(&approvals_key);
+        } else {
+            Self::assert_split_amendment_counterparty(&engagement, &acceptor, &proposal);
+        }
 
         let old = engagement.recruiter_split_bps;
-        engagement.recruiter_split_bps = proposal.new_split_bps;
+        if engagement.recruiter_splits.is_some() {
+            Self::apply_nway_split_amendment(&env, &mut engagement, proposal.new_split_bps);
+        } else {
+            engagement.recruiter_split_bps = proposal.new_split_bps;
+        }
         engagement.last_activity_ledger = env.ledger().sequence();
         env.storage()
             .persistent()
@@ -1828,7 +2196,17 @@ impl HireSettleContract {
             panic!("amendment_expired");
         }
 
-        Self::assert_split_amendment_counterparty(&engagement, &rejector, &proposal);
+        if engagement.recruiter_splits.is_some() {
+            let approvers = Self::split_amendment_approvers(&env, &engagement);
+            if !approvers.iter().any(|a| a == rejector.clone()) {
+                panic!("{}", ERR_UNAUTHORIZED);
+            }
+            env.storage()
+                .persistent()
+                .remove(&DataKey3::SplitAmendmentApprovals(engagement_id.clone()));
+        } else {
+            Self::assert_split_amendment_counterparty(&engagement, &rejector, &proposal);
+        }
         env.storage().persistent().remove(&key);
 
         // Issue #496: Record the rejection ledger for the proposer on this engagement
@@ -1873,6 +2251,100 @@ impl HireSettleContract {
             .persistent()
             .get(&DataKey2::SplitAmendmentLog(engagement_id))
             .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Parties that must approve an N-way split renegotiation (issue #574):
+    /// the company plus every listed recruiter, with the primary included even
+    /// if it was omitted from the split list. Deduplicated in insertion order.
+    /// Approvals collected so far on a pending N-way split renegotiation
+    /// (issue #574).
+    pub fn get_split_amendment_approvals(
+        env: Env,
+        engagement_id: String,
+    ) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::SplitAmendmentApprovals(engagement_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    fn split_amendment_approvers(env: &Env, engagement: &Engagement) -> Vec<Address> {
+        let mut approvers = Vec::new(env);
+        if let Some(splits) = &engagement.recruiter_splits {
+            for (address, _) in splits.iter() {
+                if !approvers.iter().any(|a| a == address.clone()) {
+                    approvers.push_back(address);
+                }
+            }
+        }
+        if !approvers.iter().any(|a| a == engagement.recruiter.clone()) {
+            approvers.push_back(engagement.recruiter.clone());
+        }
+        if !approvers.iter().any(|a| a == engagement.company.clone()) {
+            approvers.push_back(engagement.company.clone());
+        }
+        approvers
+    }
+
+    fn store_split_amendment_approvals(
+        env: &Env,
+        engagement_id: &String,
+        approvals: &Vec<Address>,
+    ) {
+        let key = DataKey3::SplitAmendmentApprovals(engagement_id.clone());
+        env.storage().persistent().set(&key, approvals);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+    }
+
+    /// Apply an accepted N-way split renegotiation: the primary recruiter takes
+    /// `new_split_bps`, the remaining recruiters keep their relative weights
+    /// within the remainder, and the total always stays at 10 000 bps.
+    fn apply_nway_split_amendment(
+        env: &Env,
+        engagement: &mut Engagement,
+        new_split_bps: u32,
+    ) {
+        if new_split_bps > FULL_SPLIT_BPS {
+            panic!("InvalidSplitBps");
+        }
+        let old = engagement
+            .recruiter_splits
+            .clone()
+            .unwrap_or_else(|| Vec::new(env));
+        let mut others: Vec<(Address, u32)> = Vec::new(env);
+        let mut old_other_bps: u32 = 0;
+        for (address, bps) in old.iter() {
+            if address != engagement.recruiter {
+                others.push_back((address, bps));
+                old_other_bps += bps;
+            }
+        }
+        let remaining = FULL_SPLIT_BPS - new_split_bps;
+        if others.is_empty() && remaining > 0 {
+            panic!("InvalidSplitBps");
+        }
+        let mut splits: Vec<(Address, u32)> = Vec::new(env);
+        splits.push_back((engagement.recruiter.clone(), new_split_bps));
+        let mut allocated: u32 = 0;
+        for i in 0..others.len() {
+            let (address, old_bps) = others.get(i).unwrap();
+            let bps = if i + 1 == others.len() {
+                remaining - allocated
+            } else if old_other_bps == 0 {
+                remaining / others.len()
+            } else {
+                (remaining * old_bps) / old_other_bps
+            };
+            allocated += bps;
+            splits.push_back((address, bps));
+        }
+        if splits.len() > MAX_RECRUITER_SPLITS {
+            panic!("InvalidSplitCount");
+        }
+        engagement.recruiter_split_bps = new_split_bps;
+        engagement.recruiter_splits = Some(splits);
     }
 
     fn assert_split_amendment_counterparty(
