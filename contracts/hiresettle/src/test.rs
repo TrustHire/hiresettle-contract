@@ -15313,3 +15313,120 @@ fn test_cancel_with_reason_wrong_recruiter_rejected() {
         &String::from_str(&env, "Wrong party"),
     );
 }
+
+// ============================================================
+// ISSUE #685 — PUBLIC RATING RESPONSE
+// ============================================================
+
+/// Drive a standard engagement to `Completed` and rate it with `stars`.
+fn complete_and_rate(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    arbiter: &Address,
+    id: &str,
+    stars: u32,
+) -> String {
+    let eng_id = String::from_str(env, id);
+    create_standard_engagement(env, client, token_id, company, recruiter, arbiter, id);
+    client.submit_proof(recruiter, &eng_id, &0, &String::from_str(env, "ipfs://offer"));
+    client.confirm_milestone(company, &eng_id, &0);
+    advance_ledger(env, 31 * 17_280);
+    client.unlock_milestone(&eng_id, &1);
+    client.submit_proof(recruiter, &eng_id, &1, &String::from_str(env, "ipfs://30d"));
+    client.confirm_milestone(company, &eng_id, &1);
+    advance_ledger(env, 60 * 17_280);
+    client.unlock_milestone(&eng_id, &2);
+    client.submit_proof(recruiter, &eng_id, &2, &String::from_str(env, "ipfs://90d"));
+    client.confirm_milestone(company, &eng_id, &2);
+    client.rate_recruiter(company, &eng_id, &stars);
+    eng_id
+}
+
+#[test]
+fn test_rating_detail_none_before_rating() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "RSP-0");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-0");
+    assert_eq!(client.get_rating_detail(&eng_id), None);
+}
+
+#[test]
+fn test_rating_response_returned_with_rating() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-1", 4);
+
+    let detail = client.get_rating_detail(&eng_id).unwrap();
+    assert_eq!(detail.stars, 4);
+    assert_eq!(detail.response_hash, None);
+    assert_eq!(detail.responded_at_ledger, None);
+
+    let reply = String::from_str(&env, "ipfs://reply-1");
+    client.respond_to_rating(&recruiter, &eng_id, &reply);
+    assert!(has_event(&env, "rating_responded"));
+
+    let detail = client.get_rating_detail(&eng_id).unwrap();
+    assert_eq!(detail.stars, 4);
+    assert_eq!(detail.response_hash, Some(reply));
+    assert!(detail.responded_at_ledger.is_some());
+}
+
+#[test]
+fn test_rating_response_edit_within_window_keeps_window_start() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-2", 5);
+
+    client.respond_to_rating(&recruiter, &eng_id, &String::from_str(&env, "ipfs://first"));
+    let first_ledger = client.get_rating_detail(&eng_id).unwrap().responded_at_ledger;
+    advance_ledger(&env, 1_000);
+    client.respond_to_rating(&recruiter, &eng_id, &String::from_str(&env, "ipfs://edited"));
+
+    let edited = client.get_rating_detail(&eng_id).unwrap();
+    assert_eq!(edited.response_hash, Some(String::from_str(&env, "ipfs://edited")));
+    // The edit does not move the window start.
+    assert_eq!(edited.responded_at_ledger, first_ledger);
+}
+
+#[test]
+#[should_panic(expected = "RatingResponseLocked")]
+fn test_rating_response_locked_after_window() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-3", 3);
+    client.respond_to_rating(&recruiter, &eng_id, &String::from_str(&env, "ipfs://first"));
+    advance_ledger(&env, 17_280 + 1);
+    client.respond_to_rating(&recruiter, &eng_id, &String::from_str(&env, "ipfs://late"));
+}
+
+#[test]
+#[should_panic(expected = "NotRated")]
+fn test_rating_response_requires_rating() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "RSP-4");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-4");
+    client.respond_to_rating(&recruiter, &eng_id, &String::from_str(&env, "ipfs://early"));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_rating_response_only_recruiter() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-5", 2);
+    client.respond_to_rating(&company, &eng_id, &String::from_str(&env, "ipfs://company"));
+}
+
+#[test]
+#[should_panic(expected = "InvalidResponseHash")]
+fn test_rating_response_rejects_empty_hash() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = complete_and_rate(&env, &client, &token_id, &company, &recruiter, &arbiter, "RSP-6", 1);
+    client.respond_to_rating(&recruiter, &eng_id, &String::from_str(&env, ""));
+}
