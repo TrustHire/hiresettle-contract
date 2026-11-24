@@ -193,11 +193,19 @@ impl HireSettleContract {
             .persistent()
             .get(&DataKey3::EngagementStars(engagement_id.clone()))
             .unwrap_or(0);
-        let response: Option<RatingResponse> = env
+        let reply: Option<RatingResponse> = env
             .storage()
             .persistent()
             .get(&DataKey3::RatingResponse(engagement_id));
-        Some(RatingDetail { stars, response })
+        let (response_hash, responded_at_ledger) = match reply {
+            Some(rec) => (Some(rec.response_hash), Some(rec.responded_at_ledger)),
+            None => (None, None),
+        };
+        Some(RatingDetail {
+            stars,
+            response_hash,
+            responded_at_ledger,
+        })
     }
 
     /// Return the recruiter's accumulated rating, or `None` if they have never

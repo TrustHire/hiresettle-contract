@@ -447,8 +447,10 @@ pub struct RatingDetail {
     /// Star rating (1–5) recorded for the engagement; `0` for ratings made
     /// before issue #685 started storing the value.
     pub stars: u32,
-    /// The recruiter's reply, if one has been posted.
-    pub response: Option<RatingResponse>,
+    /// Hash of the recruiter's reply, if one has been posted.
+    pub response_hash: Option<String>,
+    /// Ledger the reply was first posted, if one has been posted.
+    pub responded_at_ledger: Option<u32>,
 }
 /// Running total of star ratings a recruiter has received (issue #470).
 /// The average rating is `total_stars / rating_count`.
