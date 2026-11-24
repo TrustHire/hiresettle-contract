@@ -290,6 +290,7 @@ rate_recruiter ◄── Completed ◄── confirm_milestone(1) ◄── subm
 - **Paying a recruiter in another token?** See [Recruiter Payout Tokens and the Swap Adapter (#458)](#recruiter-payout-tokens-and-the-swap-adapter-458).
 - **Vesting payouts over time?** See [Streamed Milestone Payouts (#466)](#streamed-milestone-payouts-466).
 - **Capping how many engagements a recruiter holds?** See [Recruiter Active-Engagement Caps (#482)](#recruiter-active-engagement-caps-482).
+- **Shortening proof cooldowns for well-rated recruiters?** See [Rating-Based Proof Cooldown Discount (#470)](#rating-based-proof-cooldown-discount-470).
 
 ---
 
@@ -1417,6 +1418,48 @@ recruiter role was transferred mid-engagement via
 [`accept_recruiter_transfer`](#recruiter-transfer), the incoming address receives
 the rating — matching where the milestone payouts went.
 
+## Rating-Based Proof Cooldown Discount (#470)
+
+Proof resubmissions on a milestone are rate-limited by a cooldown. The base cooldown is `ProofCooldown`, set with `set_proof_cooldown` and defaulting to `2_880` ledgers (about four hours). The first submission on a milestone is always allowed. A later submission panics with `ResubmitTooSoon` until the ledger of the previous submission on that milestone (`LastProofAt`) plus the effective cooldown has passed. This applies to `submit_proof` and `submit_proof_root`.
+
+A recruiter with a good rating can get a shorter cooldown. The admin sets the curve, and the contract applies it per recruiter.
+
+| Function                                                                                 | Caller | Description                                                                                                                                                                 |
+| ---------------------------------------------------------------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `set_cooldown_rating_discount(admin, discount_per_star_ledgers, min_cooldown_ledgers)`    | Admin  | Set the discount curve. Setting `discount_per_star_ledgers` to `0` disables the discount. Emits `cooldown_discount_set`. The name is shorter than the issue's `set_proof_cooldown_rating_discount` to fit Soroban's 32-character function name limit. |
+| `get_cooldown_rating_discount()` → `ProofCooldownDiscount`                              | Anyone | Returns `{ discount_per_star_ledgers, min_cooldown_ledgers }`. Both are `0` when unset.                                                                                     |
+| `set_cooldown_uses_recent_rating(admin, use_recent)`                                     | Admin  | `false` (the default) uses the recruiter's lifetime average rating. `true` uses the recency-weighted rating instead. Emits `cooldown_recent_set`.                           |
+| `get_cooldown_uses_recent_rating()` → `bool`                                             | Anyone | Whether the recency-weighted rating is used.                                                                                                                                |
+| `get_effective_proof_cooldown(recruiter)` → `u32`                                        | Anyone | The cooldown in ledgers that applies to this recruiter right now. Read-only.                                                                                                |
+
+`ProofCooldownDiscount` has two fields:
+
+- `discount_per_star_ledgers` (`u32`): ledgers removed from the base cooldown for each average star.
+- `min_cooldown_ledgers` (`u32`): the floor the discounted cooldown cannot go below.
+
+### How the effective cooldown is derived
+
+1. If `discount_per_star_ledgers` is `0`, or the recruiter has no rating, the result is the base cooldown.
+2. Otherwise compute the average stars × 100:
+   - Lifetime mode: `stars_x100 = total_stars × 100 ÷ rating_count`, rounded down.
+   - Recency mode: `stars_x100` is the recency-weighted average, in the same units.
+3. `discount = stars_x100 × discount_per_star_ledgers ÷ 100`, rounded down.
+4. `effective = max(base − discount, min_cooldown_ledgers)`, saturating at zero, then capped at `base`.
+
+The floor is applied after the discount. If `min_cooldown_ledgers` is above the base cooldown, the result is still the base, so the discount can never lengthen the cooldown.
+
+### Worked example
+
+Assume the base cooldown is `2_880` ledgers, `discount_per_star_ledgers = 100` and `min_cooldown_ledgers = 2_000`, with lifetime mode:
+
+| Recruiter                        | `stars_x100` | `discount` | `base − discount` | Effective cooldown |
+| -------------------------------- | ------------ | ---------- | ----------------- | ------------------ |
+| Unrated                          | —            | —          | —                 | `2_880`            |
+| 3-star average                   | `300`        | `300`      | `2_580`           | `2_580`            |
+| 5-star average                   | `500`        | `500`      | `2_380`           | `2_380`            |
+
+If the admin instead sets `discount_per_star_ledgers = 300`, the same 5-star recruiter gets `500 × 300 ÷ 100 = 1_500`. That gives `2_880 − 1_500 = 1_380`, which is below the floor, so the effective cooldown is `2_000`.
+
 ## Token Allowlist
 
 The contract supports an optional allowlist to restrict which tokens can be used for escrow.
@@ -1577,7 +1620,7 @@ holds, so a keeper or either party can run them.
 | Split fees across several treasuries          | `set_fee_treasuries` / `clear_fee_treasuries`                                                                                                                                                                    |
 | Manage referrals                              | `add_referrer`, `remove_referrer`, `set_referral_discount_bps`                                                                                                                                                   |
 | Control which tokens and amounts are accepted | `add_allowed_token`, `remove_allowed_token`, `set_token_allowlist_enabled`, `set_min_amount`, `set_token_min_amount`, `remove_token_min_amount`                                                                  |
-| Tune timing windows                           | `set_confirm_window`, `set_dispute_window`, `set_proof_cooldown`, `set_cooldown_rating_discount`, `set_no_show_deadline_ledgers`, `set_amendment_ttl`, `set_super_arbiter_deadline`, `set_arbiter_vote_deadline` |
+| Tune timing windows                           | `set_confirm_window`, `set_dispute_window`, `set_proof_cooldown`, [`set_cooldown_rating_discount`](#rating-based-proof-cooldown-discount-470), `set_no_show_deadline_ledgers`, `set_amendment_ttl`, `set_super_arbiter_deadline`, `set_arbiter_vote_deadline` |
 | Tune limits                                   | `set_max_active_per_company`, `set_max_replacements`, `set_max_active_per_recruiter` ([details](#recruiter-active-engagement-caps-482)) |
 | Configure arbitration                         | `set_super_arbiter`, `set_arbiter_fee`, `set_split_voting_enabled`, `add_arbiter_pool_member`, `remove_arbiter_pool_member`, `set_bond_forfeit_bps`                                                              |
 | Grow or shrink one engagement's arbiter panel | `admin_add_arbiter` / `admin_remove_arbiter`                                                                                                                                                                     |
