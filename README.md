@@ -287,6 +287,7 @@ rate_recruiter ◄── Completed ◄── confirm_milestone(1) ◄── subm
 - **Splitting a fee between two recruiters?** Set `co_recruiter` and `recruiter_split_bps` in the config (see [Key Features](#key-features)).
 - **A call panicked?** Find the message in [Errors](#errors).
 - **Building an indexer or UI?** See [Events](#events) and [Which query do I call?](#which-query-do-i-call).
+- **Paying a recruiter in another token?** See [Recruiter Payout Tokens and the Swap Adapter (#458)](#recruiter-payout-tokens-and-the-swap-adapter-458).
 
 ---
 
@@ -1203,6 +1204,104 @@ Notes:
 
 Events: `("payout_credited", recipient)` with `(engagement_id, token, amount)`; `("payouts_claimed", recruiter)` with `(token, amount)`.
 
+## Recruiter Payout Tokens and the Swap Adapter (#458)
+
+A recruiter can ask for their net milestone payouts to be delivered in a token other than the engagement's escrow token. The preference is stored per recruiter address and applies across all of their engagements. It only takes effect when the admin has registered a swap adapter. Without an adapter the preference is stored and ignored, and every payout is paid in the escrow token.
+
+| Function                                               | Caller                       | Description                                                                                                                                                                                  |
+| ------------------------------------------------------ | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `set_recruiter_payout_token(recruiter, token)`         | Recruiter (must sign)        | Store the preferred payout token, replacing any previous one. The token is not checked against the allowlist. Emits `payout_token_set`.                                                     |
+| `clear_recruiter_payout_token(recruiter)`              | Recruiter (must sign)        | Remove the preference and reset the slippage tolerance to the default (`DEFAULT_MAX_SLIPPAGE_BPS`, 100 = 1 %). Emits `payout_token_cleared`.                                                 |
+| `get_recruiter_payout_token(recruiter)` → `Option<Address>` | Anyone                  | The stored preference, or `None`.                                                                                                                                                             |
+| `set_recruiter_payout_slippage(recruiter, max_slippage_bps)` | Recruiter (must sign)  | Maximum slippage the recruiter accepts on a swap, in basis points. Leaves the token preference untouched. `10_000` accepts any output. Panics `InvalidSlippageBps` above `10_000`. Emits `payout_slippage_set`. |
+| `get_recruiter_payout_slippage(recruiter)` → `u32`     | Anyone                       | The slippage tolerance, or `100` if never set.                                                                                                                                              |
+| `set_swap_adapter(admin, adapter)`                     | Admin                        | Register the trusted swap adapter, replacing any existing one. Emits `swap_adapter_set`. Panics `NoAdmin` if the admin role is renounced, and `unauthorized` if the caller is not the admin.   |
+| `clear_swap_adapter(admin)`                            | Admin                        | Remove the adapter. Payouts fall back to the escrow token. Emits `swap_adapter_cleared`. Same panics as `set_swap_adapter`.                                                                    |
+| `get_swap_adapter()` → `Option<Address>`               | Anyone                       | The configured adapter, or `None`.                                                                                                                                                           |
+
+The preference and slippage setters work while the contract is paused. The admin setters also work while paused.
+
+### Adapter interface
+
+The contract calls an adapter through this trait. Any contract that exposes these two functions with these exact names and types can be used:
+
+```rust
+#[contractclient(name = "SwapAdapterClient")]
+pub trait SwapAdapter {
+    fn quote(env: Env, from_token: Address, to_token: Address, amount_in: i128) -> i128;
+
+    fn swap(
+        env: Env,
+        payer: Address,
+        from_token: Address,
+        to_token: Address,
+        amount_in: i128,
+        min_out: i128,
+        recipient: Address,
+    ) -> i128;
+}
+```
+
+- `quote` returns the expected output of `to_token` for `amount_in` of `from_token`. The contract only swaps when the quote is greater than zero.
+- `swap` must pull exactly `amount_in` of `from_token` from `payer`. The contract pre-authorizes that single `transfer(payer, adapter, amount_in)` and nothing else. It must deliver the `to_token` output to `recipient` and return the amount delivered. It must panic if it cannot deliver at least `min_out`.
+
+A minimal adapter exposes the same two entry points:
+
+```rust
+#[contract]
+pub struct MySwapAdapter;
+
+#[contractimpl]
+impl MySwapAdapter {
+    pub fn quote(env: Env, from_token: Address, to_token: Address, amount_in: i128) -> i128 {
+        // Expected output for amount_in, in to_token units.
+        todo!()
+    }
+
+    pub fn swap(
+        env: Env,
+        payer: Address,
+        from_token: Address,
+        to_token: Address,
+        amount_in: i128,
+        min_out: i128,
+        recipient: Address,
+    ) -> i128 {
+        // Pull amount_in of from_token from payer, send the to_token output
+        // to recipient, and panic if the output is below min_out.
+        todo!()
+    }
+}
+```
+
+### Payout flow
+
+The swap is attempted only when all of the following hold: the recipient has a payout token preference, an adapter is configured, the preference differs from the escrow token, and the payout amount is greater than zero. Otherwise the escrow token is sent to the recipient's payout destination.
+
+1. The contract calls `quote`. If the call fails or returns zero or less, the payout falls back to the escrow token and `payout_swap_fallback` is emitted with a `min_out` of `0`.
+2. `min_out = quote × (10_000 − max_slippage_bps) ÷ 10_000`, rounded down. `max_slippage_bps` is the recipient's tolerance from `set_recruiter_payout_slippage`.
+3. The contract authorizes exactly one `transfer(contract, adapter, amount)` on the escrow token and calls `swap` through a `try_` invocation.
+4. If `swap` panics, the authorized pull is rolled back and the payout falls back to the escrow token. `payout_swap_fallback` is emitted with the computed `min_out`.
+5. If `swap` returns successfully with an amount below `min_out`, the whole call panics with `SwapOutputBelowMinimum`. The confirmation or claim that triggered the payout reverts. This is the one case where a misbehaving adapter blocks the payout rather than falling back.
+6. On success, the swapped tokens go to the recipient's payout destination (`set_recruiter_payout_address`, #548).
+
+| Situation                                                       | Result                                                                                       |
+| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| No preference, no adapter, or preference equals escrow token   | Escrow token paid to the payout destination. No swap events.                                 |
+| Quote fails or is zero, or the adapter panics in `swap`         | Escrow token paid. `payout_swap_fallback` emitted.                                           |
+| `swap` returns an amount below `min_out`                        | The triggering call panics with `SwapOutputBelowMinimum`.                                    |
+| Swap succeeds                                                   | Preferred token paid to the payout destination. `payout_swapped` emitted.                    |
+| Engagement has `pull_payouts = true`                            | Credits stay in the escrow token. The preference is not applied (see [Pull Payouts](#pull-payouts-547)). |
+| Dispute resolutions (`release_dispute_payout`, `super_arbiter_resolve`, `resolve_escalation_timeout`) | The preference is not applied. Escrow token paid to the payout destination. |
+
+The preference is applied on the confirmation paths (`confirm_milestone`, `confirm_milestone_with_note`, `batch_confirm_milestones`, `force_confirm_milestone`, `accept_partial_confirmation`) and on streamed claims (`claim_streamed_payout`).
+
+Events: `("payout_swapped", recipient)` with `(escrow_token, to_token, amount, amount_out)`; `("payout_swap_fallback", recipient)` with `(escrow_token, to_token, amount, min_out)`.
+
+### Trust assumptions
+
+The swap adapter is set by the admin and is fully trusted. The contract does not check the balance the adapter actually delivers. It checks only the amount that `swap` returns against `min_out`. The adapter receives the escrow tokens for the swap before the output is known, so a malicious or buggy adapter can keep the pulled amount and still report success. Register only an adapter you have reviewed. Use `clear_swap_adapter` to stop all new swaps.
+
 ## Recruiter Acceptance (#569)
 
 `create_engagement` normally locks escrow and makes the engagement `Active` straight away, without the recruiter agreeing to the terms. Setting `EngagementConfig::require_recruiter_acceptance = true` creates it in the `Offered` status instead. The escrow (and any bonds) are still locked at creation.
@@ -1355,7 +1454,7 @@ engagement is quarantined.
 | Withdraw payouts credited by `pull_payouts` engagements | `claim_payouts`                                                                   |
 | Submit several evidence items as one proof              | `submit_proof_root` (Merkle root)                                                 |
 | Withdraw the vested part of a streamed milestone payout | `claim_streamed_payout`                                                           |
-| Get paid in a different token                           | `set_recruiter_payout_token` / `clear_recruiter_payout_token`                     |
+| Get paid in a different token                           | `set_recruiter_payout_token` / `clear_recruiter_payout_token` ([details](#recruiter-payout-tokens-and-the-swap-adapter-458)) |
 | Hand the engagement to another recruiter address        | `propose_recruiter_transfer` (then the company calls `accept_recruiter_transfer`) |
 | Let a second key act for the recruiter                  | `set_recruiter_cosigner`                                                          |
 
@@ -1412,7 +1511,7 @@ holds, so a keeper or either party can run them.
 | Tune limits                                   | `set_max_active_per_company`, `set_max_replacements`                                                                                                                                                             |
 | Configure arbitration                         | `set_super_arbiter`, `set_arbiter_fee`, `set_split_voting_enabled`, `add_arbiter_pool_member`, `remove_arbiter_pool_member`, `set_bond_forfeit_bps`                                                              |
 | Grow or shrink one engagement's arbiter panel | `admin_add_arbiter` / `admin_remove_arbiter`                                                                                                                                                                     |
-| Configure payout-token swaps                  | `set_swap_adapter` / `clear_swap_adapter`                                                                                                                                                                        |
+| Configure payout-token swaps                  | `set_swap_adapter` / `clear_swap_adapter` ([details](#recruiter-payout-tokens-and-the-swap-adapter-458))                                                                                                         |
 | Mark a recruiter as verified                  | `set_recruiter_verified`                                                                                                                                                                                         |
 | Upgrade the contract                          | `set_upgrade_lock_duration`, `propose_upgrade`, then anyone calls `execute_upgrade`                                                                                                                              |
 | Label the deployed version                    | `set_version`                                                                                                                                                                                                    |
