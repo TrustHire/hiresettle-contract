@@ -581,6 +581,8 @@ pub enum DataKey3 {
     /// Admin cap on an engagement's lifetime in ledgers (issue #697).
     /// Absent or `0` means unlimited.
     MaxEngagementDurationLedgers,
+    /// Optional reason recorded when an engagement is cancelled (issue #700).
+    CancellationReason(String),
 }
 
 /// What a [`crate::ProofHistoryEntry`] records (issue #666).

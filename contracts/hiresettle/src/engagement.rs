@@ -1110,6 +1110,50 @@ impl HireSettleContract {
         recruiter: Address,
         engagement_id: String,
     ) {
+        Self::cancel_engagement_internal(env, company, recruiter, engagement_id, None);
+    }
+
+    /// Same as [`Self::cancel_engagement`], but records a reason for the
+    /// cancellation (issue #700). The reason is stored against the engagement
+    /// and emitted in a `cancellation_reason_recorded` event; read it back with
+    /// [`Self::get_cancellation_reason`]. Existing callers of
+    /// `cancel_engagement` are unaffected and record no reason.
+    ///
+    /// # Panics
+    /// - `"CancelReasonEmpty"` — `reason` is empty.
+    /// - `"CancelReasonTooLong"` — `reason` exceeds `MAX_CANCEL_REASON_LEN` bytes.
+    /// - Everything [`Self::cancel_engagement`] panics on.
+    pub fn cancel_engagement_with_reason(
+        env: Env,
+        company: Address,
+        recruiter: Address,
+        engagement_id: String,
+        reason: String,
+    ) {
+        if reason.is_empty() {
+            panic!("CancelReasonEmpty");
+        }
+        if reason.len() > MAX_CANCEL_REASON_LEN {
+            panic!("CancelReasonTooLong");
+        }
+        Self::cancel_engagement_internal(env, company, recruiter, engagement_id, Some(reason));
+    }
+
+    /// Return the reason recorded by [`Self::cancel_engagement_with_reason`],
+    /// or `None` when the engagement was cancelled without one.
+    pub fn get_cancellation_reason(env: Env, engagement_id: String) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::CancellationReason(engagement_id))
+    }
+
+    pub(crate) fn cancel_engagement_internal(
+        env: Env,
+        company: Address,
+        recruiter: Address,
+        engagement_id: String,
+        reason: Option<String>,
+    ) {
         Self::assert_not_paused(&env);
         Self::assert_function_not_paused(&env, FN_CANCEL_ENGAGEMENT);
         Self::assert_engagement_not_paused(&env, &engagement_id);
@@ -1162,6 +1206,21 @@ impl HireSettleContract {
             ),
             refund,
         );
+
+        if let Some(reason) = reason {
+            let key = DataKey3::CancellationReason(engagement_id.clone());
+            env.storage().persistent().set(&key, &reason);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, 100_000, 6_300_000);
+            env.events().publish(
+                (
+                    Symbol::new(&env, "cancellation_reason_recorded"),
+                    engagement_id,
+                ),
+                reason,
+            );
+        }
     }
 
     // ----------------------------------------------------------

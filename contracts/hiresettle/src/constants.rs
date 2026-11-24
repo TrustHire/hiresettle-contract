@@ -130,3 +130,5 @@ pub(crate) const MAX_PROOF_HISTORY_ENTRIES: u32 = 20;
 /// Maximum number of job-category specialization tags a pool arbiter may
 /// carry (issue #683).
 pub(crate) const MAX_ARBITER_SPECIALIZATIONS: u32 = 8;
+/// Maximum length, in bytes, of a cancellation reason (issue #700).
+pub(crate) const MAX_CANCEL_REASON_LEN: u32 = 128;
