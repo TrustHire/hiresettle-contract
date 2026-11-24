@@ -408,6 +408,14 @@ impl HireSettleContract {
             panic!("AmountBelowMinimum");
         }
 
+        // Issue #680: maximum engagement amount validation, using the
+        // token's per-token override if the admin has set one, else the
+        // admin-wide cap. `0` (the default) means unlimited.
+        let max_amount = Self::get_effective_max_amount(env.clone(), token.clone());
+        if max_amount > 0 && total_amount > max_amount {
+            panic!("{}", ERR_AMOUNT_ABOVE_MAXIMUM);
+        }
+
         // Issue #26: reject token if allowlist is active and token not in it.
         let allowlist_enabled: bool = env
             .storage()
@@ -424,6 +432,15 @@ impl HireSettleContract {
             if !is_allowed {
                 panic!("TokenNotAllowed");
             }
+        }
+
+        // Issue #681: reject tokens that have been deprecated (with grace
+        // period) or removed from the allowlist.
+        let token_status = Self::get_token_status_internal(&env, &token);
+        match token_status {
+            TokenStatus::Allowed => {}
+            TokenStatus::Deprecated(_) => panic!("{}", ERR_TOKEN_DEPRECATED),
+            TokenStatus::Removed => panic!("TokenNotAllowed"),
         }
 
         let arbiters = arbiter_setup.arbiters;
@@ -1799,6 +1816,23 @@ impl HireSettleContract {
 
         if amount <= 0 {
             panic!("amount must be greater than zero");
+        }
+
+        // Issue #680: top-ups cannot exceed the effective maximum.
+        let max_amount = Self::get_effective_max_amount(env.clone(), engagement.token.clone());
+        if max_amount > 0 && amount > max_amount {
+            panic!("{}", ERR_AMOUNT_ABOVE_MAXIMUM);
+        }
+
+        // Issue #681: block top-ups on delisted tokens once the grace period
+        // has elapsed.
+        let token_status = Self::get_token_status_internal(env, &engagement.token);
+        if let TokenStatus::Deprecated(sunset_ledger) = &token_status {
+            if env.ledger().sequence() > *sunset_ledger {
+                panic!("{}", ERR_TOKEN_DEPRECATED);
+            }
+        } else if token_status == TokenStatus::Removed {
+            panic!("TokenNotAllowed");
         }
 
         if from_pool {

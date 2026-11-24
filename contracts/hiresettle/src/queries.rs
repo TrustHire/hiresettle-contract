@@ -46,6 +46,67 @@ impl HireSettleContract {
         Self::get_token_min_amount(env.clone(), token).unwrap_or(Self::get_min_amount(env))
     }
 
+    /// Return the maximum engagement amount actually enforced for `token`
+    /// (issue #680): its per-token override if one is set, otherwise the
+    /// admin-wide `MaxEngagementAmount`. This is the ceiling that
+    /// `create_engagement` and `top_up_escrow` enforce. `0` means unlimited.
+    pub fn get_effective_max_amount(env: Env, token: Address) -> i128 {
+        Self::get_token_max_amount(env.clone(), token.clone())
+            .unwrap_or(Self::get_max_amount(env))
+    }
+
+    /// Return the admin-wide maximum engagement amount in stroops; `0`
+    /// disables the cap (issue #680).
+    pub fn get_max_amount(env: Env) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::MaxEngagementAmount))
+            .unwrap_or(0)
+    }
+
+    /// Return the maximum engagement amount override for `token`, if the
+    /// admin set one (issue #680). `None` means the admin-wide value applies.
+    pub fn get_token_max_amount(env: Env, token: Address) -> Option<i128> {
+        let overrides: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenMaxAmounts))
+            .unwrap_or_else(|| Map::new(&env));
+        overrides.get(token)
+    }
+
+    /// Return the admin-configured per-token TVL cap for `token` (issue #679).
+    /// `None` means unlimited.
+    pub fn get_token_tvl_cap(env: Env, token: Address) -> Option<i128> {
+        let caps: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenTvlCaps))
+            .unwrap_or_else(|| Map::new(&env));
+        caps.get(token)
+    }
+
+    /// Return the admin-configured per-token maximum outflow limit in stroops
+    /// for `token` (issue #690). `0` means unlimited / disabled.
+    pub fn get_token_outflow_limit(env: Env, token: Address) -> i128 {
+        let limits: Map<Address, i128> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::TokenOutflowLimits))
+            .unwrap_or_else(|| Map::new(&env));
+        limits.get(token).unwrap_or(0)
+    }
+
+    /// Return the allowlisted-token lifecycle status for `token` (issue #681).
+    pub fn get_token_status(env: Env, token: Address) -> TokenStatus {
+        Self::get_token_status_internal(&env, &token)
+    }
+
+    /// Return the rolling-window outflow state for `token` (issue #690).
+    pub fn get_circuit_breaker_state(env: Env, token: Address) -> CircuitBreakerState {
+        Self::get_circuit_state_internal(&env, &token)
+    }
+
     /// Returns the full engagement record for a given engagement ID.
     ///
     /// # Returns
@@ -1027,6 +1088,158 @@ impl HireSettleContract {
             evidence_window_ledgers: Self::evidence_window_internal(&env),
             commit_reveal_voting: Self::commit_reveal_enabled(&env),
             commit_phase_ledgers: Self::get_commit_phase_ledgers(env.clone()),
+            max_engagement_amount: Self::get_max_amount(env.clone()),
+            token_max_amounts: env
+                .storage()
+                .persistent()
+                .get(&DataKey::Config(ConfigKey::TokenMaxAmounts))
+                .unwrap_or_else(|| Map::new(&env)),
+            token_tvl_caps: env
+                .storage()
+                .persistent()
+                .get(&DataKey::Config(ConfigKey::TokenTvlCaps))
+                .unwrap_or_else(|| Map::new(&env)),
+            token_outflow_limits: env
+                .storage()
+                .persistent()
+                .get(&DataKey::Config(ConfigKey::TokenOutflowLimits))
+                .unwrap_or_else(|| Map::new(&env)),
+        }
+    }
+
+    // ----------------------------------------------------------
+    // UPGRADE / MIGRATION QUERIES (issues #691, #692, #693)
+    // ----------------------------------------------------------
+
+    /// Return the pending WASM upgrade proposal, if any (issues #69, #692).
+    /// Includes the optional `audit_report_hash` supplied to `propose_upgrade`;
+    /// proposals written before that field was introduced are reported with
+    /// `None`. No authentication required and safe to call while paused.
+    pub fn get_pending_upgrade(env: Env) -> Option<UpgradeProposal> {
+        env.storage().instance().get(&DataKey::PendingUpgrade)
+    }
+
+    /// Return the emergency-signer veto tally for the pending upgrade
+    /// (issue #691), or `None` when no votes are outstanding.
+    pub fn get_upgrade_veto_tally(env: Env) -> Option<UpgradeVetoTally> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::UpgradeVetoTally)
+    }
+
+    /// Stored storage layout version (issue #693). Fresh deployments report
+    /// `EXPECTED_STORAGE_SCHEMA_VERSION`; pre-versioning deployments report 0
+    /// until `migrate` is called.
+    pub fn get_storage_schema_version(env: Env) -> u32 {
+        Self::get_storage_schema_version_internal(&env)
+    }
+
+    // ----------------------------------------------------------
+    // FEE QUOTE (issue #542)
+    // ----------------------------------------------------------
+
+    /// Preview the complete fee breakdown for confirming `milestone_index`.
+    ///
+    /// Every component is computed with the same helpers `confirm_milestone`
+    /// and `release_dispute_payout` use (`payout_fee_bps`,
+    /// `platform_fee_amount`, `milestone_gross_amount`), so a quote cannot drift
+    /// from the amounts actually transferred. This is a pure read: no storage
+    /// writes, no auth, and deliberately no pause guard.
+    pub fn get_fee_quote(
+        env: Env,
+        engagement_id: String,
+        milestone_index: u32,
+    ) -> FeeQuote {
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        let milestone = Self::get_milestone_or_panic(&engagement, milestone_index);
+
+        let gross_amount = Self::milestone_gross_amount(&env, &engagement, milestone_index);
+        let payment = gross_amount - milestone.replacement_paid_out;
+
+        // Resolve the base rate through the same precedence as `payout_fee_bps`
+        // so the reported source always matches the effective rate below.
+        let (base_bps_source, base_bps) = if Self::is_fee_waived_internal(&env, &engagement_id) {
+            (FeeBpsSource::Waived, 0u32)
+        } else if let Some(company_bps) = env.storage().persistent().get::<DataKey2, u32>(
+            &DataKey2::CompanyPlatformFee(engagement.company.clone()),
+        ) {
+            (FeeBpsSource::Company, company_bps)
+        } else {
+            let global_bps = Self::get_platform_fee_internal(&env).bps;
+            let token_bps = Self::token_base_bps(&env, &engagement.token, global_bps);
+            let snapshot: Option<u32> = env
+                .storage()
+                .persistent()
+                .get(&DataKey2::FeeTierSnapshot(engagement_id.clone()));
+            if let Some(snapshot_bps) = snapshot {
+                (FeeBpsSource::Snapshot, snapshot_bps)
+            } else {
+                let tier_bps =
+                    Self::resolve_platform_fee_bps(&env, token_bps, engagement.total_amount);
+                if tier_bps != token_bps {
+                    (FeeBpsSource::Tier, tier_bps)
+                } else if token_bps != global_bps {
+                    (FeeBpsSource::Token, token_bps)
+                } else {
+                    (FeeBpsSource::Global, global_bps)
+                }
+            }
+        };
+
+        // The rate actually charged at confirmation, including referral discount.
+        let effective_bps = Self::payout_fee_bps(&env, &engagement_id, &engagement);
+        let referral_discount = base_bps.saturating_sub(effective_bps);
+
+        let platform_fee = Self::platform_fee_amount(&env, &engagement_id, payment, effective_bps);
+        let bps_fee = if payment > 0 {
+            (payment * effective_bps as i128) / 10_000
+        } else {
+            0
+        };
+        let floor_adjustment = platform_fee.saturating_sub(bps_fee).max(0);
+
+        // Mirror `collect_platform_fee` without mutating the stored rebate.
+        let rebate_key =
+            DataKey2::CompanyRebate(engagement.company.clone(), engagement.token.clone());
+        let existing_rebate: i128 = env.storage().persistent().get(&rebate_key).unwrap_or(0);
+        let offset = if existing_rebate < platform_fee {
+            existing_rebate
+        } else {
+            platform_fee
+        };
+        let remaining = platform_fee - offset;
+        let rebate_bps: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Config(ConfigKey::FeeRebateBps))
+            .unwrap_or(0u32);
+        let rebate_credit = (remaining * rebate_bps as i128) / 10_000;
+
+        // A confirmation always sees `ProofSubmitted`, so the arbiter fee is
+        // only surfaced for a milestone currently in dispute. It is charged on
+        // the after-platform amount, exactly as in `release_dispute_payout`.
+        let arbiter_fee = if milestone.status == MilestoneStatus::Disputed {
+            let arbiter_bps: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::Config(ConfigKey::ArbiterFee))
+                .unwrap_or(0u32);
+            Some(((payment - platform_fee) * arbiter_bps as i128) / 10_000)
+        } else {
+            None
+        };
+
+        let net_recruiter_amount = payment - platform_fee - arbiter_fee.unwrap_or(0);
+
+        FeeQuote {
+            gross_amount,
+            base_bps_source,
+            effective_bps,
+            referral_discount,
+            floor_adjustment,
+            rebate_credit,
+            arbiter_fee,
+            net_recruiter_amount,
         }
     }
 
