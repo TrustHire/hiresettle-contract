@@ -151,7 +151,26 @@ impl HireSettleContract {
             .unwrap_or(false)
     }
 
+    /// Stored storage layout version (issue #693). Deployments predating
+    /// versioning are treated as `LEGACY_STORAGE_SCHEMA_VERSION`.
+    pub(crate) fn get_storage_schema_version_internal(env: &Env) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::StorageSchemaVersion)
+            .unwrap_or(LEGACY_STORAGE_SCHEMA_VERSION)
+    }
+
+    /// Reject every state-changing call until `migrate` has brought the stored
+    /// layout up to the version this WASM understands (issue #693).
+    pub(crate) fn assert_storage_schema_current(env: &Env) {
+        let stored = Self::get_storage_schema_version_internal(env);
+        if stored < EXPECTED_STORAGE_SCHEMA_VERSION {
+            panic!("StorageSchemaOutdated");
+        }
+    }
+
     pub(crate) fn assert_not_paused(env: &Env) {
+        Self::assert_storage_schema_current(env);
         if Self::is_paused_internal(env) {
             panic!("ContractPaused");
         }

@@ -48,6 +48,13 @@ impl HireSettleContract {
             &DataKey::Config(ConfigKey::MinEngagementAmount),
             &DEFAULT_MIN_ENGAGEMENT_AMOUNT,
         );
+
+        // Issue #693: fresh deployments start at the current schema version so
+        // they never need a migration; upgraded contracts keep their old value.
+        env.storage().persistent().set(
+            &DataKey::StorageSchemaVersion,
+            &EXPECTED_STORAGE_SCHEMA_VERSION,
+        );
     }
 
     // ----------------------------------------------------------
@@ -752,6 +759,7 @@ impl HireSettleContract {
     /// Panics with "VersionTooLong" if version exceeds 32 chars.
     /// Panics with "unauthorized" if caller is not admin.
     pub fn set_version(env: Env, admin: Address, version: String) {
+        Self::assert_storage_schema_current(&env);
         Self::assert_admin(&env, &admin);
 
         if version.len() > MAX_VERSION_LENGTH {
@@ -1803,19 +1811,25 @@ impl HireSettleContract {
     /// Admin proposes a WASM upgrade with a mandatory time-lock (issue #69).
     /// The pending upgrade is stored and becomes executable after `lock_duration` ledgers.
     /// Default time-lock is 17,280 ledgers (~1 day); use `set_upgrade_lock_duration` to change it.
-    /// Emits `upgrade_proposed` with `(new_wasm_hash, execute_after_ledger)`.
+    /// Emits `upgrade_proposed` with `(new_wasm_hash, execute_after_ledger, audit_report_hash)`.
     ///
     /// # Repeated calls (issue #185)
     /// Calling `propose_upgrade` again while a previous proposal is still pending
     /// **overwrites** it and **resets the timelock countdown** — the new
     /// `execute_after_ledger` is computed from the current ledger, not the
-    /// original proposal's. This is intentional: it lets the admin correct or
-    /// retract a bad proposal (e.g. wrong wasm hash) without waiting out the
-    /// original lock. The tradeoff is that a compromised admin key can grief
-    /// legitimate upgrades by indefinitely re-proposing, or delay execution by
-    /// repeatedly re-proposing the same hash — this is accepted as inherent to
-    /// admin-key trust and is not separately mitigated here.
-    pub fn propose_upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+    /// original proposal's. It also clears any emergency-signer veto votes
+    /// cast against the replaced proposal (issue #691).
+    ///
+    /// # Audit report (issue #692)
+    /// `audit_report_hash` is optional; `None` is stored and echoed in every
+    /// upgrade event so indexers need no special case for un-audited upgrades.
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+        audit_report_hash: Option<String>,
+    ) {
+        Self::assert_storage_schema_current(&env);
         Self::assert_admin(&env, &admin);
 
         let lock_duration: u32 = env
@@ -1829,24 +1843,115 @@ impl HireSettleContract {
         let proposal = UpgradeProposal {
             new_wasm_hash: new_wasm_hash.clone(),
             execute_after_ledger,
+            audit_report_hash: audit_report_hash.clone(),
         };
 
         env.storage()
             .instance()
             .set(&DataKey::PendingUpgrade, &proposal);
+        // Issue #691: a replacement proposal starts with a clean veto slate.
+        env.storage()
+            .persistent()
+            .remove(&DataKey::UpgradeVetoTally);
 
         env.events().publish(
             (Symbol::new(&env, "upgrade_proposed"),),
-            (new_wasm_hash, execute_after_ledger),
+            (new_wasm_hash, execute_after_ledger, audit_report_hash),
         );
+    }
+
+    /// Emergency signer veto of the pending upgrade (issue #691).
+    ///
+    /// Any configured emergency signer may call this while the timelock is
+    /// running. Once M-of-N distinct signers have voted, the pending proposal
+    /// is cancelled and can never be executed. Votes are reset by a replacement
+    /// proposal, by execution, by cancellation, and after the signer vote
+    /// window expires.
+    pub fn veto_upgrade(env: Env, signer: Address) {
+        Self::assert_storage_schema_current(&env);
+        signer.require_auth();
+
+        let proposal: UpgradeProposal = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingUpgrade)
+            .unwrap_or_else(|| panic!("no pending upgrade"));
+
+        if env.ledger().sequence() >= proposal.execute_after_ledger {
+            panic!("UpgradeLockElapsed");
+        }
+
+        let cfg: EmergencySignerConfig = env
+            .storage()
+            .persistent()
+            .get(&DataKey::EmergencySigners)
+            .unwrap_or_else(|| panic!("no emergency signers"));
+
+        let mut member = false;
+        for i in 0..cfg.signers.len() {
+            if cfg.signers.get(i).unwrap() == signer {
+                member = true;
+                break;
+            }
+        }
+        if !member {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+
+        let now = env.ledger().sequence();
+        let mut tally: UpgradeVetoTally = env
+            .storage()
+            .persistent()
+            .get(&DataKey::UpgradeVetoTally)
+            .unwrap_or(UpgradeVetoTally {
+                voters: Vec::new(&env),
+                started_at_ledger: now,
+            });
+
+        if now > tally.started_at_ledger + cfg.vote_window_ledgers {
+            tally = UpgradeVetoTally {
+                voters: Vec::new(&env),
+                started_at_ledger: now,
+            };
+        }
+
+        for voter in tally.voters.iter() {
+            if voter == signer {
+                panic!("already voted");
+            }
+        }
+        tally.voters.push_back(signer.clone());
+
+        let votes = tally.voters.len();
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_vetoed"),),
+            (signer, votes, cfg.threshold),
+        );
+
+        if votes >= cfg.threshold {
+            env.storage().instance().remove(&DataKey::PendingUpgrade);
+            env.storage()
+                .persistent()
+                .remove(&DataKey::UpgradeVetoTally);
+            env.events().publish(
+                (Symbol::new(&env, "upgrade_veto_threshold_reached"),),
+                (proposal.new_wasm_hash, votes, proposal.audit_report_hash),
+            );
+        } else {
+            env.storage()
+                .persistent()
+                .set(&DataKey::UpgradeVetoTally, &tally);
+        }
     }
 
     /// Execute a pending upgrade after the time-lock has elapsed (issue #69).
     /// Permissionless — anyone may call this once `execute_after_ledger` is reached.
     /// Panics with `"no pending upgrade"` if no proposal exists.
     /// Panics with `"UpgradeLockNotElapsed"` if called before the time-lock expires.
-    /// Emits `upgrade_executed` before applying the WASM swap.
+    /// Emits `upgrade_executed` before applying the WASM swap. Once executed,
+    /// `veto_upgrade` is unavailable because the proposal is gone (issue #691).
     pub fn execute_upgrade(env: Env) {
+        Self::assert_storage_schema_current(&env);
         let proposal: UpgradeProposal = env
             .storage()
             .instance()
@@ -1858,10 +1963,13 @@ impl HireSettleContract {
         }
 
         env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::UpgradeVetoTally);
 
         env.events().publish(
             (Symbol::new(&env, "upgrade_executed"),),
-            proposal.new_wasm_hash.clone(),
+            (proposal.new_wasm_hash.clone(), proposal.audit_report_hash),
         );
 
         env.deployer()
@@ -1871,13 +1979,15 @@ impl HireSettleContract {
     /// Admin cancels a pending upgrade proposal (issue #69).
     /// Removes the pending upgrade from storage before the time-lock expires.
     /// Panics with `"no pending upgrade"` if no proposal exists.
-    /// Emits `upgrade_cancelled` with `(new_wasm_hash,)` of the cancelled proposal.
+    /// Emits `upgrade_cancelled` with `(new_wasm_hash, audit_report_hash)` of
+    /// the cancelled proposal.
     ///
     /// # Rationale
     /// This allows the admin to cancel a pending upgrade if they discover an issue
     /// with the proposed WASM hash (e.g., wrong hash, vulnerability found) without
     /// having to wait for the time-lock to expire or re-proposing to overwrite it.
     pub fn cancel_upgrade(env: Env, admin: Address) {
+        Self::assert_storage_schema_current(&env);
         Self::assert_admin(&env, &admin);
 
         let proposal: UpgradeProposal = env
@@ -1887,15 +1997,19 @@ impl HireSettleContract {
             .unwrap_or_else(|| panic!("no pending upgrade"));
 
         env.storage().instance().remove(&DataKey::PendingUpgrade);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::UpgradeVetoTally);
 
         env.events().publish(
             (Symbol::new(&env, "upgrade_cancelled"),),
-            proposal.new_wasm_hash,
+            (proposal.new_wasm_hash, proposal.audit_report_hash),
         );
     }
 
     /// Admin sets the upgrade time-lock duration in ledgers (issue #69).
     pub fn set_upgrade_lock_duration(env: Env, admin: Address, ledgers: u32) {
+        Self::assert_storage_schema_current(&env);
         Self::assert_admin(&env, &admin);
         env.storage()
             .instance()
@@ -1911,6 +2025,92 @@ impl HireSettleContract {
             .instance()
             .get(&DataKey::Config(ConfigKey::UpgradeLockDuration))
             .unwrap_or(LEDGERS_PER_DAY)
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #693 — POST-UPGRADE STORAGE MIGRATION HOOK
+    // ----------------------------------------------------------
+
+    /// Bring stored records up to `target_version`, running each versioned
+    /// migration step exactly once. Admin-only and deliberately exempt from
+    /// the `StorageSchemaOutdated` guard so it can repair an old deployment.
+    ///
+    /// Each step is idempotent: re-running a step after a partial failure (or
+    /// with an already-migrated key present) leaves storage unchanged. A target
+    /// that is not newer than the stored version, or newer than this WASM
+    /// understands, is rejected rather than silently skipping steps.
+    pub fn migrate(env: Env, admin: Address, target_version: u32) {
+        Self::assert_admin(&env, &admin);
+
+        let current = Self::get_storage_schema_version_internal(&env);
+        if target_version <= current {
+            panic!("MigrationTargetNotNewer");
+        }
+        if target_version > EXPECTED_STORAGE_SCHEMA_VERSION {
+            panic!("MigrationTargetUnsupported");
+        }
+
+        let mut version = current;
+        while version < target_version {
+            version += 1;
+            match version {
+                1 => Self::migration_step_v1(&env),
+                _ => panic!("UnknownMigrationStep"),
+            }
+        }
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::StorageSchemaVersion, &version);
+        env.events()
+            .publish((Symbol::new(&env, "storage_migrated"),), (current, version));
+    }
+
+    /// Idempotent v0 -> v1 step: materialise defaults that older deployments
+    /// relied on being absent, and drop veto state left by an interrupted
+    /// upgrade proposal. Safe to call more than once.
+    pub(crate) fn migration_step_v1(env: &Env) {
+        if env
+            .storage()
+            .persistent()
+            .get::<DataKey, u32>(&DataKey::StorageSchemaVersion)
+            .is_none()
+        {
+            env.storage()
+                .persistent()
+                .set(&DataKey::StorageSchemaVersion, &LEGACY_STORAGE_SCHEMA_VERSION);
+        }
+
+        if env
+            .storage()
+            .persistent()
+            .get::<DataKey, PlatformFee>(&DataKey::PlatformFee)
+            .is_none()
+        {
+            let treasury = Self::get_admin_internal(env);
+            env.storage().persistent().set(
+                &DataKey::PlatformFee,
+                &PlatformFee {
+                    bps: 0,
+                    treasury,
+                },
+            );
+        }
+
+        if env
+            .storage()
+            .instance()
+            .get::<DataKey, u32>(&DataKey::Config(ConfigKey::UpgradeLockDuration))
+            .is_none()
+        {
+            env.storage()
+                .instance()
+                .set(&DataKey::Config(ConfigKey::UpgradeLockDuration), &LEDGERS_PER_DAY);
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::UpgradeVetoTally);
     }
 
     // ----------------------------------------------------------
