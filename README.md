@@ -876,6 +876,84 @@ So the shares always add up to the full fee. While a list is set, `PlatformFee.t
 
 Events: one `("platform_fee_collected", engagement_id)` per treasury, in list order, with `(milestone_index, share, treasury)`. `share` is what that treasury received. With no list set, the single event still reports `(milestone_index, fee_amount, treasury)` as before. `set_fee_treasuries` emits `("fee_treasuries_set",)` with the list; `clear_fee_treasuries` emits `("fee_treasuries_cleared",)`.
 
+### Platform fee floor (#478)
+
+The admin can enforce a minimum absolute fee per payout, ensuring that even small or low-percentage fees meet a configured threshold. The floor raises the basis-point-derived fee amount without ever exceeding the payout itself.
+
+| Function                                | Caller | Description                                                             | Panics                                                         |
+| --------------------------------------- | ------ | ----------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `set_platform_fee_floor(admin, amount)` | Admin  | Set the minimum platform fee in raw token units (stroops). Must be ≥ 0. | `ContractPaused`, `NoAdmin`, `unauthorized`, `InvalidFeeFloor` |
+| `get_platform_fee_floor()` → `i128`     | Anyone | Return the current floor; `0` when unset.                               | —                                                              |
+
+Behaviour:
+
+- **Applies after basis-point calculation.** The contract computes `fee = payment × bps ÷ 10_000`, then raises it to the floor: `actual_fee = max(fee, floor)`.
+- **Never exceeds the payout.** The final fee is capped at `payment`, so `actual_fee = min(max(fee, floor), payment)`.
+- **Waived engagements still pay zero.** The floor does not override a [fee waiver](#fee-waiver); waived engagements remain at `0` regardless of the floor setting.
+- **Works with all fee variations.** The floor applies on top of company overrides, per-token overrides, fee tiers, tier snapshots, and referral discounts. It affects the absolute fee amount after the basis-point rate is resolved.
+- **Single global floor.** The same floor applies to every engagement and every token. Per-token or per-engagement floors are not supported.
+
+Typical use cases:
+
+- Ensuring a minimum revenue per transaction to cover operational costs.
+- Preventing dust fees on engagements with small `total_amount` or low-percentage milestones.
+
+Storage: `DataKey2::PlatformFeeFloor` → `i128`, persistent.
+
+Event: `("platform_fee_floor_set",)` with data `floor_amount`.
+
+```rust
+// Admin sets a floor of 5 million stroops (0.5 XLM for a 7-decimal token)
+client.set_platform_fee_floor(&admin, &5_000_000);
+assert_eq!(client.get_platform_fee_floor(), 5_000_000);
+
+// A 1% fee on a 300 XLM payout would be 3 XLM, but the floor raises it to 5 XLM
+// if 3 XLM < floor. The floor never lowers a fee that is already higher.
+```
+
+### Per-token platform fee override (#479)
+
+The admin can configure a base platform-fee rate that applies to a specific token, replacing the global `PlatformFee.bps` for engagements using that token. This allows differentiated pricing across currencies without requiring per-company overrides.
+
+| Function                                        | Caller | Description                                                                           | Panics                                                    |
+| ----------------------------------------------- | ------ | ------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `set_token_platform_fee(admin, token, bps)`     | Admin  | Set the base fee for `token` in basis points. Same 500 bps cap as `set_platform_fee`. | `ContractPaused`, `NoAdmin`, `unauthorized`, `FeeTooHigh` |
+| `remove_token_platform_fee(admin, token)`       | Admin  | Remove the override; the token falls back to the global rate and fee tiers.           | `ContractPaused`, `NoAdmin`, `unauthorized`               |
+| `get_token_platform_fee(token)` → `Option<u32>` | Anyone | Return the override for `token`, if any.                                              | —                                                         |
+
+Base-rate precedence (highest to lowest):
+
+1. Engagement [fee waiver](#fee-waiver) — the fee is `0`.
+2. [Per-company fee override](#per-company-fee-override-539) — bypasses everything below, including per-token overrides and fee tiers.
+3. **Per-token override** — replaces the global `bps` and is then run through the [fee tiers](#fee-tiers-250) (live or [snapshotted](#snapshot-mode-505)) if configured. A matching tier adjusts the token's base `bps`.
+4. Global `PlatformFee.bps` — run through the fee tiers (if set) or used directly.
+
+After the base rate is resolved, the [referral discount](#referral-discount-251), [fee floor](#platform-fee-floor-478), and [fee rebate](#fee-rebate-475) still apply in that order.
+
+Typical use cases:
+
+- Charging a higher fee for volatile or less-liquid tokens to cover swap costs.
+- Offering a promotional rate for a new token to encourage adoption.
+- Differentiating fees between fiat-pegged stablecoins and native blockchain assets.
+
+Storage: `DataKey2::TokenPlatformFee(token)` → `u32`, persistent.
+
+Events: `("token_platform_fee_set",)` with `(token, bps)`; `("token_platform_fee_removed",)` with `token`.
+
+```rust
+// Admin sets a 2% fee for USDC, while the global rate remains 1%
+let usdc = Address::from_string(&env, "USDC_CONTRACT_ADDRESS");
+client.set_token_platform_fee(&admin, &usdc, &200);  // 200 bps = 2%
+assert_eq!(client.get_token_platform_fee(&usdc), Some(200));
+
+// Engagements using USDC now pay 2% unless overridden by a company-specific rate
+// or a matching fee tier. Engagements using other tokens still pay the global 1%.
+
+// Admin removes the override; USDC falls back to the global rate
+client.remove_token_platform_fee(&admin, &usdc);
+assert_eq!(client.get_token_platform_fee(&usdc), None);
+```
+
 ### `DataKey`
 
 Contract storage is keyed by three `#[contracttype]` enums, all defined in
@@ -1236,13 +1314,13 @@ Events: `("engagement_offered", engagement_id)` with `(company, recruiter, total
 
 While an engagement is `Offered`, the recruiter can propose different terms instead of accepting or ignoring the offer.
 
-| Function | Caller | Description | Panics |
-| --- | --- | --- | --- |
-| `counter_offer(recruiter, engagement_id, total_amount, milestone_percents)` | Recruiter or their cosigner (any eligible recruiter on an open offer) | Propose a new `total_amount` and a new `payment_percent` per milestone, by index. Only one counter-offer can be pending per engagement. | `EngagementNotOffered`, `unauthorized`, `RecruiterNotEligible`, `CounterOfferPending`, `AmountBelowMinimum`, `CounterOfferMilestoneMismatch`, `milestone percentages must sum to 100`, `CounterOfferUnchanged` |
-| `accept_counter_offer(company, engagement_id)` | Company or its cosigner | Apply the counter and make the engagement `Active`, in one call. The escrow difference moves at the same time: an increase is pulled from the caller (from the company pool if the engagement is pool-funded), and a decrease is returned to the company (to its pool if pool-funded). If the pool can't cover an increase, nothing changes. With `snapshot_fee_tier`, the fee tier is re-resolved against the new total. | `EngagementNotOffered`, `unauthorized`, `NoCounterOffer`, `InsufficientCompanyBalance` |
-| `reject_counter_offer(company, engagement_id)` | Company or its cosigner | Discard the counter. The offer stays `Offered` on its original terms. | `EngagementNotOffered`, `unauthorized`, `NoCounterOffer` |
-| `withdraw_counter_offer(recruiter, engagement_id)` | The countering recruiter or its cosigner | Discard your own counter so you can make a different one. | `NoCounterOffer`, `unauthorized` |
-| `get_counter_offer(engagement_id)` → `Option<CounterOffer>` | Anyone | The pending counter, if any. | — |
+| Function                                                                    | Caller                                                                | Description                                                                                                                                                                                                                                                                                                                                                                                                               | Panics                                                                                                                                                                                                         |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `counter_offer(recruiter, engagement_id, total_amount, milestone_percents)` | Recruiter or their cosigner (any eligible recruiter on an open offer) | Propose a new `total_amount` and a new `payment_percent` per milestone, by index. Only one counter-offer can be pending per engagement.                                                                                                                                                                                                                                                                                   | `EngagementNotOffered`, `unauthorized`, `RecruiterNotEligible`, `CounterOfferPending`, `AmountBelowMinimum`, `CounterOfferMilestoneMismatch`, `milestone percentages must sum to 100`, `CounterOfferUnchanged` |
+| `accept_counter_offer(company, engagement_id)`                              | Company or its cosigner                                               | Apply the counter and make the engagement `Active`, in one call. The escrow difference moves at the same time: an increase is pulled from the caller (from the company pool if the engagement is pool-funded), and a decrease is returned to the company (to its pool if pool-funded). If the pool can't cover an increase, nothing changes. With `snapshot_fee_tier`, the fee tier is re-resolved against the new total. | `EngagementNotOffered`, `unauthorized`, `NoCounterOffer`, `InsufficientCompanyBalance`                                                                                                                         |
+| `reject_counter_offer(company, engagement_id)`                              | Company or its cosigner                                               | Discard the counter. The offer stays `Offered` on its original terms.                                                                                                                                                                                                                                                                                                                                                     | `EngagementNotOffered`, `unauthorized`, `NoCounterOffer`                                                                                                                                                       |
+| `withdraw_counter_offer(recruiter, engagement_id)`                          | The countering recruiter or its cosigner                              | Discard your own counter so you can make a different one.                                                                                                                                                                                                                                                                                                                                                                 | `NoCounterOffer`, `unauthorized`                                                                                                                                                                               |
+| `get_counter_offer(engagement_id)` → `Option<CounterOffer>`                 | Anyone                                                                | The pending counter, if any.                                                                                                                                                                                                                                                                                                                                                                                              | —                                                                                                                                                                                                              |
 
 `accept_engagement`, `withdraw_offer` and `expire_engagement` all discard a pending counter. Accepting a counter makes the engagement active because the recruiter has already agreed to those terms by proposing them.
 
@@ -1267,12 +1345,12 @@ Events: `open_offer_created` with `(company, eligible_recruiters, total_amount)`
 
 Every token the contract holds is in one of six tracked buckets, and each bucket keeps a running total per token: engagement escrow (`get_token_tvl`), pooled company balances, pull-payout credits, unsettled bonds, redeemable fee rebates, and unclaimed streamed payouts. Each engagement also tracks its own escrow balance and a cumulative `refunded` amount. `refunded` covers money returned to the company on cancellation, expiry, a withdrawn offer, or a no-show forfeit, none of which is added to `released_amount`. `get_escrow_balance` now returns `total_amount - released_amount - refunded`, so a cancelled engagement reports `0`.
 
-| Function | Caller | Description |
-| --- | --- | --- |
-| `check_escrow_invariants(engagement_id)` → `InvariantReport` | Anyone; read-only, works while paused | Compares the engagement's tracked escrow with `total_amount - released - refunded`. Also checks that the amounts are in range, the percentages sum to 100, the milestone states match the engagement status, and that a terminal engagement has no escrow left (a `Completed` engagement may keep at most one unit of rounding dust per milestone). `ok` is true only if every check passes. |
-| `check_token_invariants(token)` → `TokenInvariantReport` | Anyone; read-only, works while paused | Sums the per-engagement escrow, bonds and streams over the token's engagements and compares each sum with its running total. Then compares the total of all tracked buckets with the token balance the contract actually holds. `surplus > 0` means stray tokens and does not fail the check. `surplus < 0` is a shortfall and does. The query walks every engagement in the token, so run it in simulation. |
-| `get_stray_token_balance(token)` → `i128` | Anyone | Amount `recover_stray_tokens` would transfer right now. |
-| `recover_stray_tokens(admin, token, to)` → `i128` | Admin | Transfers `contract balance − tracked total` to `to`. Tracked funds can't be withdrawn this way. When a config cosigner is set and fn id `7` (`FN_RECOVER_STRAY_TOKENS`) is in `set_sensitive_functions`, the call only opens a pending config change and returns `0`. The transfer then happens on `accept_config_change`, using the stray amount at that moment. Panics: `ContractPaused`, `unauthorized`, `InvalidRecipient`, `NoStrayTokens`. Emits `("stray_tokens_recovered", token)` with `(to, amount)`. |
+| Function                                                     | Caller                                | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------ | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `check_escrow_invariants(engagement_id)` → `InvariantReport` | Anyone; read-only, works while paused | Compares the engagement's tracked escrow with `total_amount - released - refunded`. Also checks that the amounts are in range, the percentages sum to 100, the milestone states match the engagement status, and that a terminal engagement has no escrow left (a `Completed` engagement may keep at most one unit of rounding dust per milestone). `ok` is true only if every check passes.                                                                                                                     |
+| `check_token_invariants(token)` → `TokenInvariantReport`     | Anyone; read-only, works while paused | Sums the per-engagement escrow, bonds and streams over the token's engagements and compares each sum with its running total. Then compares the total of all tracked buckets with the token balance the contract actually holds. `surplus > 0` means stray tokens and does not fail the check. `surplus < 0` is a shortfall and does. The query walks every engagement in the token, so run it in simulation.                                                                                                     |
+| `get_stray_token_balance(token)` → `i128`                    | Anyone                                | Amount `recover_stray_tokens` would transfer right now.                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `recover_stray_tokens(admin, token, to)` → `i128`            | Admin                                 | Transfers `contract balance − tracked total` to `to`. Tracked funds can't be withdrawn this way. When a config cosigner is set and fn id `7` (`FN_RECOVER_STRAY_TOKENS`) is in `set_sensitive_functions`, the call only opens a pending config change and returns `0`. The transfer then happens on `accept_config_change`, using the stray amount at that moment. Panics: `ContractPaused`, `unauthorized`, `InvalidRecipient`, `NoStrayTokens`. Emits `("stray_tokens_recovered", token)` with `(to, amount)`. |
 
 The running totals only count balances created after they were introduced. On a contract upgraded from an earlier version, don't call `recover_stray_tokens` until `check_token_invariants` reports `totals_consistent`.
 
@@ -2365,28 +2443,28 @@ The contract emits Soroban events for all state transitions. Events are grouped 
 
 ### Engagement Lifecycle
 
-| Event                   | Topics          | Payload                                    | Trigger                                                 |
-| ----------------------- | --------------- | ------------------------------------------ | ------------------------------------------------------- |
-| `engagement_created`    | `engagement_id` | `engagement_id`                            | `create_engagement`                                     |
-| `engagement_offered`    | `engagement_id` | `(company, recruiter, total_amount)`       | `create_engagement` with `require_recruiter_acceptance` |
-| `engagement_accepted`   | `engagement_id` | `recruiter`                                | `accept_engagement`                                     |
-| `offer_withdrawn`       | `engagement_id` | `refund`                                   | `withdraw_offer`                                        |
-| `open_offer_created`    | `engagement_id` | `(company, eligible_recruiters, total_amount)` | `create_open_engagement`                            |
-| `open_offer_claimed`    | `engagement_id` | `recruiter`                                | `accept_engagement` on an open offer                    |
-| `counter_offer_proposed` | `engagement_id` | `(recruiter, total_amount, milestone_percents)` | `counter_offer`                                    |
-| `counter_offer_accepted` | `engagement_id` | `(company, old_total, new_total)`         | `accept_counter_offer`                                  |
-| `counter_offer_rejected` | `engagement_id` | `(company, recruiter)`                    | `reject_counter_offer`                                  |
-| `counter_offer_withdrawn` | `engagement_id` | `recruiter`                              | `withdraw_counter_offer`                                |
-| `stray_tokens_recovered` | `token`        | `(to, amount)`                             | `recover_stray_tokens` / its accepted config change     |
-| `payout_credited`       | `recipient`     | `(engagement_id, token, amount)`           | Any payout on a `pull_payouts` engagement               |
-| `payouts_claimed`       | `recruiter`     | `(token, amount)`                          | `claim_payouts`                                         |
-| `engagement_cancelled`  | `engagement_id` | `refund`                                   | `cancel_engagement` (company + recruiter)               |
-| `engagement_expired`    | `engagement_id` | `refund`                                   | `expire_engagement` (permissionless keeper)             |
-| `engagement_completed`  | `engagement_id` | `(engagement_id, released_amount, ledger)` | Final milestone confirmed                               |
-| `escrow_topped_up`      | `engagement_id` | `(amount, total_amount)`                   | `top_up_escrow`                                         |
-| `company_transferred`   | `engagement_id` | `(old_company, new_company)`               | `transfer_company_role`                                 |
-| `recruiter_transferred` | `engagement_id` | `(old_recruiter, new_recruiter)`           | `accept_recruiter_transfer`                             |
-| `status_changed`        | `engagement_id` | `(old_status, new_status)`                 | Any engagement status transition                        |
+| Event                     | Topics          | Payload                                         | Trigger                                                 |
+| ------------------------- | --------------- | ----------------------------------------------- | ------------------------------------------------------- |
+| `engagement_created`      | `engagement_id` | `engagement_id`                                 | `create_engagement`                                     |
+| `engagement_offered`      | `engagement_id` | `(company, recruiter, total_amount)`            | `create_engagement` with `require_recruiter_acceptance` |
+| `engagement_accepted`     | `engagement_id` | `recruiter`                                     | `accept_engagement`                                     |
+| `offer_withdrawn`         | `engagement_id` | `refund`                                        | `withdraw_offer`                                        |
+| `open_offer_created`      | `engagement_id` | `(company, eligible_recruiters, total_amount)`  | `create_open_engagement`                                |
+| `open_offer_claimed`      | `engagement_id` | `recruiter`                                     | `accept_engagement` on an open offer                    |
+| `counter_offer_proposed`  | `engagement_id` | `(recruiter, total_amount, milestone_percents)` | `counter_offer`                                         |
+| `counter_offer_accepted`  | `engagement_id` | `(company, old_total, new_total)`               | `accept_counter_offer`                                  |
+| `counter_offer_rejected`  | `engagement_id` | `(company, recruiter)`                          | `reject_counter_offer`                                  |
+| `counter_offer_withdrawn` | `engagement_id` | `recruiter`                                     | `withdraw_counter_offer`                                |
+| `stray_tokens_recovered`  | `token`         | `(to, amount)`                                  | `recover_stray_tokens` / its accepted config change     |
+| `payout_credited`         | `recipient`     | `(engagement_id, token, amount)`                | Any payout on a `pull_payouts` engagement               |
+| `payouts_claimed`         | `recruiter`     | `(token, amount)`                               | `claim_payouts`                                         |
+| `engagement_cancelled`    | `engagement_id` | `refund`                                        | `cancel_engagement` (company + recruiter)               |
+| `engagement_expired`      | `engagement_id` | `refund`                                        | `expire_engagement` (permissionless keeper)             |
+| `engagement_completed`    | `engagement_id` | `(engagement_id, released_amount, ledger)`      | Final milestone confirmed                               |
+| `escrow_topped_up`        | `engagement_id` | `(amount, total_amount)`                        | `top_up_escrow`                                         |
+| `company_transferred`     | `engagement_id` | `(old_company, new_company)`                    | `transfer_company_role`                                 |
+| `recruiter_transferred`   | `engagement_id` | `(old_recruiter, new_recruiter)`                | `accept_recruiter_transfer`                             |
+| `status_changed`          | `engagement_id` | `(old_status, new_status)`                      | Any engagement status transition                        |
 
 ### Milestone
 
@@ -2624,14 +2702,14 @@ The arbiter fee is taken from the amount **after** the platform fee, not from `g
 
 Every `÷` above is Rust integer division on non-negative `i128`, which **rounds down**. Wherever the contract computes a remainder by subtraction (`gross − fee`, `net − primary`, `fee − credit`), the party on the subtracted side receives the rounding dust. So:
 
-| Division                            | Rounded down       | Receives the dust                                                  |
-| ----------------------------------- | ------------------ | ------------------------------------------------------------------ |
-| Platform / arbiter fee              | Treasury / arbiter | Recruiter(s)                                                       |
-| Co-recruiter split                  | Primary recruiter  | Co-recruiter                                                       |
-| Fee rebate credit                   | Company rebate     | Treasury                                                           |
-| Streamed vesting                    | Early claims       | Final claim (`vested == total` exactly once `elapsed >= duration`) |
-| Milestone share `total × pct ÷ 100` | Every milestone    | **Nobody** — see below                                             |
-| Early retention departure `payment × served_ledgers ÷ retention_ledgers` | Recruiter | Company refund (`payment − earned`) |
+| Division                                                                 | Rounded down       | Receives the dust                                                  |
+| ------------------------------------------------------------------------ | ------------------ | ------------------------------------------------------------------ |
+| Platform / arbiter fee                                                   | Treasury / arbiter | Recruiter(s)                                                       |
+| Co-recruiter split                                                       | Primary recruiter  | Co-recruiter                                                       |
+| Fee rebate credit                                                        | Company rebate     | Treasury                                                           |
+| Streamed vesting                                                         | Early claims       | Final claim (`vested == total` exactly once `elapsed >= duration`) |
+| Milestone share `total × pct ÷ 100`                                      | Every milestone    | **Nobody** — see below                                             |
+| Early retention departure `payment × served_ledgers ÷ retention_ledgers` | Recruiter          | Company refund (`payment − earned`)                                |
 
 For an early departure (issue #655) the recruiter's pro-rata share is rounded
 down and the company receives `payment − earned`, so all residual dust stays
