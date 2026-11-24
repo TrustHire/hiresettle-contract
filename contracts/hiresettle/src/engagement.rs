@@ -447,6 +447,20 @@ impl HireSettleContract {
             }
         }
 
+        // Issue #697: cap how far the engagement's lifetime may reach. The
+        // lifetime ends at the later of the absolute end date and the last
+        // retention unlock.
+        let max_duration = Self::get_max_duration_ledgers(env.clone());
+        if max_duration > 0 {
+            let mut horizon = config.end_ledger.unwrap_or(0);
+            for i in 0..resolved_milestones.len() {
+                horizon = horizon.max(resolved_milestones.get(i).unwrap().valid_after_ledger);
+            }
+            if horizon.saturating_sub(current_ledger) > max_duration {
+                panic!("DurationExceedsCap");
+            }
+        }
+
         // Issue #472: draw from the company pool when requested; otherwise
         // perform a fresh token transfer as before.
         if config.fund_from_pool {
@@ -991,6 +1005,38 @@ impl HireSettleContract {
     // ----------------------------------------------------------
     // ISSUE #31 — REPLACEMENT COUNT LIMIT
     // ----------------------------------------------------------
+
+    // ----------------------------------------------------------
+    // ISSUE #697 — MAXIMUM ENGAGEMENT DURATION
+    // ----------------------------------------------------------
+
+    /// Admin caps an engagement's lifetime, in ledgers from creation. The
+    /// lifetime is the later of `EngagementConfig::end_ledger` and the last
+    /// milestone's `valid_after_ledger`, so retention windows count too.
+    /// `0` removes the cap, which is the default.
+    ///
+    /// The cap is enforced by `create_engagement` (and its variants). The
+    /// contract has no post-creation amendment that moves `end_ledger` or a
+    /// retention window, so nothing else needs checking.
+    ///
+    /// # Events
+    /// Emits `("max_engagement_duration_set",)` with `ledgers`.
+    pub fn set_max_duration_ledgers(env: Env, admin: Address, ledgers: u32) {
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey3::MaxEngagementDurationLedgers, &ledgers);
+        env.events()
+            .publish((Symbol::new(&env, "max_engagement_duration_set"),), ledgers);
+    }
+
+    /// Return the engagement lifetime cap in ledgers, or `0` when unlimited.
+    pub fn get_max_duration_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey3::MaxEngagementDurationLedgers)
+            .unwrap_or(0)
+    }
 
     /// Admin sets the maximum number of replacements allowed per engagement.
     /// Defaults to 3 when not explicitly configured.

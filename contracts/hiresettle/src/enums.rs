@@ -578,6 +578,9 @@ pub enum DataKey3 {
     ProofHistory(String, u32),
     /// Job-category specialization tags for a pool arbiter (issue #683).
     ArbiterSpecializations(Address),
+    /// Admin cap on an engagement's lifetime in ledgers (issue #697).
+    /// Absent or `0` means unlimited.
+    MaxEngagementDurationLedgers,
 }
 
 /// What a [`crate::ProofHistoryEntry`] records (issue #666).
