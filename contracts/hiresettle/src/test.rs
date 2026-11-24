@@ -8959,8 +8959,9 @@ fn test_weighted_draw_favours_strong_track_record() {
     // The test Env seeds its PRNG with a fixed seed, so this is deterministic.
     env.as_contract(&contract_id, || {
         for _ in 0..1_500 {
-            let panel =
-                HireSettleContract::draw_arbiter_panel(&env, &pool, 1, &company, &recruiter);
+            let panel = HireSettleContract::draw_arbiter_panel(
+                &env, &pool, 1, &company, &recruiter, None,
+            );
             let drawn = panel.get(0).unwrap();
             if drawn == good {
                 good_n += 1;
@@ -14849,4 +14850,265 @@ fn test_withdraw_retention_proof_returns_to_unlocked_pending() {
 
     let m = client.get_engagement(&eng_id).milestones.get(1).unwrap();
     assert!(m.status == MilestoneStatus::Pending);
+}
+
+// ============================================================
+// ISSUE #683 — ARBITER SPECIALIZATION TAGS
+// ============================================================
+
+fn create_category_panel_engagement(
+    env: &Env,
+    client: &HireSettleContractClient,
+    token_id: &Address,
+    company: &Address,
+    recruiter: &Address,
+    id: &str,
+    category: &str,
+    panel_size: u32,
+    quorum: u32,
+) -> String {
+    client.create_category_panel(
+        &String::from_str(env, id),
+        company,
+        recruiter,
+        &CategoryArbiterSetup {
+            panel_size,
+            quorum,
+            job_category: Symbol::new(env, category),
+        },
+        token_id,
+        &1_000_000_000,
+        &String::from_str(env, "Engineer"),
+        &build_milestones(env),
+        &vec![env, 30u32, 90u32],
+        &default_config(),
+    )
+}
+
+#[test]
+fn test_specialization_set_get_and_clear() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let a = Address::generate(&env);
+    client.add_arbiter_pool_member(&company, &a);
+    assert_eq!(client.get_arbiter_specializations(&a).len(), 0);
+
+    let tags = vec![
+        &env,
+        Symbol::new(&env, "engineering"),
+        Symbol::new(&env, "healthcare"),
+    ];
+    client.set_arbiter_specializations(&company, &a, &tags);
+    assert!(has_event(&env, "arbiter_specializations_set"));
+    assert_eq!(client.get_arbiter_specializations(&a), tags);
+
+    // A second call replaces the whole set.
+    let replacement = vec![&env, Symbol::new(&env, "legal")];
+    client.set_arbiter_specializations(&company, &a, &replacement);
+    assert_eq!(client.get_arbiter_specializations(&a), replacement);
+
+    // An empty vector clears the tags.
+    client.set_arbiter_specializations(&company, &a, &Vec::new(&env));
+    assert_eq!(client.get_arbiter_specializations(&a).len(), 0);
+}
+
+#[test]
+#[should_panic(expected = "NotInPool")]
+fn test_specialization_requires_pool_member() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let outsider = Address::generate(&env);
+    client.set_arbiter_specializations(
+        &company,
+        &outsider,
+        &vec![&env, Symbol::new(&env, "engineering")],
+    );
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_specialization_rejects_non_admin() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let a = Address::generate(&env);
+    client.add_arbiter_pool_member(&company, &a);
+    let stranger = Address::generate(&env);
+    client.set_arbiter_specializations(
+        &stranger,
+        &a,
+        &vec![&env, Symbol::new(&env, "engineering")],
+    );
+}
+
+#[test]
+fn test_specialization_cap_and_duplicates_rejected() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let a = Address::generate(&env);
+    client.add_arbiter_pool_member(&company, &a);
+
+    let nine = vec![
+        &env,
+        Symbol::new(&env, "t0"),
+        Symbol::new(&env, "t1"),
+        Symbol::new(&env, "t2"),
+        Symbol::new(&env, "t3"),
+        Symbol::new(&env, "t4"),
+        Symbol::new(&env, "t5"),
+        Symbol::new(&env, "t6"),
+        Symbol::new(&env, "t7"),
+        Symbol::new(&env, "t8"),
+    ];
+    let too_many = client.try_set_arbiter_specializations(&company, &a, &nine);
+    assert!(too_many.is_err());
+
+    let dup = vec![
+        &env,
+        Symbol::new(&env, "engineering"),
+        Symbol::new(&env, "engineering"),
+    ];
+    let duplicate = client.try_set_arbiter_specializations(&company, &a, &dup);
+    assert!(duplicate.is_err());
+    assert_eq!(client.get_arbiter_specializations(&a).len(), 0);
+}
+
+#[test]
+fn test_removing_member_clears_specializations() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let a = Address::generate(&env);
+    client.add_arbiter_pool_member(&company, &a);
+    client.set_arbiter_specializations(
+        &company,
+        &a,
+        &vec![&env, Symbol::new(&env, "engineering")],
+    );
+    client.remove_arbiter_pool_member(&company, &a);
+    client.add_arbiter_pool_member(&company, &a);
+    assert_eq!(client.get_arbiter_specializations(&a).len(), 0);
+}
+
+#[test]
+fn test_category_panel_draws_matching_members_first() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let e1 = Address::generate(&env);
+    let e2 = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+    let g3 = Address::generate(&env);
+    for m in [&e1, &e2, &g1, &g2, &g3] {
+        client.add_arbiter_pool_member(&company, m);
+    }
+    let eng = Symbol::new(&env, "engineering");
+    client.set_arbiter_specializations(&company, &e1, &vec![&env, eng.clone()]);
+    client.set_arbiter_specializations(&company, &e2, &vec![&env, eng.clone()]);
+
+    // Two seats, two matching members: the general pool is never touched.
+    let id = create_category_panel_engagement(
+        &env, &client, &token_id, &company, &recruiter, "CAT-1", "engineering", 2, 1,
+    );
+    let panel = client.get_engagement(&id).arbiters;
+    assert_eq!(panel.len(), 2);
+    assert!(panel.contains(&e1) && panel.contains(&e2));
+}
+
+#[test]
+fn test_category_panel_falls_back_to_general_pool() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let e1 = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+    let g3 = Address::generate(&env);
+    for m in [&e1, &g1, &g2, &g3] {
+        client.add_arbiter_pool_member(&company, m);
+    }
+    client.set_arbiter_specializations(
+        &company,
+        &e1,
+        &vec![&env, Symbol::new(&env, "engineering")],
+    );
+
+    // Three seats, one match: the match is always seated, the rest come from
+    // the general pool.
+    let id = create_category_panel_engagement(
+        &env, &client, &token_id, &company, &recruiter, "CAT-2", "engineering", 3, 2,
+    );
+    let panel = client.get_engagement(&id).arbiters;
+    assert_eq!(panel.len(), 3);
+    assert!(panel.contains(&e1));
+    for member in panel.iter() {
+        assert!(member == e1 || member == g1 || member == g2 || member == g3);
+    }
+}
+
+#[test]
+fn test_category_panel_skips_suspended_matches() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let e1 = Address::generate(&env);
+    let e2 = Address::generate(&env);
+    let g1 = Address::generate(&env);
+    for m in [&e1, &e2, &g1] {
+        client.add_arbiter_pool_member(&company, m);
+    }
+    let eng = Symbol::new(&env, "engineering");
+    client.set_arbiter_specializations(&company, &e1, &vec![&env, eng.clone()]);
+    client.set_arbiter_specializations(&company, &e2, &vec![&env, eng.clone()]);
+    let until = env.ledger().sequence() + 1_000;
+    client.suspend_arbiter_pool_member(&company, &e1, &until);
+
+    let id = create_category_panel_engagement(
+        &env, &client, &token_id, &company, &recruiter, "CAT-3", "engineering", 1, 1,
+    );
+    assert_eq!(client.get_engagement(&id).arbiters, vec![&env, e2]);
+}
+
+#[test]
+fn test_category_panel_unknown_category_uses_general_pool() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let g1 = Address::generate(&env);
+    let g2 = Address::generate(&env);
+    let g3 = Address::generate(&env);
+    for m in [&g1, &g2, &g3] {
+        client.add_arbiter_pool_member(&company, m);
+    }
+    let id = create_category_panel_engagement(
+        &env, &client, &token_id, &company, &recruiter, "CAT-4", "legal", 2, 1,
+    );
+    assert_eq!(client.get_engagement(&id).arbiters.len(), 2);
+}
+
+#[test]
+fn test_category_panel_too_small_rejected() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let e1 = Address::generate(&env);
+    let e2 = Address::generate(&env);
+    client.add_arbiter_pool_member(&company, &e1);
+    client.add_arbiter_pool_member(&company, &e2);
+    client.set_arbiter_specializations(
+        &company,
+        &e1,
+        &vec![&env, Symbol::new(&env, "engineering")],
+    );
+    let too_big = client.try_create_category_panel(
+        &String::from_str(&env, "CAT-5"),
+        &company,
+        &recruiter,
+        &CategoryArbiterSetup {
+            panel_size: 3,
+            quorum: 1,
+            job_category: Symbol::new(&env, "engineering"),
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+    assert!(too_big.is_err());
 }
