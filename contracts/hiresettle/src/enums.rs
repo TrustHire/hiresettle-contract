@@ -259,6 +259,18 @@ pub enum ConfigKey {
     /// Per-function pause flag for `fn_id` (issue #589). Present and `true`
     /// means the entry point is paused; absent means it runs normally.
     FunctionPaused(u32),
+    /// Admin-wide maximum engagement amount in stroops; `0` disables the cap
+    /// (issue #680).
+    MaxEngagementAmount,
+    /// Per-token maximum engagement amount overrides (issue #680); an absent
+    /// entry means the admin-wide `MaxEngagementAmount` applies.
+    TokenMaxAmounts,
+    /// Per-token TVL cap in stroops (issue #679); an absent entry means
+    /// unlimited.
+    TokenTvlCaps,
+    /// Per-token maximum allowed outflow in stroops (issue #690); an absent
+    /// entry means unlimited (no breaker).
+    TokenOutflowLimits,
 }
 
 /// Role of a company team member (issue #575): which company-gated actions
@@ -404,6 +416,27 @@ pub enum DataKey {
     EmergencySigners,
     /// Active emergency signer rotation vote.
     EmergencySignerRotationVote,
+    /// On-chain storage layout version, stamped by `init` and advanced by
+    /// `migrate` (issue #693).
+    StorageSchemaVersion,
+    /// Emergency-signer veto tally for the pending WASM upgrade (issue #691).
+    UpgradeVetoTally,
+}
+
+/// Lifecycle status of an allowlisted token (issue #681): `Allowed` while the
+/// token is fully usable, `Deprecated(sunset_ledger)` while it winds down —
+/// new engagements are blocked immediately and top-ups are blocked after the
+/// sunset ledger — and `Removed` once it leaves the allowlist entirely.
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum TokenStatus {
+    /// Token is allowlisted and accepting new engagements.
+    Allowed,
+    /// Token is being wound down; new engagements are blocked immediately and
+    /// top-ups are blocked after `sunset_ledger`.
+    Deprecated(u32),
+    /// Token has been removed from the allowlist.
+    Removed,
 }
 
 /// Secondary storage-key space nested under [`DataKey::Ext`] so the primary
@@ -607,6 +640,11 @@ pub enum DataKey3 {
     /// FIFO-capped proof submission / withdrawal history for
     /// (engagement_id, milestone_index) (issue #666).
     ProofHistory(String, u32),
+    /// Lifecycle status of an allowlisted token (issue #681).
+    TokenStatus(Address),
+    /// Rolling-window outflow accumulator for the per-token circuit breaker
+    /// (issue #690).
+    TokenCircuitBreaker(Address),
 }
 
 /// What a [`crate::ProofHistoryEntry`] records (issue #666).

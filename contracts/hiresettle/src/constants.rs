@@ -123,6 +123,15 @@ pub(crate) const DEFAULT_RISK_REPLACEMENT_WEIGHT: u32 = 20;
 /// Default risk-score points per granted milestone extension (issue #480).
 pub(crate) const DEFAULT_RISK_EXTENSION_WEIGHT: u32 = 10;
 
+/// Storage layout version this WASM expects (issue #693). `init` stamps this
+/// value on fresh deployments; contracts upgraded from an older WASM are left
+/// at their stored version and must call `migrate` before any state-changing
+/// entry point will accept calls.
+pub(crate) const EXPECTED_STORAGE_SCHEMA_VERSION: u32 = 1;
+/// Implicit version of storage written by deployments made before issue #693
+/// introduced explicit schema versioning.
+pub(crate) const LEGACY_STORAGE_SCHEMA_VERSION: u32 = 0;
+
 /// Schema version stamped onto every emitted event (issue #585).
 ///
 /// Bump this whenever any event's topics or data change so indexers can
@@ -145,3 +154,9 @@ pub(crate) const MAX_RECRUITER_STAKE_TIERS: u32 = 10;
 pub(crate) const DEFAULT_STAKE_UNBONDING_DELAY_LEDGERS: u32 = 120_960;
 /// FIFO cap on per-milestone proof history entries (issue #666).
 pub(crate) const MAX_PROOF_HISTORY_ENTRIES: u32 = 20;
+/// Default rolling window, in ledgers, that a per-token outflow circuit
+/// breaker measures its outflow limit over (issue #690). ~1 day.
+pub(crate) const DEFAULT_CIRCUIT_BREAKER_WINDOW_LEDGERS: u32 = 17_280;
+/// Sensitive-setter function id for `set_token_outflow_limit` (issue #690):
+/// the per-token outflow cap may only be raised via a co-signed config change.
+pub(crate) const FN_SET_TOKEN_OUTFLOW_LIMIT: u32 = 18;
