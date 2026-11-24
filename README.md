@@ -289,6 +289,7 @@ rate_recruiter ◄── Completed ◄── confirm_milestone(1) ◄── subm
 - **Building an indexer or UI?** See [Events](#events) and [Which query do I call?](#which-query-do-i-call).
 - **Paying a recruiter in another token?** See [Recruiter Payout Tokens and the Swap Adapter (#458)](#recruiter-payout-tokens-and-the-swap-adapter-458).
 - **Vesting payouts over time?** See [Streamed Milestone Payouts (#466)](#streamed-milestone-payouts-466).
+- **Capping how many engagements a recruiter holds?** See [Recruiter Active-Engagement Caps (#482)](#recruiter-active-engagement-caps-482).
 
 ---
 
@@ -1338,6 +1339,38 @@ Once `elapsed >= duration`, `vested == total` exactly, so rounding dust is never
 
 Event: `("streamed_payout_claimed", engagement_id)` with `(milestone_index, amount, claimed_total)`, emitted only when `amount > 0`.
 
+## Recruiter Active-Engagement Caps (#482)
+
+Two caps limit how many engagements a recruiter can hold at once. A recruiter can set a cap for themselves, and the admin can set one for every recruiter. The contract enforces the tighter of the two, adjusted for the recruiter's stake.
+
+| Function                                           | Caller                    | Description                                                                                                                                                                                  |
+| -------------------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `set_recruiter_active_cap(recruiter, cap)`         | Recruiter (must sign)     | Self-imposed cap. `0` removes it. Emits `recruiter_active_cap_set`.                                                                                                                          |
+| `get_recruiter_active_cap(recruiter)` → `Option<u32>` | Anyone                 | The self-imposed cap, or `None` when unset.                                                                                                                                                  |
+| `set_max_active_per_recruiter(admin, count)`       | Admin                     | Contract-wide cap for every recruiter. `0` means unlimited. Emits `max_active_per_recruiter_set`. Panics `NoAdmin` if the admin role is renounced, and `unauthorized` if the caller is not the admin. |
+| `get_max_active_per_recruiter()` → `u32`           | Anyone                    | The contract-wide cap, or `0` when unlimited.                                                                                                                                                |
+| `get_recruiter_effective_cap(recruiter)` → `u32`   | Anyone                    | The cap in force for this recruiter now, including the stake bonus. `0` when unlimited.                                                                                                      |
+
+### Which cap wins
+
+- A side is unlimited when its value is `0` or unset. If both sides are unlimited there is no cap. If only one side is set, that one applies. If both are set, the lower one applies.
+- The stake bonus raises only the admin-wide cap. It is added to `set_max_active_per_recruiter` when that cap is non-zero. The bonus comes from the recruiter's stake tier (`stake_recruiter`, `get_recruiter_stake_bonus`), and it never raises the self-imposed cap.
+
+In short: `effective cap = min(self-imposed cap, admin cap + stake bonus)`, with the zero rules above.
+
+### What counts toward the cap
+
+- Engagements the recruiter is bound to in `Active` or `Offered` status count toward the cap. An `Offered` engagement holds a slot. Accepting it moves it to `Active`, which still counts. Withdrawing the offer frees the slot.
+- The count is computed on each check by scanning the recruiter's engagement index. No counter is stored.
+- A slot is freed as soon as an engagement leaves `Active` and `Offered`. That includes `Completed`, `Cancelled`, `Expired`, `ReplacementRequested` and `ExitRequested`.
+
+### Enforcement
+
+- `create_engagement` and `create_engagement_random_panel` reject a new engagement with `RecruiterActiveLimitReached` when the recruiter's count is already at the effective cap.
+- The company-wide cap (`set_max_active_per_company`) is checked first. If the company is at its limit, the call panics with `CompanyActiveLimitReached` before the recruiter cap is read.
+- Lowering a cap does not close existing engagements. It only blocks new ones.
+- `unstake_recruiter` panics with `UnstakeBelowActiveCount` when the unstake would lower the effective cap below the recruiter's current count.
+
 ## Recruiter Acceptance (#569)
 
 `create_engagement` normally locks escrow and makes the engagement `Active` straight away, without the recruiter agreeing to the terms. Setting `EngagementConfig::require_recruiter_acceptance = true` creates it in the `Offered` status instead. The escrow (and any bonds) are still locked at creation.
@@ -1493,6 +1526,7 @@ engagement is quarantined.
 | Get paid in a different token                           | `set_recruiter_payout_token` / `clear_recruiter_payout_token` ([details](#recruiter-payout-tokens-and-the-swap-adapter-458)) |
 | Hand the engagement to another recruiter address        | `propose_recruiter_transfer` (then the company calls `accept_recruiter_transfer`) |
 | Let a second key act for the recruiter                  | `set_recruiter_cosigner`                                                          |
+| Limit how many engagements I hold at once               | `set_recruiter_active_cap` ([details](#recruiter-active-engagement-caps-482))     |
 
 #### Company or recruiter
 
@@ -1544,7 +1578,7 @@ holds, so a keeper or either party can run them.
 | Manage referrals                              | `add_referrer`, `remove_referrer`, `set_referral_discount_bps`                                                                                                                                                   |
 | Control which tokens and amounts are accepted | `add_allowed_token`, `remove_allowed_token`, `set_token_allowlist_enabled`, `set_min_amount`, `set_token_min_amount`, `remove_token_min_amount`                                                                  |
 | Tune timing windows                           | `set_confirm_window`, `set_dispute_window`, `set_proof_cooldown`, `set_cooldown_rating_discount`, `set_no_show_deadline_ledgers`, `set_amendment_ttl`, `set_super_arbiter_deadline`, `set_arbiter_vote_deadline` |
-| Tune limits                                   | `set_max_active_per_company`, `set_max_replacements`                                                                                                                                                             |
+| Tune limits                                   | `set_max_active_per_company`, `set_max_replacements`, `set_max_active_per_recruiter` ([details](#recruiter-active-engagement-caps-482)) |
 | Configure arbitration                         | `set_super_arbiter`, `set_arbiter_fee`, `set_split_voting_enabled`, `add_arbiter_pool_member`, `remove_arbiter_pool_member`, `set_bond_forfeit_bps`                                                              |
 | Grow or shrink one engagement's arbiter panel | `admin_add_arbiter` / `admin_remove_arbiter`                                                                                                                                                                     |
 | Configure payout-token swaps                  | `set_swap_adapter` / `clear_swap_adapter` ([details](#recruiter-payout-tokens-and-the-swap-adapter-458))                                                                                                         |
