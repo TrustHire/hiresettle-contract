@@ -288,6 +288,7 @@ rate_recruiter ◄── Completed ◄── confirm_milestone(1) ◄── subm
 - **A call panicked?** Find the message in [Errors](#errors).
 - **Building an indexer or UI?** See [Events](#events) and [Which query do I call?](#which-query-do-i-call).
 - **Paying a recruiter in another token?** See [Recruiter Payout Tokens and the Swap Adapter (#458)](#recruiter-payout-tokens-and-the-swap-adapter-458).
+- **Vesting payouts over time?** See [Streamed Milestone Payouts (#466)](#streamed-milestone-payouts-466).
 
 ---
 
@@ -1302,6 +1303,41 @@ Events: `("payout_swapped", recipient)` with `(escrow_token, to_token, amount, a
 
 The swap adapter is set by the admin and is fully trusted. The contract does not check the balance the adapter actually delivers. It checks only the amount that `swap` returns against `min_out`. The adapter receives the escrow tokens for the swap before the output is known, so a malicious or buggy adapter can keep the pulled amount and still report success. Register only an adapter you have reviewed. Use `clear_swap_adapter` to stop all new swaps.
 
+## Streamed Milestone Payouts (#466)
+
+By default a confirmed milestone pays the recruiter side in one transfer. Setting `EngagementConfig::stream_duration_ledgers = Some(n)` at creation vests each confirmed milestone's net payout linearly over `n` ledgers instead. `None` keeps the lump-sum payout. The value is copied onto the engagement at creation and cannot be changed afterwards. `Some(0)` panics at `create_engagement` with `InvalidStreamDuration`.
+
+### When streaming starts
+
+Vesting starts on the confirmation ledger, and the recruiter pulls the vested amount with `claim_streamed_payout`.
+
+- The platform fee is collected immediately at confirmation. The net amount (the milestone payment minus the platform fee) is held in the contract and vests from that ledger.
+- Streaming applies on `confirm_milestone`, `confirm_milestone_with_note` and `accept_partial_confirmation`.
+- `batch_confirm_milestones` and `force_confirm_milestone` do not stream. They pay the net amount as a lump sum even when `stream_duration_ledgers` is set. Dispute resolutions also pay lump sums.
+- If a milestone is re-confirmed after a replacement while an earlier stream still has unclaimed balance, that balance is folded into the new stream. The new stream starts at the new confirmation ledger.
+
+### Vesting formula
+
+```
+vested  = total × min(elapsed, duration) ÷ duration      (rounded down)
+elapsed = current_ledger − start_ledger
+```
+
+Once `elapsed >= duration`, `vested == total` exactly, so rounding dust is never lost. For example, a stream with `total = 1_000_000` and `duration = 1_000` has `250_000` vested at 250 ledgers and the full `1_000_000` at 1 000 ledgers.
+
+### Claiming
+
+| Function                                                  | Caller                    | Description                                                                                                                                                                    |
+| --------------------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claim_streamed_payout(recruiter, engagement_id, milestone_index)` → `i128` | Anyone may submit; `recruiter` must be the engagement's recruiter | Transfers the currently vested, unclaimed amount and returns it. Returns `0` without panicking when nothing new has vested. Panics `unauthorized` if `recruiter` is not the engagement's recruiter, and `NoStreamedPayout` if the milestone has no stream. Fails with `ContractPaused`, `EngagementPaused` or a milestone hold. |
+| `get_streamed_payout_status(engagement_id, milestone_index)` → `(i128, i128)` | Anyone | Returns `(claimed, total)`, or `(0, 0)` when the milestone has no stream. It does not return the vested amount or the start ledger. |
+
+- No signature is required to claim, but funds only go to the recruiter side. The payment goes through the same path as a lump-sum payout, so the co-recruiter split, the payout destination and the payout token preference all apply at claim time, using the values in effect when the claim runs.
+- With `pull_payouts = true` the claimed amount is credited to `RecruiterClaimable` instead of transferred, as described in [Pull Payouts](#pull-payouts-547).
+- No query returns the stream's `start_ledger`. To compute the vested amount off-chain, take the ledger in which the milestone was confirmed from the `milestone_confirmed` event.
+
+Event: `("streamed_payout_claimed", engagement_id)` with `(milestone_index, amount, claimed_total)`, emitted only when `amount > 0`.
+
 ## Recruiter Acceptance (#569)
 
 `create_engagement` normally locks escrow and makes the engagement `Active` straight away, without the recruiter agreeing to the terms. Setting `EngagementConfig::require_recruiter_acceptance = true` creates it in the `Offered` status instead. The escrow (and any bonds) are still locked at creation.
@@ -1453,7 +1489,7 @@ engagement is quarantined.
 | Submit proof that a milestone is done                   | `submit_proof`                                                                    |
 | Withdraw payouts credited by `pull_payouts` engagements | `claim_payouts`                                                                   |
 | Submit several evidence items as one proof              | `submit_proof_root` (Merkle root)                                                 |
-| Withdraw the vested part of a streamed milestone payout | `claim_streamed_payout`                                                           |
+| Withdraw the vested part of a streamed milestone payout | `claim_streamed_payout` ([details](#streamed-milestone-payouts-466))              |
 | Get paid in a different token                           | `set_recruiter_payout_token` / `clear_recruiter_payout_token` ([details](#recruiter-payout-tokens-and-the-swap-adapter-458)) |
 | Hand the engagement to another recruiter address        | `propose_recruiter_transfer` (then the company calls `accept_recruiter_transfer`) |
 | Let a second key act for the recruiter                  | `set_recruiter_cosigner`                                                          |
