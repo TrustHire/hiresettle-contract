@@ -576,6 +576,8 @@ pub enum DataKey3 {
     /// FIFO-capped proof submission / withdrawal history for
     /// (engagement_id, milestone_index) (issue #666).
     ProofHistory(String, u32),
+    /// Job-category specialization tags for a pool arbiter (issue #683).
+    ArbiterSpecializations(Address),
 }
 
 /// What a [`crate::ProofHistoryEntry`] records (issue #666).

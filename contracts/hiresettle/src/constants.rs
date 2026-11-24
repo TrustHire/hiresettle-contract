@@ -127,3 +127,6 @@ pub(crate) const MAX_RECRUITER_STAKE_TIERS: u32 = 10;
 pub(crate) const DEFAULT_STAKE_UNBONDING_DELAY_LEDGERS: u32 = 120_960;
 /// FIFO cap on per-milestone proof history entries (issue #666).
 pub(crate) const MAX_PROOF_HISTORY_ENTRIES: u32 = 20;
+/// Maximum number of job-category specialization tags a pool arbiter may
+/// carry (issue #683).
+pub(crate) const MAX_ARBITER_SPECIALIZATIONS: u32 = 8;
