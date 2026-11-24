@@ -15233,3 +15233,83 @@ fn test_max_duration_zero_removes_cap() {
     );
     assert_eq!(client.get_engagement(&id).status, EngagementStatus::Active);
 }
+
+// ============================================================
+// ISSUE #700 — CANCELLATION REASON
+// ============================================================
+
+#[test]
+fn test_cancel_with_reason_records_reason() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "CAN-1");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-1");
+
+    let reason = String::from_str(&env, "Role put on hold");
+    client.cancel_engagement_with_reason(&company, &recruiter, &eng_id, &reason);
+
+    assert!(has_event(&env, "cancellation_reason_recorded"));
+    assert_eq!(client.get_cancellation_reason(&eng_id), Some(reason));
+    assert_eq!(client.get_engagement(&eng_id).status, EngagementStatus::Cancelled);
+}
+
+#[test]
+fn test_cancel_without_reason_records_none() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "CAN-2");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-2");
+
+    client.cancel_engagement(&company, &recruiter, &eng_id);
+
+    assert!(!has_event(&env, "cancellation_reason_recorded"));
+    assert_eq!(client.get_cancellation_reason(&eng_id), None);
+}
+
+#[test]
+#[should_panic(expected = "CancelReasonEmpty")]
+fn test_cancel_reason_empty_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "CAN-3");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-3");
+    client.cancel_engagement_with_reason(&company, &recruiter, &eng_id, &String::from_str(&env, ""));
+}
+
+#[test]
+#[should_panic(expected = "CancelReasonTooLong")]
+fn test_cancel_reason_too_long_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "CAN-4");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-4");
+    let too_long = String::from_bytes(&env, &[b'a'; 129]);
+    client.cancel_engagement_with_reason(&company, &recruiter, &eng_id, &too_long);
+}
+
+#[test]
+fn test_cancel_reason_at_limit_accepted() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "CAN-5");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-5");
+    let at_limit = String::from_bytes(&env, &[b'a'; 128]);
+    client.cancel_engagement_with_reason(&company, &recruiter, &eng_id, &at_limit);
+    assert_eq!(client.get_cancellation_reason(&eng_id), Some(at_limit));
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_cancel_with_reason_wrong_recruiter_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "CAN-6");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "CAN-6");
+    let stranger = Address::generate(&env);
+    client.cancel_engagement_with_reason(
+        &company,
+        &stranger,
+        &eng_id,
+        &String::from_str(&env, "Wrong party"),
+    );
+}
