@@ -163,7 +163,10 @@ stellar contract invoke --id "$CONTRACT" --source company --network testnet \
   --config '{"metadata_hash":null,"co_recruiter":null,"recruiter_split_bps":10000,
     "contract_pdf_hash":null,"referrer":null,"tags":null,"is_public":false,
     "stream_duration_ledgers":null,"recruiter_bond_amount":null,
-    "bundle_id":null,"fund_from_pool":false}'
+    "bundle_id":null,"fund_from_pool":false,"snapshot_fee_tier":false,
+    "co_recruiter_bond_amount":null,"pull_payouts":false,
+    "require_recruiter_acceptance":false,"end_ledger":null,
+    "placement_oracle":null,"external_ref":null}'
 ```
 
 This call transfers 100 XLM from the company to the contract. The contract sets each milestone's `valid_after_ledger` and `status` itself, so pass `0`, `""` and the starting status shown in the command. `recruiter_split_bps: 10000` sends the whole payout to the recruiter because there is no co-recruiter.
@@ -287,6 +290,10 @@ rate_recruiter ◄── Completed ◄── confirm_milestone(1) ◄── subm
 - **Splitting a fee between two recruiters?** Set `co_recruiter` and `recruiter_split_bps` in the config (see [Key Features](#key-features)).
 - **A call panicked?** Find the message in [Errors](#errors).
 - **Building an indexer or UI?** See [Events](#events) and [Which query do I call?](#which-query-do-i-call).
+- **Paying a recruiter in another token?** See [Recruiter Payout Tokens and the Swap Adapter (#458)](#recruiter-payout-tokens-and-the-swap-adapter-458).
+- **Vesting payouts over time?** See [Streamed Milestone Payouts (#466)](#streamed-milestone-payouts-466).
+- **Capping how many engagements a recruiter holds?** See [Recruiter Active-Engagement Caps (#482)](#recruiter-active-engagement-caps-482).
+- **Shortening proof cooldowns for well-rated recruiters?** See [Rating-Based Proof Cooldown Discount (#470)](#rating-based-proof-cooldown-discount-470).
 
 ---
 
@@ -303,7 +310,7 @@ flowchart TD
     errors["errors<br/>(panic messages)"]
 
     %% Core types & storage keys
-    enums["enums<br/>(MilestoneStatus, EngagementStatus,<br/>DataKey, ConfigKey, ExtKey, DataKey2)"]
+    enums["enums<br/>(MilestoneStatus, EngagementStatus,<br/>DataKey, ConfigKey, ExtKey, DataKey2, DataKey3)"]
     types["types<br/>(Engagement, Milestone, ArbiterVoteRecord,<br/>PlatformFee, FeeTier, ...)"]
 
     %% Internal utilities used by all feature modules
@@ -321,6 +328,7 @@ flowchart TD
     ratings["ratings<br/>(star ratings, summaries)"]
     bonds["bonds<br/>(collateral bonds, bundles)"]
     features["features<br/>(pooled escrow, emergency pause, rebate)"]
+    integrations["integrations<br/>(placement oracles, invoice refs,<br/>external refs, attesters)"]
 
     %% Dependency edges
     constants --> helpers
@@ -380,6 +388,13 @@ flowchart TD
     types --> features
     enums --> features
 
+    constants --> integrations
+    errors --> integrations
+    helpers --> integrations
+    types --> integrations
+    enums --> integrations
+    milestones --> integrations
+
     %% Styling
     classDef foundational fill:#f5f5f5,stroke:#999,stroke-width:1px;
     classDef core fill:#e8f4fd,stroke:#2196f3,stroke-width:2px;
@@ -389,7 +404,7 @@ flowchart TD
     class constants,errors foundational;
     class enums,types core;
     class helpers internal;
-    class admin,engagement,milestones,disputes,transfers,queries,arbiter_pool,payout,ratings,bonds,features feature;
+    class admin,engagement,milestones,disputes,transfers,queries,arbiter_pool,payout,ratings,bonds,features,integrations feature;
 ```
 
 ## Glossary
@@ -463,31 +478,30 @@ Each milestone transitions through the following states. For `Retention` milesto
 
 ## Key Features
 
-| Feature                         | Description                                                                                                                                                                                                                |
-| ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Milestone-based escrow**      | Funds locked at creation; released per-milestone on confirmation. Percentages sum to 100%.                                                                                                                                 |
-| **Placement & Retention types** | Placement starts `Pending`; retention starts `Locked` and requires a ledger time-gate to elapse.                                                                                                                           |
-| **Multi-arbiter disputes**      | M-of-N arbiter voting to resolve disputes. Approve releases payment; reject resets milestone.                                                                                                                              |
-| **Co-recruiter split**          | Optional `co_recruiter` address with configurable basis-point split for shared-fee engagements.                                                                                                                            |
-| **Proof cooldown**              | Configurable minimum ledger gap between proof resubmissions (default ~4 hours).                                                                                                                                            |
-| **Admin configuration**         | Platform fee (up to 5%), token allowlist, max milestones, max retention days, inactivity timeout, confirm/dispute windows, arbiter fee (up to 2%), proof hash length, ledgers-per-day, storage TTL, upgrade lock duration. |
-| **Auto / force confirm**        | If the company does not act within the confirm window (~5 days), any address can force-confirm.                                                                                                                            |
-| **Batch confirmation**          | Confirm multiple milestones atomically in a single transaction.                                                                                                                                                            |
-| **Recruiter early exit**        | Recruiter requests exit; company accepts (refunds remaining escrow) or rejects (returns to Active).                                                                                                                        |
-| **Candidate replacement**       | Company requests replacement, resetting milestones and adjusting retention timers.                                                                                                                                         |
-| **Engagement expiry**           | Permissionless keeper function — expires after an inactivity timeout (~60 days), refunds company.                                                                                                                          |
-| **Amendment proposals**         | Company or recruiter proposes a `payment_percent` change; the other party must accept within a TTL. Amendment history is logged (capped at 20 entries).                                                                    |
-| **Arbiter succession**          | Arbiters can nominate and claim successors for their slots.                                                                                                                                                                |
-| **Contract upgrade**            | Admin proposes a WASM upgrade with a mandatory time-lock (~1 day); execution is permissionless after the lock.                                                                                                             |
-| **Admin renouncement**          | Admin can permanently renounce, making the contract immutable. All admin-gated functions fail after renouncement.                                                                                                          |
-| **Contract PDF attestation**    | Optional `contract_pdf_hash` (e.g. SHA-256 of the signed PDF) stored at creation for audit trail.                                                                                                                          |
-| **Engagement listing**          | Per-company paginated engagement ID list (issue #35) and global engagement counter (issue #34).                                                                                                                            |
-| **Unlock progress query**       | `get_unlock_progress()` returns `(unlocked_count, total)` — how many milestones are past `Locked` status.                                                                                                                  |
-| **Cosigners**                   | A company or recruiter can register a secondary [cosigner](#cosigners) address equally authorized to act on its behalf, without sharing the primary key.                                                                   |
-| **Negotiated cancellation**     | Both sides agree to split the unreleased escrow between the recruiter side and the company, instead of the full refund from `cancel_engagement`. See [Negotiated Cancellation](#negotiated-cancellation). |
-| **Mutual dispute settlement**   | The company side or the recruiter side proposes a percentage split of a disputed milestone; the other side accepts, with no arbiters involved. See [Mutual Dispute Settlement](#mutual-dispute-settlement). |
-| **Partial milestone confirmation** | The company proposes releasing only part of a submitted milestone; the recruiter accepts or rejects. See [Partial Milestone Confirmation](#partial-milestone-confirmation). |
-| **Company team members**        | A company registers members with a `Confirmer` or `Disputer` role who can confirm milestones or raise disputes. See [Company Team Members](#company-team-members). |
+| Feature                           | Description                                                                                                                                                                                                                                                           |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Milestone-based escrow**        | Funds locked at creation; released per-milestone on confirmation. Percentages sum to 100%.                                                                                                                                                                            |
+| **Placement & Retention types**   | Placement starts `Pending`; retention starts `Locked` and requires a ledger time-gate to elapse.                                                                                                                                                                      |
+| **Multi-arbiter disputes**        | M-of-N arbiter voting to resolve disputes. Approve releases payment; reject resets milestone.                                                                                                                                                                         |
+| **Co-recruiter split**            | Optional `co_recruiter` address with configurable basis-point split for shared-fee engagements.                                                                                                                                                                       |
+| **Proof cooldown**                | Configurable minimum ledger gap between proof resubmissions (default ~4 hours).                                                                                                                                                                                       |
+| **Admin configuration**           | Platform fee (up to 5%), token allowlist, max milestones, max retention days, inactivity timeout, confirm/dispute windows, arbiter fee (up to 2%), proof hash length, ledgers-per-day, storage TTL, upgrade lock duration, emergency pause config, dispute cycle cap. |
+| **Auto / force confirm**          | If the company does not act within the confirm window (~5 days), any address can force-confirm.                                                                                                                                                                       |
+| **Batch confirmation**            | Confirm multiple milestones atomically in a single transaction.                                                                                                                                                                                                       |
+| **Recruiter early exit**          | Recruiter requests exit; company accepts (refunds remaining escrow) or rejects (returns to Active).                                                                                                                                                                   |
+| **Candidate replacement**         | Company requests replacement, resetting milestones and adjusting retention timers.                                                                                                                                                                                    |
+| **Engagement expiry**             | Permissionless keeper function — expires after an inactivity timeout (~60 days), refunds company.                                                                                                                                                                     |
+| **Amendment proposals**           | Company or recruiter proposes a `payment_percent` change; the other party must accept within a TTL. Amendment history is logged (capped at 20 entries).                                                                                                               |
+| **Arbiter succession**            | Arbiters can nominate and claim successors for their slots.                                                                                                                                                                                                           |
+| **Contract upgrade**              | Admin proposes a WASM upgrade with a mandatory time-lock (~1 day); execution is permissionless after the lock.                                                                                                                                                        |
+| **Admin renouncement**            | Admin can permanently renounce, making the contract immutable. All admin-gated functions fail after renouncement.                                                                                                                                                     |
+| **Contract PDF attestation**      | Optional `contract_pdf_hash` (e.g. SHA-256 of the signed PDF) stored at creation for audit trail.                                                                                                                                                                     |
+| **Engagement listing**            | Per-company paginated engagement ID list (issue #35) and global engagement counter (issue #34).                                                                                                                                                                       |
+| **Unlock progress query**         | `get_unlock_progress()` returns `(unlocked_count, total)` — how many milestones are past `Locked` status.                                                                                                                                                             |
+| **Cosigners**                     | A company or recruiter can register a secondary [cosigner](#cosigners) address equally authorized to act on its behalf, without sharing the primary key.                                                                                                              |
+| **Emergency M-of-N pause**        | Admin configures an emergency signer set (M-of-N) that can pause the contract or individual engagements without admin approval. See [Emergency Multi-Sig Pause](#emergency-multi-sig-pause-474).                                                                      |
+| **Dispute cycle cap**             | Admin sets a maximum number of dispute cycles per milestone. When reached, escalation becomes instant. Default: unlimited. See [Dispute Cycle Cap](#dispute-cycle-cap-481).                                                                                           |
+| **Per-engagement dispute window** | Company and recruiter can agree on a custom dispute window (overriding the global default) for a specific engagement. See [Per-Engagement Dispute Window Override](#per-engagement-dispute-window-override-469).                                                      |
 
 ---
 
@@ -869,6 +883,84 @@ So the shares always add up to the full fee. While a list is set, `PlatformFee.t
 
 Events: one `("platform_fee_collected", engagement_id)` per treasury, in list order, with `(milestone_index, share, treasury)`. `share` is what that treasury received. With no list set, the single event still reports `(milestone_index, fee_amount, treasury)` as before. `set_fee_treasuries` emits `("fee_treasuries_set",)` with the list; `clear_fee_treasuries` emits `("fee_treasuries_cleared",)`.
 
+### Platform fee floor (#478)
+
+The admin can enforce a minimum absolute fee per payout, ensuring that even small or low-percentage fees meet a configured threshold. The floor raises the basis-point-derived fee amount without ever exceeding the payout itself.
+
+| Function                                | Caller | Description                                                             | Panics                                                         |
+| --------------------------------------- | ------ | ----------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `set_platform_fee_floor(admin, amount)` | Admin  | Set the minimum platform fee in raw token units (stroops). Must be ≥ 0. | `ContractPaused`, `NoAdmin`, `unauthorized`, `InvalidFeeFloor` |
+| `get_platform_fee_floor()` → `i128`     | Anyone | Return the current floor; `0` when unset.                               | —                                                              |
+
+Behaviour:
+
+- **Applies after basis-point calculation.** The contract computes `fee = payment × bps ÷ 10_000`, then raises it to the floor: `actual_fee = max(fee, floor)`.
+- **Never exceeds the payout.** The final fee is capped at `payment`, so `actual_fee = min(max(fee, floor), payment)`.
+- **Waived engagements still pay zero.** The floor does not override a [fee waiver](#fee-waiver); waived engagements remain at `0` regardless of the floor setting.
+- **Works with all fee variations.** The floor applies on top of company overrides, per-token overrides, fee tiers, tier snapshots, and referral discounts. It affects the absolute fee amount after the basis-point rate is resolved.
+- **Single global floor.** The same floor applies to every engagement and every token. Per-token or per-engagement floors are not supported.
+
+Typical use cases:
+
+- Ensuring a minimum revenue per transaction to cover operational costs.
+- Preventing dust fees on engagements with small `total_amount` or low-percentage milestones.
+
+Storage: `DataKey2::PlatformFeeFloor` → `i128`, persistent.
+
+Event: `("platform_fee_floor_set",)` with data `floor_amount`.
+
+```rust
+// Admin sets a floor of 5 million stroops (0.5 XLM for a 7-decimal token)
+client.set_platform_fee_floor(&admin, &5_000_000);
+assert_eq!(client.get_platform_fee_floor(), 5_000_000);
+
+// A 1% fee on a 300 XLM payout would be 3 XLM, but the floor raises it to 5 XLM
+// if 3 XLM < floor. The floor never lowers a fee that is already higher.
+```
+
+### Per-token platform fee override (#479)
+
+The admin can configure a base platform-fee rate that applies to a specific token, replacing the global `PlatformFee.bps` for engagements using that token. This allows differentiated pricing across currencies without requiring per-company overrides.
+
+| Function                                        | Caller | Description                                                                           | Panics                                                    |
+| ----------------------------------------------- | ------ | ------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `set_token_platform_fee(admin, token, bps)`     | Admin  | Set the base fee for `token` in basis points. Same 500 bps cap as `set_platform_fee`. | `ContractPaused`, `NoAdmin`, `unauthorized`, `FeeTooHigh` |
+| `remove_token_platform_fee(admin, token)`       | Admin  | Remove the override; the token falls back to the global rate and fee tiers.           | `ContractPaused`, `NoAdmin`, `unauthorized`               |
+| `get_token_platform_fee(token)` → `Option<u32>` | Anyone | Return the override for `token`, if any.                                              | —                                                         |
+
+Base-rate precedence (highest to lowest):
+
+1. Engagement [fee waiver](#fee-waiver) — the fee is `0`.
+2. [Per-company fee override](#per-company-fee-override-539) — bypasses everything below, including per-token overrides and fee tiers.
+3. **Per-token override** — replaces the global `bps` and is then run through the [fee tiers](#fee-tiers-250) (live or [snapshotted](#snapshot-mode-505)) if configured. A matching tier adjusts the token's base `bps`.
+4. Global `PlatformFee.bps` — run through the fee tiers (if set) or used directly.
+
+After the base rate is resolved, the [referral discount](#referral-discount-251), [fee floor](#platform-fee-floor-478), and [fee rebate](#fee-rebate-475) still apply in that order.
+
+Typical use cases:
+
+- Charging a higher fee for volatile or less-liquid tokens to cover swap costs.
+- Offering a promotional rate for a new token to encourage adoption.
+- Differentiating fees between fiat-pegged stablecoins and native blockchain assets.
+
+Storage: `DataKey2::TokenPlatformFee(token)` → `u32`, persistent.
+
+Events: `("token_platform_fee_set",)` with `(token, bps)`; `("token_platform_fee_removed",)` with `token`.
+
+```rust
+// Admin sets a 2% fee for USDC, while the global rate remains 1%
+let usdc = Address::from_string(&env, "USDC_CONTRACT_ADDRESS");
+client.set_token_platform_fee(&admin, &usdc, &200);  // 200 bps = 2%
+assert_eq!(client.get_token_platform_fee(&usdc), Some(200));
+
+// Engagements using USDC now pay 2% unless overridden by a company-specific rate
+// or a matching fee tier. Engagements using other tokens still pay the global 1%.
+
+// Admin removes the override; USDC falls back to the global rate
+client.remove_token_platform_fee(&admin, &usdc);
+assert_eq!(client.get_token_platform_fee(&usdc), None);
+```
+
 ### `DataKey`
 
 Contract storage is keyed by three `#[contracttype]` enums, all defined in
@@ -1187,6 +1279,26 @@ co_forfeit = co_bond × bond_forfeit_bps × (10_000 − recruiter_split_bps) ÷ 
 
 ---
 
+## Pooled Company Escrow Balances (#472)
+
+By default, `create_engagement` moves tokens with a fresh transfer from the company every time: fund the escrow, create the engagement, repeat for the next one. A company that runs many engagements in the same token can instead pre-fund a per-token balance once and draw new engagements from it without a transfer on each creation.
+
+| Function                                           | Caller  | Description                                                                                                                 |
+| --------------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `deposit_company_balance(company, token, amount)`  | Company | Transfer `amount` of `token` from the company into its pooled balance. `amount` must be positive.                          |
+| `withdraw_company_balance(company, token, amount)` | Company | Transfer `amount` back out of the pooled balance to the company. Panics `InsufficientCompanyBalance` if the pool is short. |
+| `get_company_balance(company, token)` → `i128`     | Anyone  | The company's current pooled balance for `token`.                                                                          |
+
+Setting `EngagementConfig::fund_from_pool = true` makes `create_engagement` (and `create_engagement_random_panel`) debit `total_amount` from the company's pooled balance instead of transferring fresh tokens, and marks the engagement as pool-funded. From then on, every movement of unreleased escrow back to the company for that engagement — a counter-offer's amount decrease, an amendment, a cancellation, an expiry, or a withdrawn offer — credits the pool instead of transferring tokens out, and a counter-offer's amount increase debits the pool instead of pulling a fresh transfer in. A non-pool-funded engagement always uses direct transfers on both sides, exactly as before this feature existed.
+
+Because pool funds sit in the contract's balance before they back any engagement, they are tracked separately from escrow: `get_token_pooled_balance(token)` (issue #578) reports the running total pooled across all companies for `token`, one of the six buckets covered in [Book-keeping Invariants](#book-keeping-invariants-and-stray-tokens-671-672). Pool balances are not part of any engagement's escrow and are excluded from `get_token_tvl`.
+
+Panics: `amount must be greater than zero` (deposit/withdraw of a non-positive amount); `InsufficientCompanyBalance` (withdrawal, or any pool debit — including `create_engagement` with `fund_from_pool = true`, or a counter-offer increase — that exceeds the current pooled balance; the pool and escrow are left unchanged).
+
+Events: `("company_balance_deposited", company)` with `(token, amount)`; `("company_balance_withdrawn", company)` with `(token, amount)`.
+
+---
+
 ## Pull Payouts (#547)
 
 By default every payout is pushed to the recruiter and co-recruiter inside the confirming transaction. If a recipient cannot receive the token, for example because it has no trustline or its balance is frozen, the whole confirmation reverts and the company cannot confirm.
@@ -1207,6 +1319,171 @@ Notes:
 
 Events: `("payout_credited", recipient)` with `(engagement_id, token, amount)`; `("payouts_claimed", recruiter)` with `(token, amount)`.
 
+## Recruiter Payout Tokens and the Swap Adapter (#458)
+
+A recruiter can ask for their net milestone payouts to be delivered in a token other than the engagement's escrow token. The preference is stored per recruiter address and applies across all of their engagements. It only takes effect when the admin has registered a swap adapter. Without an adapter the preference is stored and ignored, and every payout is paid in the escrow token.
+
+| Function                                               | Caller                       | Description                                                                                                                                                                                  |
+| ------------------------------------------------------ | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `set_recruiter_payout_token(recruiter, token)`         | Recruiter (must sign)        | Store the preferred payout token, replacing any previous one. The token is not checked against the allowlist. Emits `payout_token_set`.                                                     |
+| `clear_recruiter_payout_token(recruiter)`              | Recruiter (must sign)        | Remove the preference and reset the slippage tolerance to the default (`DEFAULT_MAX_SLIPPAGE_BPS`, 100 = 1 %). Emits `payout_token_cleared`.                                                 |
+| `get_recruiter_payout_token(recruiter)` → `Option<Address>` | Anyone                  | The stored preference, or `None`.                                                                                                                                                             |
+| `set_recruiter_payout_slippage(recruiter, max_slippage_bps)` | Recruiter (must sign)  | Maximum slippage the recruiter accepts on a swap, in basis points. Leaves the token preference untouched. `10_000` accepts any output. Panics `InvalidSlippageBps` above `10_000`. Emits `payout_slippage_set`. |
+| `get_recruiter_payout_slippage(recruiter)` → `u32`     | Anyone                       | The slippage tolerance, or `100` if never set.                                                                                                                                              |
+| `set_swap_adapter(admin, adapter)`                     | Admin                        | Register the trusted swap adapter, replacing any existing one. Emits `swap_adapter_set`. Panics `NoAdmin` if the admin role is renounced, and `unauthorized` if the caller is not the admin.   |
+| `clear_swap_adapter(admin)`                            | Admin                        | Remove the adapter. Payouts fall back to the escrow token. Emits `swap_adapter_cleared`. Same panics as `set_swap_adapter`.                                                                    |
+| `get_swap_adapter()` → `Option<Address>`               | Anyone                       | The configured adapter, or `None`.                                                                                                                                                           |
+
+The preference and slippage setters work while the contract is paused. The admin setters also work while paused.
+
+### Adapter interface
+
+The contract calls an adapter through this trait. Any contract that exposes these two functions with these exact names and types can be used:
+
+```rust
+#[contractclient(name = "SwapAdapterClient")]
+pub trait SwapAdapter {
+    fn quote(env: Env, from_token: Address, to_token: Address, amount_in: i128) -> i128;
+
+    fn swap(
+        env: Env,
+        payer: Address,
+        from_token: Address,
+        to_token: Address,
+        amount_in: i128,
+        min_out: i128,
+        recipient: Address,
+    ) -> i128;
+}
+```
+
+- `quote` returns the expected output of `to_token` for `amount_in` of `from_token`. The contract only swaps when the quote is greater than zero.
+- `swap` must pull exactly `amount_in` of `from_token` from `payer`. The contract pre-authorizes that single `transfer(payer, adapter, amount_in)` and nothing else. It must deliver the `to_token` output to `recipient` and return the amount delivered. It must panic if it cannot deliver at least `min_out`.
+
+A minimal adapter exposes the same two entry points:
+
+```rust
+#[contract]
+pub struct MySwapAdapter;
+
+#[contractimpl]
+impl MySwapAdapter {
+    pub fn quote(env: Env, from_token: Address, to_token: Address, amount_in: i128) -> i128 {
+        // Expected output for amount_in, in to_token units.
+        todo!()
+    }
+
+    pub fn swap(
+        env: Env,
+        payer: Address,
+        from_token: Address,
+        to_token: Address,
+        amount_in: i128,
+        min_out: i128,
+        recipient: Address,
+    ) -> i128 {
+        // Pull amount_in of from_token from payer, send the to_token output
+        // to recipient, and panic if the output is below min_out.
+        todo!()
+    }
+}
+```
+
+### Payout flow
+
+The swap is attempted only when all of the following hold: the recipient has a payout token preference, an adapter is configured, the preference differs from the escrow token, and the payout amount is greater than zero. Otherwise the escrow token is sent to the recipient's payout destination.
+
+1. The contract calls `quote`. If the call fails or returns zero or less, the payout falls back to the escrow token and `payout_swap_fallback` is emitted with a `min_out` of `0`.
+2. `min_out = quote × (10_000 − max_slippage_bps) ÷ 10_000`, rounded down. `max_slippage_bps` is the recipient's tolerance from `set_recruiter_payout_slippage`.
+3. The contract authorizes exactly one `transfer(contract, adapter, amount)` on the escrow token and calls `swap` through a `try_` invocation.
+4. If `swap` panics, the authorized pull is rolled back and the payout falls back to the escrow token. `payout_swap_fallback` is emitted with the computed `min_out`.
+5. If `swap` returns successfully with an amount below `min_out`, the whole call panics with `SwapOutputBelowMinimum`. The confirmation or claim that triggered the payout reverts. This is the one case where a misbehaving adapter blocks the payout rather than falling back.
+6. On success, the swapped tokens go to the recipient's payout destination (`set_recruiter_payout_address`, #548).
+
+| Situation                                                       | Result                                                                                       |
+| --------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| No preference, no adapter, or preference equals escrow token   | Escrow token paid to the payout destination. No swap events.                                 |
+| Quote fails or is zero, or the adapter panics in `swap`         | Escrow token paid. `payout_swap_fallback` emitted.                                           |
+| `swap` returns an amount below `min_out`                        | The triggering call panics with `SwapOutputBelowMinimum`.                                    |
+| Swap succeeds                                                   | Preferred token paid to the payout destination. `payout_swapped` emitted.                    |
+| Engagement has `pull_payouts = true`                            | Credits stay in the escrow token. The preference is not applied (see [Pull Payouts](#pull-payouts-547)). |
+| Dispute resolutions (`release_dispute_payout`, `super_arbiter_resolve`, `resolve_escalation_timeout`) | The preference is not applied. Escrow token paid to the payout destination. |
+
+The preference is applied on the confirmation paths (`confirm_milestone`, `confirm_milestone_with_note`, `batch_confirm_milestones`, `force_confirm_milestone`, `accept_partial_confirmation`) and on streamed claims (`claim_streamed_payout`).
+
+Events: `("payout_swapped", recipient)` with `(escrow_token, to_token, amount, amount_out)`; `("payout_swap_fallback", recipient)` with `(escrow_token, to_token, amount, min_out)`.
+
+### Trust assumptions
+
+The swap adapter is set by the admin and is fully trusted. The contract does not check the balance the adapter actually delivers. It checks only the amount that `swap` returns against `min_out`. The adapter receives the escrow tokens for the swap before the output is known, so a malicious or buggy adapter can keep the pulled amount and still report success. Register only an adapter you have reviewed. Use `clear_swap_adapter` to stop all new swaps.
+
+## Streamed Milestone Payouts (#466)
+
+By default a confirmed milestone pays the recruiter side in one transfer. Setting `EngagementConfig::stream_duration_ledgers = Some(n)` at creation vests each confirmed milestone's net payout linearly over `n` ledgers instead. `None` keeps the lump-sum payout. The value is copied onto the engagement at creation and cannot be changed afterwards. `Some(0)` panics at `create_engagement` with `InvalidStreamDuration`.
+
+### When streaming starts
+
+Vesting starts on the confirmation ledger, and the recruiter pulls the vested amount with `claim_streamed_payout`.
+
+- The platform fee is collected immediately at confirmation. The net amount (the milestone payment minus the platform fee) is held in the contract and vests from that ledger.
+- Streaming applies on `confirm_milestone`, `confirm_milestone_with_note` and `accept_partial_confirmation`.
+- `batch_confirm_milestones` and `force_confirm_milestone` do not stream. They pay the net amount as a lump sum even when `stream_duration_ledgers` is set. Dispute resolutions also pay lump sums.
+- If a milestone is re-confirmed after a replacement while an earlier stream still has unclaimed balance, that balance is folded into the new stream. The new stream starts at the new confirmation ledger.
+
+### Vesting formula
+
+```
+vested  = total × min(elapsed, duration) ÷ duration      (rounded down)
+elapsed = current_ledger − start_ledger
+```
+
+Once `elapsed >= duration`, `vested == total` exactly, so rounding dust is never lost. For example, a stream with `total = 1_000_000` and `duration = 1_000` has `250_000` vested at 250 ledgers and the full `1_000_000` at 1 000 ledgers.
+
+### Claiming
+
+| Function                                                  | Caller                    | Description                                                                                                                                                                    |
+| --------------------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `claim_streamed_payout(recruiter, engagement_id, milestone_index)` → `i128` | Anyone may submit; `recruiter` must be the engagement's recruiter | Transfers the currently vested, unclaimed amount and returns it. Returns `0` without panicking when nothing new has vested. Panics `unauthorized` if `recruiter` is not the engagement's recruiter, and `NoStreamedPayout` if the milestone has no stream. Fails with `ContractPaused`, `EngagementPaused` or a milestone hold. |
+| `get_streamed_payout_status(engagement_id, milestone_index)` → `(i128, i128)` | Anyone | Returns `(claimed, total)`, or `(0, 0)` when the milestone has no stream. It does not return the vested amount or the start ledger. |
+
+- No signature is required to claim, but funds only go to the recruiter side. The payment goes through the same path as a lump-sum payout, so the co-recruiter split, the payout destination and the payout token preference all apply at claim time, using the values in effect when the claim runs.
+- With `pull_payouts = true` the claimed amount is credited to `RecruiterClaimable` instead of transferred, as described in [Pull Payouts](#pull-payouts-547).
+- No query returns the stream's `start_ledger`. To compute the vested amount off-chain, take the ledger in which the milestone was confirmed from the `milestone_confirmed` event.
+
+Event: `("streamed_payout_claimed", engagement_id)` with `(milestone_index, amount, claimed_total)`, emitted only when `amount > 0`.
+
+## Recruiter Active-Engagement Caps (#482)
+
+Two caps limit how many engagements a recruiter can hold at once. A recruiter can set a cap for themselves, and the admin can set one for every recruiter. The contract enforces the tighter of the two, adjusted for the recruiter's stake.
+
+| Function                                           | Caller                    | Description                                                                                                                                                                                  |
+| -------------------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `set_recruiter_active_cap(recruiter, cap)`         | Recruiter (must sign)     | Self-imposed cap. `0` removes it. Emits `recruiter_active_cap_set`.                                                                                                                          |
+| `get_recruiter_active_cap(recruiter)` → `Option<u32>` | Anyone                 | The self-imposed cap, or `None` when unset.                                                                                                                                                  |
+| `set_max_active_per_recruiter(admin, count)`       | Admin                     | Contract-wide cap for every recruiter. `0` means unlimited. Emits `max_active_per_recruiter_set`. Panics `NoAdmin` if the admin role is renounced, and `unauthorized` if the caller is not the admin. |
+| `get_max_active_per_recruiter()` → `u32`           | Anyone                    | The contract-wide cap, or `0` when unlimited.                                                                                                                                                |
+| `get_recruiter_effective_cap(recruiter)` → `u32`   | Anyone                    | The cap in force for this recruiter now, including the stake bonus. `0` when unlimited.                                                                                                      |
+
+### Which cap wins
+
+- A side is unlimited when its value is `0` or unset. If both sides are unlimited there is no cap. If only one side is set, that one applies. If both are set, the lower one applies.
+- The stake bonus raises only the admin-wide cap. It is added to `set_max_active_per_recruiter` when that cap is non-zero. The bonus comes from the recruiter's stake tier (`stake_recruiter`, `get_recruiter_stake_bonus`), and it never raises the self-imposed cap.
+
+In short: `effective cap = min(self-imposed cap, admin cap + stake bonus)`, with the zero rules above.
+
+### What counts toward the cap
+
+- Engagements the recruiter is bound to in `Active` or `Offered` status count toward the cap. An `Offered` engagement holds a slot. Accepting it moves it to `Active`, which still counts. Withdrawing the offer frees the slot.
+- The count is computed on each check by scanning the recruiter's engagement index. No counter is stored.
+- A slot is freed as soon as an engagement leaves `Active` and `Offered`. That includes `Completed`, `Cancelled`, `Expired`, `ReplacementRequested` and `ExitRequested`.
+
+### Enforcement
+
+- `create_engagement` and `create_engagement_random_panel` reject a new engagement with `RecruiterActiveLimitReached` when the recruiter's count is already at the effective cap.
+- The company-wide cap (`set_max_active_per_company`) is checked first. If the company is at its limit, the call panics with `CompanyActiveLimitReached` before the recruiter cap is read.
+- Lowering a cap does not close existing engagements. It only blocks new ones.
+- `unstake_recruiter` panics with `UnstakeBelowActiveCount` when the unstake would lower the effective cap below the recruiter's current count.
+
 ## Recruiter Acceptance (#569)
 
 `create_engagement` normally locks escrow and makes the engagement `Active` straight away, without the recruiter agreeing to the terms. Setting `EngagementConfig::require_recruiter_acceptance = true` creates it in the `Offered` status instead. The escrow (and any bonds) are still locked at creation.
@@ -1224,6 +1501,50 @@ While `Offered`:
 - An offer the recruiter never accepts can be closed by `expire_engagement` once the inactivity timeout passes, with a full refund.
 
 Events: `("engagement_offered", engagement_id)` with `(company, recruiter, total_amount)` after `engagement_created`; `("engagement_accepted", engagement_id)` with `recruiter`; `("offer_withdrawn", engagement_id)` with the refund. Acceptance and withdrawal also emit `status_changed` and are recorded in `get_status_history`.
+
+### Counter-offers (#676)
+
+While an engagement is `Offered`, the recruiter can propose different terms instead of accepting or ignoring the offer.
+
+| Function                                                                    | Caller                                                                | Description                                                                                                                                                                                                                                                                                                                                                                                                               | Panics                                                                                                                                                                                                         |
+| --------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `counter_offer(recruiter, engagement_id, total_amount, milestone_percents)` | Recruiter or their cosigner (any eligible recruiter on an open offer) | Propose a new `total_amount` and a new `payment_percent` per milestone, by index. Only one counter-offer can be pending per engagement.                                                                                                                                                                                                                                                                                   | `EngagementNotOffered`, `unauthorized`, `RecruiterNotEligible`, `CounterOfferPending`, `AmountBelowMinimum`, `CounterOfferMilestoneMismatch`, `milestone percentages must sum to 100`, `CounterOfferUnchanged` |
+| `accept_counter_offer(company, engagement_id)`                              | Company or its cosigner                                               | Apply the counter and make the engagement `Active`, in one call. The escrow difference moves at the same time: an increase is pulled from the caller (from the company pool if the engagement is pool-funded), and a decrease is returned to the company (to its pool if pool-funded). If the pool can't cover an increase, nothing changes. With `snapshot_fee_tier`, the fee tier is re-resolved against the new total. | `EngagementNotOffered`, `unauthorized`, `NoCounterOffer`, `InsufficientCompanyBalance`                                                                                                                         |
+| `reject_counter_offer(company, engagement_id)`                              | Company or its cosigner                                               | Discard the counter. The offer stays `Offered` on its original terms.                                                                                                                                                                                                                                                                                                                                                     | `EngagementNotOffered`, `unauthorized`, `NoCounterOffer`                                                                                                                                                       |
+| `withdraw_counter_offer(recruiter, engagement_id)`                          | The countering recruiter or its cosigner                              | Discard your own counter so you can make a different one.                                                                                                                                                                                                                                                                                                                                                                 | `NoCounterOffer`, `unauthorized`                                                                                                                                                                               |
+| `get_counter_offer(engagement_id)` → `Option<CounterOffer>`                 | Anyone                                                                | The pending counter, if any.                                                                                                                                                                                                                                                                                                                                                                                              | —                                                                                                                                                                                                              |
+
+`accept_engagement`, `withdraw_offer` and `expire_engagement` all discard a pending counter. Accepting a counter makes the engagement active because the recruiter has already agreed to those terms by proposing them.
+
+Events: `counter_offer_proposed` with `(recruiter, total_amount, milestone_percents)`; `counter_offer_accepted` with `(company, old_total, new_total)`, followed by `engagement_accepted`; `counter_offer_rejected` with `(company, recruiter)`; `counter_offer_withdrawn` with `recruiter`.
+
+### Open offers (#677)
+
+`create_open_engagement(engagement_id, company, eligible_recruiters, arbiter_setup, token, total_amount, job_title, milestones, retention_days, config)` takes the same arguments as `create_engagement`, except that `eligible_recruiters` (1–20 distinct addresses) replaces `recruiter`. The engagement is always created `Offered`. The first eligible recruiter, or the cosigner of one, to call `accept_engagement` becomes its recruiter. An eligible recruiter can also send a `counter_offer`, and if the company accepts it, that recruiter becomes the recruiter.
+
+This is a separate entry point rather than an optional `recruiter` on `create_engagement`. That's because `recruiter` is a required argument of the existing ABI, and `create_engagement` already uses Soroban's 10-argument limit.
+
+- Until someone claims the offer, `Engagement::recruiter` holds the contract's own address as a placeholder. The engagement does not appear in any recruiter's index. Use `get_eligible_recruiters(engagement_id)` and `is_open_offer(engagement_id)` to see who can claim it.
+- The company's active-engagement slot is taken at creation, the same as for any `Offered` engagement. A recruiter's caps (`set_recruiter_active_cap`, `set_max_active_per_recruiter`) are checked when it accepts, and a recruiter at its cap can't claim the offer. Role collisions with the company and the arbiter panel are checked again at that point.
+- `withdraw_offer` and `expire_engagement` work as they do for any other offer.
+- `recruiter_bond_amount` is rejected (`OpenOfferBondUnsupported`), because there is no recruiter to post the bond at creation. Co-recruiter bonds still work.
+
+Panics: `NoEligibleRecruiters`, `TooManyEligibleRecruiters`, `DuplicateEligibleRecruiter`, `CompanyRecruiterCollision`, `RecruiterArbiterCollision`, `OpenOfferBondUnsupported`, plus everything `create_engagement` can raise. `accept_engagement` adds `RecruiterNotEligible` and `RecruiterActiveLimitReached`.
+
+Events: `open_offer_created` with `(company, eligible_recruiters, total_amount)`; `open_offer_claimed` with the bound recruiter, emitted before `engagement_accepted`.
+
+## Book-keeping Invariants and Stray Tokens (#671, #672)
+
+Every token the contract holds is in one of six tracked buckets, and each bucket keeps a running total per token: engagement escrow (`get_token_tvl`), pooled company balances, pull-payout credits, unsettled bonds, redeemable fee rebates, and unclaimed streamed payouts. Each engagement also tracks its own escrow balance and a cumulative `refunded` amount. `refunded` covers money returned to the company on cancellation, expiry, a withdrawn offer, or a no-show forfeit, none of which is added to `released_amount`. `get_escrow_balance` now returns `total_amount - released_amount - refunded`, so a cancelled engagement reports `0`.
+
+| Function                                                     | Caller                                | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------------------------------ | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `check_escrow_invariants(engagement_id)` → `InvariantReport` | Anyone; read-only, works while paused | Compares the engagement's tracked escrow with `total_amount - released - refunded`. Also checks that the amounts are in range, the percentages sum to 100, the milestone states match the engagement status, and that a terminal engagement has no escrow left (a `Completed` engagement may keep at most one unit of rounding dust per milestone). `ok` is true only if every check passes.                                                                                                                     |
+| `check_token_invariants(token)` → `TokenInvariantReport`     | Anyone; read-only, works while paused | Sums the per-engagement escrow, bonds and streams over the token's engagements and compares each sum with its running total. Then compares the total of all tracked buckets with the token balance the contract actually holds. `surplus > 0` means stray tokens and does not fail the check. `surplus < 0` is a shortfall and does. The query walks every engagement in the token, so run it in simulation.                                                                                                     |
+| `get_stray_token_balance(token)` → `i128`                    | Anyone                                | Amount `recover_stray_tokens` would transfer right now.                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `recover_stray_tokens(admin, token, to)` → `i128`            | Admin                                 | Transfers `contract balance − tracked total` to `to`. Tracked funds can't be withdrawn this way. When a config cosigner is set and fn id `7` (`FN_RECOVER_STRAY_TOKENS`) is in `set_sensitive_functions`, the call only opens a pending config change and returns `0`. The transfer then happens on `accept_config_change`, using the stray amount at that moment. Panics: `ContractPaused`, `unauthorized`, `InvalidRecipient`, `NoStrayTokens`. Emits `("stray_tokens_recovered", token)` with `(to, amount)`. |
+
+The running totals only count balances created after they were introduced. On a contract upgraded from an earlier version, don't call `recover_stray_tokens` until `check_token_invariants` reports `totals_consistent`.
 
 ---
 
@@ -1252,6 +1573,48 @@ Ratings are credited to whoever holds the role at completion time. If the
 recruiter role was transferred mid-engagement via
 [`accept_recruiter_transfer`](#recruiter-transfer), the incoming address receives
 the rating — matching where the milestone payouts went.
+
+## Rating-Based Proof Cooldown Discount (#470)
+
+Proof resubmissions on a milestone are rate-limited by a cooldown. The base cooldown is `ProofCooldown`, set with `set_proof_cooldown` and defaulting to `2_880` ledgers (about four hours). The first submission on a milestone is always allowed. A later submission panics with `ResubmitTooSoon` until the ledger of the previous submission on that milestone (`LastProofAt`) plus the effective cooldown has passed. This applies to `submit_proof` and `submit_proof_root`.
+
+A recruiter with a good rating can get a shorter cooldown. The admin sets the curve, and the contract applies it per recruiter.
+
+| Function                                                                                 | Caller | Description                                                                                                                                                                 |
+| ---------------------------------------------------------------------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `set_cooldown_rating_discount(admin, discount_per_star_ledgers, min_cooldown_ledgers)`    | Admin  | Set the discount curve. Setting `discount_per_star_ledgers` to `0` disables the discount. Emits `cooldown_discount_set`. The name is shorter than the issue's `set_proof_cooldown_rating_discount` to fit Soroban's 32-character function name limit. |
+| `get_cooldown_rating_discount()` → `ProofCooldownDiscount`                              | Anyone | Returns `{ discount_per_star_ledgers, min_cooldown_ledgers }`. Both are `0` when unset.                                                                                     |
+| `set_cooldown_uses_recent_rating(admin, use_recent)`                                     | Admin  | `false` (the default) uses the recruiter's lifetime average rating. `true` uses the recency-weighted rating instead. Emits `cooldown_recent_set`.                           |
+| `get_cooldown_uses_recent_rating()` → `bool`                                             | Anyone | Whether the recency-weighted rating is used.                                                                                                                                |
+| `get_effective_proof_cooldown(recruiter)` → `u32`                                        | Anyone | The cooldown in ledgers that applies to this recruiter right now. Read-only.                                                                                                |
+
+`ProofCooldownDiscount` has two fields:
+
+- `discount_per_star_ledgers` (`u32`): ledgers removed from the base cooldown for each average star.
+- `min_cooldown_ledgers` (`u32`): the floor the discounted cooldown cannot go below.
+
+### How the effective cooldown is derived
+
+1. If `discount_per_star_ledgers` is `0`, or the recruiter has no rating, the result is the base cooldown.
+2. Otherwise compute the average stars × 100:
+   - Lifetime mode: `stars_x100 = total_stars × 100 ÷ rating_count`, rounded down.
+   - Recency mode: `stars_x100` is the recency-weighted average, in the same units.
+3. `discount = stars_x100 × discount_per_star_ledgers ÷ 100`, rounded down.
+4. `effective = max(base − discount, min_cooldown_ledgers)`, saturating at zero, then capped at `base`.
+
+The floor is applied after the discount. If `min_cooldown_ledgers` is above the base cooldown, the result is still the base, so the discount can never lengthen the cooldown.
+
+### Worked example
+
+Assume the base cooldown is `2_880` ledgers, `discount_per_star_ledgers = 100` and `min_cooldown_ledgers = 2_000`, with lifetime mode:
+
+| Recruiter                        | `stars_x100` | `discount` | `base − discount` | Effective cooldown |
+| -------------------------------- | ------------ | ---------- | ----------------- | ------------------ |
+| Unrated                          | —            | —          | —                 | `2_880`            |
+| 3-star average                   | `300`        | `300`      | `2_580`           | `2_580`            |
+| 5-star average                   | `500`        | `500`      | `2_380`           | `2_380`            |
+
+If the admin instead sets `discount_per_star_ledgers = 300`, the same 5-star recruiter gets `500 × 300 ÷ 100 = 1_500`. That gives `2_880 − 1_500 = 1_380`, which is below the floor, so the effective cooldown is `2_000`.
 
 ## Token Allowlist
 
@@ -1360,11 +1723,11 @@ engagement is quarantined.
 | Submit proof that a milestone is done                   | `submit_proof`                                                                    |
 | Withdraw payouts credited by `pull_payouts` engagements | `claim_payouts`                                                                   |
 | Submit several evidence items as one proof              | `submit_proof_root` (Merkle root)                                                 |
-| Withdraw the vested part of a streamed milestone payout | `claim_streamed_payout`                                                           |
-| Get paid in a different token                           | `set_recruiter_payout_token` / `clear_recruiter_payout_token`                     |
-| Accept or decline a partial confirmation of a submitted milestone | `accept_partial_confirmation` / `reject_partial_confirmation` |
+| Withdraw the vested part of a streamed milestone payout | `claim_streamed_payout` ([details](#streamed-milestone-payouts-466))              |
+| Get paid in a different token                           | `set_recruiter_payout_token` / `clear_recruiter_payout_token` ([details](#recruiter-payout-tokens-and-the-swap-adapter-458)) |
 | Hand the engagement to another recruiter address        | `propose_recruiter_transfer` (then the company calls `accept_recruiter_transfer`) |
 | Let a second key act for the recruiter                  | `set_recruiter_cosigner`                                                          |
+| Limit how many engagements I hold at once               | `set_recruiter_active_cap` ([details](#recruiter-active-engagement-caps-482))     |
 
 #### Company or recruiter
 
@@ -1417,11 +1780,11 @@ holds, so a keeper or either party can run them.
 | Split fees across several treasuries          | `set_fee_treasuries` / `clear_fee_treasuries`                                                                                                                                                                    |
 | Manage referrals                              | `add_referrer`, `remove_referrer`, `set_referral_discount_bps`                                                                                                                                                   |
 | Control which tokens and amounts are accepted | `add_allowed_token`, `remove_allowed_token`, `set_token_allowlist_enabled`, `set_min_amount`, `set_token_min_amount`, `remove_token_min_amount`                                                                  |
-| Tune timing windows                           | `set_confirm_window`, `set_dispute_window`, `set_proof_cooldown`, `set_cooldown_rating_discount`, `set_no_show_deadline_ledgers`, `set_amendment_ttl`, `set_super_arbiter_deadline`, `set_arbiter_vote_deadline` |
-| Tune limits                                   | `set_max_active_per_company`, `set_max_replacements`                                                                                                                                                             |
+| Tune timing windows                           | `set_confirm_window`, `set_dispute_window`, `set_proof_cooldown`, [`set_cooldown_rating_discount`](#rating-based-proof-cooldown-discount-470), `set_no_show_deadline_ledgers`, `set_amendment_ttl`, `set_super_arbiter_deadline`, `set_arbiter_vote_deadline` |
+| Tune limits                                   | `set_max_active_per_company`, `set_max_replacements`, `set_max_active_per_recruiter` ([details](#recruiter-active-engagement-caps-482)) |
 | Configure arbitration                         | `set_super_arbiter`, `set_arbiter_fee`, `set_split_voting_enabled`, `add_arbiter_pool_member`, `remove_arbiter_pool_member`, `set_bond_forfeit_bps`                                                              |
 | Grow or shrink one engagement's arbiter panel | `admin_add_arbiter` / `admin_remove_arbiter`                                                                                                                                                                     |
-| Configure payout-token swaps                  | `set_swap_adapter` / `clear_swap_adapter`                                                                                                                                                                        |
+| Configure payout-token swaps                  | `set_swap_adapter` / `clear_swap_adapter` ([details](#recruiter-payout-tokens-and-the-swap-adapter-458))                                                                                                         |
 | Mark a recruiter as verified                  | `set_recruiter_verified`                                                                                                                                                                                         |
 | Upgrade the contract                          | `set_upgrade_lock_duration`, `propose_upgrade`, then anyone calls `execute_upgrade`                                                                                                                              |
 | Label the deployed version                    | `set_version`                                                                                                                                                                                                    |
@@ -1612,6 +1975,83 @@ To check ahead of a write, query both `is_paused()` and
 `is_engagement_paused(engagement_id)` — a call is only accepted when **both**
 return `false`.
 
+### Emergency Multi-Sig Pause (#474)
+
+The contract supports an M-of-N emergency pause mechanism that allows a configured set of emergency signers to trigger a pause **without admin approval**. This is designed for rapid response to security incidents or urgent situations where the admin may be unavailable.
+
+#### How It Works
+
+1. **Admin configures the signer set**: The admin calls `set_emergency_signers(admin, signers, threshold)` to designate the M-of-N signers and their voting threshold.
+   - `signers`: A vector of addresses authorized to cast emergency pause votes.
+   - `threshold`: The number of distinct signers required to trigger a pause (M-of-N).
+   - Duplicate addresses are rejected.
+   - The threshold must be `≥ 1` and `≤ signers.len()`.
+
+2. **Signers cast votes**: Any configured signer calls `cast_emergency_pause_vote(signer, engagement_id)`.
+   - Pass `engagement_id: None` to vote for a **global contract pause**.
+   - Pass `engagement_id: Some("ENG-123")` to vote for a **per-engagement pause** (quarantine).
+   - Each signer may vote once per vote window (default: 1,728 ledgers ≈ 2 hours).
+   - Duplicate votes from the same signer are rejected with `"already voted"`.
+
+3. **Automatic pause when threshold is reached**: Once `threshold` distinct signers have voted within the vote window, the pause is triggered automatically:
+   - **Global pause**: Sets the contract-wide pause flag (`is_paused()` returns `true`). Equivalent to `pause(admin)`.
+   - **Per-engagement pause**: Sets the engagement's quarantine flag (`is_engagement_paused(engagement_id)` returns `true`). Equivalent to `pause_engagement(admin, engagement_id)`.
+   - The vote tally is then reset.
+
+4. **Vote window expiry**: If the threshold is not reached within the vote window, the tally expires and resets. The vote window is configurable by the admin via `set_emergency_vote_window(admin, ledgers)` (default: 1,728 ledgers ≈ 2 hours).
+
+5. **Only the admin can unpause**: Emergency signers can **only** trigger pauses. The admin must call `unpause(admin)` or `unpause_engagement(admin, engagement_id)` to lift the pause. Emergency signers cannot reverse their own action.
+
+#### Configuration
+
+| Function                                           | Description                                                                                            |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `set_emergency_signers(admin, signers, threshold)` | Configure the M-of-N signer set. Clears any in-flight tallies. Emits `emergency_signers_set`.          |
+| `set_emergency_vote_window(admin, ledgers)`        | Set the vote window duration in ledgers (default: 1,728 ≈ 2 hours). Emits `emergency_vote_window_set`. |
+| `get_emergency_signers()`                          | Returns the current `EmergencySignerConfig` (signers, threshold, vote window).                         |
+
+#### Voting
+
+| Function                                           | Description                                                                                                    |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `cast_emergency_pause_vote(signer, engagement_id)` | Cast an emergency pause vote. When threshold is reached, triggers pause and emits `emergency_pause_triggered`. |
+
+#### Events
+
+| Event                       | Topics          | Payload                              | Trigger                                                 |
+| --------------------------- | --------------- | ------------------------------------ | ------------------------------------------------------- |
+| `emergency_signers_set`     | —               | `(signers.len(), threshold)`         | `set_emergency_signers`                                 |
+| `emergency_vote_window_set` | —               | `ledgers`                            | `set_emergency_vote_window`                             |
+| `emergency_pause_vote`      | —               | `(signer, current_votes, threshold)` | `cast_emergency_pause_vote` (threshold not yet reached) |
+| `emergency_pause_triggered` | —               | `(tally_key_id, threshold)`          | `cast_emergency_pause_vote` (threshold reached)         |
+| `paused`                    | —               | `signer`                             | Emergency global pause triggered                        |
+| `engagement_paused`         | `engagement_id` | `(signer, reason)`                   | Emergency per-engagement pause triggered                |
+
+**Example:**
+
+```rust
+// Admin configures 3 signers with a 2-of-3 threshold
+client.set_emergency_signers(&admin, &vec![&env, signer1, signer2, signer3], &2);
+
+// Signer 1 votes for a global pause
+client.cast_emergency_pause_vote(&signer1, &None);
+// Not paused yet — only 1 of 2 votes
+
+// Signer 2 votes for a global pause
+client.cast_emergency_pause_vote(&signer2, &None);
+// Threshold reached — contract is now paused
+
+// Admin must unpause
+client.unpause(&admin);
+```
+
+**Security considerations:**
+
+- Emergency signers should be distinct from the admin and each other.
+- The signer set is typically a cold multisig or a set of trusted guardians.
+- Once configured, emergency signers can pause the contract or any engagement without admin approval, so choose signers carefully.
+- The vote window should be short enough to prevent vote manipulation but long enough for M signers to coordinate.
+
 ### Milestone Due-Soon Notifications
 
 Soroban contracts cannot schedule their own work, so the due-soon signal follows
@@ -1705,6 +2145,27 @@ get_arbiter_votes()
 
 This read-only function returns the current approval and rejection vote counts without exposing the voter list, allowing dashboards to display dispute progress while preserving voter privacy.
 
+#### Split (Partial-Approval) Voting (#462)
+
+A binary approve/reject vote forces arbiters to pick a side even when the fair outcome is "pay most of it." Split voting lets each arbiter instead vote a percentage (0–100) of the milestone's share that should go to the recruiter, settling the dispute at a weighted median instead of an all-or-nothing quorum.
+
+| Function                                                                          | Caller                                                           | Description                                                                                               |
+| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `set_split_voting_enabled(admin, engagement_id, enabled)`                         | Admin                                                            | Turn split voting on or off for one engagement. Disabled by default.                                      |
+| `is_split_voting_enabled(engagement_id)` → `bool`                                 | Anyone                                                           | Whether split voting is enabled for the engagement.                                                       |
+| `cast_arbiter_split_vote(arbiter, engagement_id, milestone_index, split_percent)` | Arbiter, or their [vote delegate](#arbiter-vote-delegation-463) | Vote that `split_percent`% of the milestone's share should go to the recruiter.                           |
+| `get_dispute_split_votes(engagement_id, milestone_index)` → `Vec<u32>`            | Anyone                                                           | The individual split percentages submitted so far, in submission order. Empty once the dispute resolves. |
+
+Once the cumulative weight of split voters reaches the engagement's `quorum`, the dispute resolves at the **lower weighted median** of the submitted percentages: sort the votes ascending and take the first percentage whose cumulative voter weight (at or below it) reaches at least half the total weight cast. Unweighted, that's the middle vote for an odd count and the lower of the two middle votes for an even count — e.g. votes of 30 and 70 settle at 30.
+
+On resolution, with `share = total_amount * payment_percent / 100`, `share * settled / 100` is released exactly like an approved binary dispute — platform fee deducted, arbiter fee to the arbiter whose vote reached quorum, net to the recruiter(s). The remainder stays in escrow: it is not released, counts toward the engagement's escrow balance, and is refunded to the company (or credited to its pool, if [pool-funded](#pooled-company-escrow-balances-472)) on a later cancel, expiry, or completion. The milestone moves to `Resolved`. A settled percentage of 50 or more counts as a recruiter win for `record_dispute_outcome`, same as an approved binary vote.
+
+A dispute is decided by binary votes or split votes, never both: casting one after the other fails with `MixedVoteModes`. Split voting is also not supported together with [commit-reveal voting](#arbiter-voting) (`CommitRevealSplitUnsupported`); use binary weighted votes under commit-reveal instead. A recused arbiter (self-recused or recused by the vote deadline) cannot cast a split vote (`ArbiterRecused`), and each arbiter slot may cast at most one split vote per dispute (`duplicate vote`).
+
+Panics: `SplitVotingDisabled`, `InvalidSplitPercent` (`split_percent > 100`), `CommitRevealSplitUnsupported`, `MixedVoteModes`, `ArbiterRecused`, `duplicate vote`, plus the usual `engagement is not active` / `milestone is not in disputed status` / `unauthorized`.
+
+Events: `("arbiter_split_voted", engagement_id)` with `(milestone_index, split_percent)`; if cast through a delegate, also `("arbiter_vote_delegated", engagement_id)` with `(milestone_index, arbiter, delegate)`. On resolution: `("dispute_split_resolved", engagement_id)` with `(milestone_index, settled_percent, released, withheld)`, followed by the usual `dispute_resolved` and status-change events.
+
 #### Arbiter Succession
 
 To support long-running engagements, HireSettle allows arbiters to transfer their responsibilities to a successor without modifying the engagement itself.
@@ -1724,6 +2185,67 @@ claim_arbiter()
 ```
 
 Only the nominated address can complete the claim. Once claimed, the successor assumes the arbiter's position for future dispute voting while preserving the integrity of the arbitration panel.
+
+#### Arbiter Vote Delegation (#463)
+
+Succession permanently hands a panel slot to a new address. Delegation is lighter: the arbiter stays on the panel and keeps full ownership of the seat, but authorizes one other address to cast votes on its behalf — useful for an arbiter who uses a hot key for day-to-day voting while keeping the seat's identity on a cold key, or a firm that arbitrates as an organization but votes through a specific employee.
+
+| Function                                                                     | Caller  | Description                                                                                            |
+| ------------------------------------------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------- |
+| `set_arbiter_vote_delegate(arbiter, engagement_id, delegate)`                | Arbiter | Set (`Some(delegate)`) or clear (`None`) the address that may vote for this arbiter's slot.           |
+| `get_arbiter_vote_delegate(engagement_id, arbiter)` → `Option<Address>`      | Anyone  | The delegate currently set for this arbiter's slot on this engagement, if any.                        |
+
+A delegate can call `cast_arbiter_vote`, `change_arbiter_vote`, and `cast_arbiter_split_vote` in place of the arbiter; the vote is recorded against the arbiter's slot and weight, not the delegate's. The delegate has no other arbiter power — it cannot recuse the seat, nominate a successor, or anything else gated on `arbiters.contains(caller)`.
+
+A delegate must be a disinterested third party: it is rejected (`InvalidDelegate`) if it is the engagement's company, its recruiter, or any address already on the arbiter panel. Each address may be the active delegate for at most one arbiter slot per engagement at a time (`DelegateAlreadyAssigned`), so a company can't quietly consolidate votes behind one address. Delegation is set per engagement and is cleared automatically if the arbiter's slot is removed by `admin_remove_arbiter`.
+
+Panics: `InvalidDelegate`, `DelegateAlreadyAssigned`, `unauthorized` (caller is not on the arbiter panel), `engagement is in a terminal state`.
+
+Events: `("arbiter_delegate_set", engagement_id)` with `(arbiter, delegate)`. A vote cast through a delegate also emits `("arbiter_vote_delegated", engagement_id)` with `(milestone_index, arbiter, delegate)` alongside the usual vote event.
+
+#### Arbiter Self-Recusal (#477)
+
+An arbiter with a conflict of interest on a specific dispute can step aside instead of voting (or not voting and stalling it).
+
+| Function                                                            | Caller  | Description                                                                                                  |
+| ---------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------- |
+| `recuse_arbiter(arbiter, engagement_id, milestone_index)`           | Arbiter | Step aside from this dispute. The arbiter can no longer cast a binary or split vote on it.                  |
+| `get_recused_arbiters(engagement_id, milestone_index)` → `Vec<Address>` | Anyone  | Addresses that have recused from this specific dispute.                                                      |
+
+Recusal only affects the **rejection** threshold's math, by shrinking the active arbiter weight it's computed against (`Self::active_arbiter_weight`); the **approval** quorum (`engagement.quorum`) is unchanged, since it's an absolute weight regardless of how many seats remain live. A recused arbiter is simply removed from the dispute — it is not replaced, and the panel itself (`engagement.arbiters`) is untouched. Recusal is per dispute: it is cleared when the dispute resolves and again whenever a new dispute is later raised on the same milestone.
+
+An arbiter cannot recuse after already voting on the dispute (`already voted`), and cannot recuse twice (`already recused`). This is the same recusal list that [`enforce_vote_deadline`](#arbiter-vote-deadline-560) writes to when it force-recuses arbiters who missed the vote deadline — `get_recused_arbiters` returns both voluntary and forced recusals, and `is_arbiter_recused` is checked the same way before any vote.
+
+Panics: `unauthorized` (caller is not on the arbiter panel), `engagement is not active`, `milestone is not in disputed status`, `already voted`, `already recused`.
+
+Events: `("arbiter_recused", engagement_id)` with `(milestone_index, arbiter)`.
+
+#### Arbiter Pool & Randomized Panels (#467, #468, #562)
+
+`create_engagement` takes an explicit, company-supplied arbiter panel. For companies that would rather not hand-pick their own arbitrators (or be accused of stacking a panel), the admin can maintain a shared pool of vetted arbiters and let the contract draw a random panel from it at creation time.
+
+| Function                                                                  | Caller | Description                                                                                                                 |
+| ----------------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `add_arbiter_pool_member(admin, address)`                                | Admin  | Add an address to the pool. Panics `AlreadyInPool` if it's already a member.                                              |
+| `remove_arbiter_pool_member(admin, address)`                              | Admin  | Remove an address from the pool. Panels already drawn onto existing engagements are unaffected. Panics `NotInPool`.       |
+| `get_arbiter_pool()` → `Vec<Address>`                                     | Anyone | The current pool membership.                                                                                                |
+| `suspend_arbiter_pool_member(admin, arbiter, until_ledger)`               | Admin  | Exclude a member from new draws until `until_ledger`. Keeps its stats and any already-drawn panel seats. Panics `NotInPool`, `InvalidUntilLedger`. |
+| `unsuspend_arbiter_pool_member(admin, arbiter)`                           | Admin  | Lift a suspension early. No-op if not suspended. Panics `NotInPool`.                                                       |
+| `get_arbiter_suspension(arbiter)` → `Option<u32>`                        | Anyone | The ledger a member is suspended until, or `None` if not currently suspended (including an expired suspension).           |
+| `create_engagement_random_panel(engagement_id, company, recruiter, random_setup, token, total_amount, job_title, milestones, retention_days, config)` → `String` | Company | Same as `create_engagement`, except the arbiter panel is drawn from the pool instead of supplied directly. `random_setup: RandomArbiterSetup { panel_size, quorum }`. |
+
+**The draw.** `panel_size` distinct members are drawn without replacement from the pool, excluding the engagement's own `company` and `recruiter` (who would otherwise be rejected as colliding parties anyway) and any currently-suspended member. Each eligible member's chance of being drawn is proportional to its *selection weight* (`get_arbiter_selection_weight(address)` → `1`–`100`), computed from `get_arbiter_stats(address)`:
+
+- An address with no dispute history yet gets the neutral weight `50`, so new pool members are eligible rather than excluded.
+- Otherwise `weight = max(1, completion * speed / 100)`, where `completion = 100 * votes_cast / (disputes_assigned + missed_vote_deadlines)` and `speed = 100 * R / (R + avg_response_ledgers)` (`R` = 17 280 ledgers, ~1 day). A [missed vote deadline](#arbiter-vote-deadline-560) counts as a second unanswered assignment. `speed` is 100 for instant votes, 50 at a one-day average response, and 0 if the arbiter never voted. The floor of 1 keeps even a consistently absent member drawable, just rarely — the admin, not the formula, decides pool membership.
+
+The drawn panel is passed straight into the normal engagement-creation path with unweighted arbiters (`weights: None`) and the given `quorum`, so everything else — voting, delegation, recusal, succession, panel resize — works identically to a manually-assigned panel.
+
+**Randomness caveat.** The draw uses `env.prng()`, Soroban's per-invocation PRNG — a ChaCha20 stream seeded from ledger data that is public as soon as a ledger is nominated and is under the influence of validators. It raises the cost of a company hand-picking its own panel; it is **not** a cryptographic guarantee of fairness against a motivated validator. Pair it with a large, vetted pool for high-value disputes, or supply an explicit panel via `create_engagement` instead.
+
+Panics: `ArbiterPoolTooSmall` (the pool, after excluding the company, recruiter, and suspended members, has fewer than `panel_size` eligible candidates), `AlreadyInPool`, `NotInPool`, `InvalidUntilLedger`, plus everything `create_engagement` panics on (including `invalid quorum` when `quorum` is 0 or exceeds `panel_size`).
+
+Events: `("arbiter_pool_added",)` with `address`; `("arbiter_pool_removed",)` with `address`; `("arbiter_suspended",)` with `(arbiter, until_ledger)`; `("arbiter_unsuspended",)` with `arbiter`; `("arbiters_drawn", engagement_id)` with the drawn panel, emitted before `engagement_created`.
 
 #### Admin Panel Resize (#507)
 
@@ -1839,6 +2361,139 @@ arbiter fee is deducted since the Super Arbiter did not act. The admin can tune
 the window via `set_super_arbiter_deadline(admin, ledgers)` and read it with
 `get_super_arbiter_deadline()`; `get_super_arbiter_resolutions()` reports the
 total number of disputes concluded through the escalation path.
+
+#### Dispute Cycle Cap (#481)
+
+By default, a milestone can be disputed an unlimited number of times — a company can raise a dispute, the arbiter panel can reject it (returning the milestone to `Pending`), the recruiter can submit new proof, and the company can dispute again, indefinitely.
+
+To prevent abuse or endless cycles, the admin can configure a **maximum number of dispute cycles per milestone**:
+
+```rust
+set_max_dispute_cycles(admin, count)
+```
+
+- **`count = 0`**: Removes the cap, restoring unlimited dispute cycles (default behavior).
+- **`count > 0`**: Limits each milestone to `count` dispute cycles.
+
+**Behavior:**
+
+- Each time `raise_dispute` is called on a milestone, the contract increments that milestone's dispute cycle counter.
+- Once the counter reaches the configured cap, `raise_dispute` panics with `MaxDisputeCyclesReached`.
+- **Instant escalation**: When a milestone is at its dispute cycle cap and a dispute is in progress, `escalate_dispute` becomes eligible **immediately** (no need to wait out the dispute window). This fast-tracks tie-breaking when the cycle limit proves normal arbiter voting is not converging.
+
+**Configuration:**
+
+| Function                               | Description                                                                                    |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `set_max_dispute_cycles(admin, count)` | Set the maximum dispute cycles per milestone. `0` = unlimited. Emits `max_dispute_cycles_set`. |
+| `get_max_dispute_cycles()` → `u32`     | Returns the current cap. `u32::MAX` when unlimited (the default).                              |
+
+**Queries:**
+
+| Function                                                          | Description                                                                    |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `get_dispute_cycle_count(engagement_id, milestone_index)` → `u32` | Returns the number of times `raise_dispute` has been called on this milestone. |
+
+**Example:**
+
+```rust
+// Admin sets a cap of 2 dispute cycles per milestone
+client.set_max_dispute_cycles(&admin, &2);
+
+// Company disputes milestone 0 (cycle 1)
+client.raise_dispute(&company, &eng_id, &0, &"Proof insufficient");
+
+// Arbiters reject, milestone returns to Pending
+// Recruiter submits new proof, company disputes again (cycle 2)
+client.raise_dispute(&company, &eng_id, &0, &"Still insufficient");
+
+// Arbiters reject again, milestone returns to Pending
+// Recruiter submits new proof, company tries to dispute again (cycle 3)
+client.raise_dispute(&company, &eng_id, &0, &"Third time"); // ❌ Panics: MaxDisputeCyclesReached
+
+// At the cap, if the dispute is hung, escalation is instant
+client.escalate_dispute(&eng_id, &0); // ✓ No need to wait out the dispute window
+```
+
+**Use cases:**
+
+- Prevent a company from repeatedly disputing milestones as a stalling tactic.
+- Fast-track Super Arbiter resolution when normal voting is not converging.
+- Provide a clear upper bound on dispute resolution time.
+
+#### Per-Engagement Dispute Window Override (#469)
+
+The contract has a global dispute window (default ~3 days, configurable via `set_dispute_window(admin, ledgers)`). By default, all engagements use this global window: a company must raise a dispute within `get_dispute_window()` ledgers after a proof is submitted.
+
+However, some engagements may require shorter or longer dispute windows. The contract supports **per-engagement dispute window overrides** that company and recruiter can agree on for a specific engagement, overriding the global default.
+
+**How It Works:**
+
+1. **One party proposes an override**: The company or recruiter calls `propose_dispute_window_override(proposer, engagement_id, ledgers)` to propose a custom dispute window (in ledgers).
+   - The proposal expires after a configurable TTL (default: 17,280 ledgers ≈ 1 day).
+   - Only one proposal can be pending at a time per engagement.
+
+2. **The other party accepts or rejects**:
+   - **Accept**: The other party calls `accept_dispute_window_override(acceptor, engagement_id)` to accept the proposal. The custom window is now in effect for this engagement.
+   - **Reject**: The other party calls `reject_dispute_window_override(rejecter, engagement_id)` to reject the proposal. The engagement continues using the global window.
+
+3. **Query the effective window**: `get_engagement_dispute_window(engagement_id)` returns the effective dispute window for the engagement:
+   - If an override was accepted, it returns the override value.
+   - Otherwise, it returns the global `get_dispute_window()`.
+
+**Configuration:**
+
+| Function                                                             | Description                                                                                   |
+| -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| `propose_dispute_window_override(proposer, engagement_id, ledgers)`  | Propose a custom dispute window for the engagement. Panics if a proposal is already pending.  |
+| `accept_dispute_window_override(acceptor, engagement_id)`            | Accept the pending proposal. The override is now in effect. Panics if no proposal is pending. |
+| `reject_dispute_window_override(rejecter, engagement_id)`            | Reject the pending proposal. The engagement continues using the global window.                |
+| `withdraw_dispute_window_override_proposal(proposer, engagement_id)` | Withdraw the pending proposal before the other party acts. Panics if no proposal is pending.  |
+
+**Queries:**
+
+| Function                                                                       | Description                                                                   |
+| ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| `get_engagement_dispute_window(engagement_id)` → `u32`                         | Returns the effective dispute window for the engagement (override or global). |
+| `get_dispute_window_proposal(engagement_id)` → `Option<DisputeWindowProposal>` | Returns the pending proposal, or `None` if none is pending.                   |
+
+**Events:**
+
+| Event                               | Topics          | Payload                                  | Trigger                                     |
+| ----------------------------------- | --------------- | ---------------------------------------- | ------------------------------------------- |
+| `dispute_window_proposed`           | `engagement_id` | `(proposer, ledgers, expires_at_ledger)` | `propose_dispute_window_override`           |
+| `dispute_window_accepted`           | `engagement_id` | `(acceptor, ledgers)`                    | `accept_dispute_window_override`            |
+| `dispute_window_rejected`           | `engagement_id` | `rejecter`                               | `reject_dispute_window_override`            |
+| `dispute_window_proposal_withdrawn` | `engagement_id` | `proposer`                               | `withdraw_dispute_window_override_proposal` |
+
+**Example:**
+
+```rust
+// Company proposes a 5-day dispute window (86,400 ledgers)
+client.propose_dispute_window_override(&company, &eng_id, &86_400);
+
+// Recruiter accepts
+client.accept_dispute_window_override(&recruiter, &eng_id);
+
+// Now this engagement has a 5-day dispute window
+assert_eq!(client.get_engagement_dispute_window(&eng_id), 86_400);
+
+// Other engagements still use the global window
+assert_eq!(client.get_engagement_dispute_window(&other_eng_id), client.get_dispute_window());
+```
+
+**Use cases:**
+
+- **Longer windows** for high-value engagements where the company needs more time to verify proof.
+- **Shorter windows** for fast-turnaround placements where both parties want quick resolution.
+- **Mutual agreement** ensures both parties consent to the custom window before it takes effect.
+
+**Security considerations:**
+
+- The override is **mutual**: both parties must agree (propose + accept) for it to take effect.
+- The override is **per-engagement** and does not affect other engagements or the global window.
+- The override is **immutable** once accepted: it cannot be changed without admin intervention.
+- If the global window is later changed via `set_dispute_window`, engagements with overrides are **not** affected — they keep their agreed custom window.
 
 ### Early Exit
 
@@ -2615,21 +3270,28 @@ The contract emits Soroban events for all state transitions. Events are grouped 
 
 ### Engagement Lifecycle
 
-| Event                   | Topics          | Payload                                    | Trigger                                                 |
-| ----------------------- | --------------- | ------------------------------------------ | ------------------------------------------------------- |
-| `engagement_created`    | `engagement_id` | `engagement_id`                            | `create_engagement`                                     |
-| `engagement_offered`    | `engagement_id` | `(company, recruiter, total_amount)`       | `create_engagement` with `require_recruiter_acceptance` |
-| `engagement_accepted`   | `engagement_id` | `recruiter`                                | `accept_engagement`                                     |
-| `offer_withdrawn`       | `engagement_id` | `refund`                                   | `withdraw_offer`                                        |
-| `payout_credited`       | `recipient`     | `(engagement_id, token, amount)`           | Any payout on a `pull_payouts` engagement               |
-| `payouts_claimed`       | `recruiter`     | `(token, amount)`                          | `claim_payouts`                                         |
-| `engagement_cancelled`  | `engagement_id` | `refund`                                   | `cancel_engagement` (company + recruiter)               |
-| `engagement_expired`    | `engagement_id` | `refund`                                   | `expire_engagement` (permissionless keeper)             |
-| `engagement_completed`  | `engagement_id` | `(engagement_id, released_amount, ledger)` | Final milestone confirmed                               |
-| `escrow_topped_up`      | `engagement_id` | `(amount, total_amount)`                   | `top_up_escrow`                                         |
-| `company_transferred`   | `engagement_id` | `(old_company, new_company)`               | `transfer_company_role`                                 |
-| `recruiter_transferred` | `engagement_id` | `(old_recruiter, new_recruiter)`           | `accept_recruiter_transfer`                             |
-| `status_changed`        | `engagement_id` | `(old_status, new_status)`                 | Any engagement status transition                        |
+| Event                     | Topics          | Payload                                         | Trigger                                                 |
+| ------------------------- | --------------- | ----------------------------------------------- | ------------------------------------------------------- |
+| `engagement_created`      | `engagement_id` | `engagement_id`                                 | `create_engagement`                                     |
+| `engagement_offered`      | `engagement_id` | `(company, recruiter, total_amount)`            | `create_engagement` with `require_recruiter_acceptance` |
+| `engagement_accepted`     | `engagement_id` | `recruiter`                                     | `accept_engagement`                                     |
+| `offer_withdrawn`         | `engagement_id` | `refund`                                        | `withdraw_offer`                                        |
+| `open_offer_created`      | `engagement_id` | `(company, eligible_recruiters, total_amount)`  | `create_open_engagement`                                |
+| `open_offer_claimed`      | `engagement_id` | `recruiter`                                     | `accept_engagement` on an open offer                    |
+| `counter_offer_proposed`  | `engagement_id` | `(recruiter, total_amount, milestone_percents)` | `counter_offer`                                         |
+| `counter_offer_accepted`  | `engagement_id` | `(company, old_total, new_total)`               | `accept_counter_offer`                                  |
+| `counter_offer_rejected`  | `engagement_id` | `(company, recruiter)`                          | `reject_counter_offer`                                  |
+| `counter_offer_withdrawn` | `engagement_id` | `recruiter`                                     | `withdraw_counter_offer`                                |
+| `stray_tokens_recovered`  | `token`         | `(to, amount)`                                  | `recover_stray_tokens` / its accepted config change     |
+| `payout_credited`         | `recipient`     | `(engagement_id, token, amount)`                | Any payout on a `pull_payouts` engagement               |
+| `payouts_claimed`         | `recruiter`     | `(token, amount)`                               | `claim_payouts`                                         |
+| `engagement_cancelled`    | `engagement_id` | `refund`                                        | `cancel_engagement` (company + recruiter)               |
+| `engagement_expired`      | `engagement_id` | `refund`                                        | `expire_engagement` (permissionless keeper)             |
+| `engagement_completed`    | `engagement_id` | `(engagement_id, released_amount, ledger)`      | Final milestone confirmed                               |
+| `escrow_topped_up`        | `engagement_id` | `(amount, total_amount)`                        | `top_up_escrow`                                         |
+| `company_transferred`     | `engagement_id` | `(old_company, new_company)`                    | `transfer_company_role`                                 |
+| `recruiter_transferred`   | `engagement_id` | `(old_recruiter, new_recruiter)`                | `accept_recruiter_transfer`                             |
+| `status_changed`          | `engagement_id` | `(old_status, new_status)`                      | Any engagement status transition                        |
 
 ### Milestone
 
@@ -2898,13 +3560,19 @@ The arbiter fee is taken from the amount **after** the platform fee, not from `g
 
 Every `÷` above is Rust integer division on non-negative `i128`, which **rounds down**. Wherever the contract computes a remainder by subtraction (`gross − fee`, `net − primary`, `fee − credit`), the party on the subtracted side receives the rounding dust. So:
 
-| Division                            | Rounded down       | Receives the dust                                                  |
-| ----------------------------------- | ------------------ | ------------------------------------------------------------------ |
-| Platform / arbiter fee              | Treasury / arbiter | Recruiter(s)                                                       |
-| Co-recruiter split                  | Primary recruiter  | Co-recruiter                                                       |
-| Fee rebate credit                   | Company rebate     | Treasury                                                           |
-| Streamed vesting                    | Early claims       | Final claim (`vested == total` exactly once `elapsed >= duration`) |
-| Milestone share `total × pct ÷ 100` | Every milestone    | **Nobody** — see below                                             |
+| Division                                                                 | Rounded down       | Receives the dust                                                  |
+| ------------------------------------------------------------------------ | ------------------ | ------------------------------------------------------------------ |
+| Platform / arbiter fee                                                   | Treasury / arbiter | Recruiter(s)                                                       |
+| Co-recruiter split                                                       | Primary recruiter  | Co-recruiter                                                       |
+| Fee rebate credit                                                        | Company rebate     | Treasury                                                           |
+| Streamed vesting                                                         | Early claims       | Final claim (`vested == total` exactly once `elapsed >= duration`) |
+| Milestone share `total × pct ÷ 100`                                      | Every milestone    | **Nobody** — see below                                             |
+| Early retention departure `payment × served_ledgers ÷ retention_ledgers` | Recruiter          | Company refund (`payment − earned`)                                |
+
+For an early departure (issue #655) the recruiter's pro-rata share is rounded
+down and the company receives `payment − earned`, so all residual dust stays
+with the company and the two amounts always sum to the full milestone payment.
+Fees are then applied to the recruiter's earned amount as usual.
 
 Worked example: 1,000 USDC engagement (`10_000_000_000` units), 30% milestone, 250 bps fee, 60/40 co-recruiter split:
 
@@ -2959,6 +3627,9 @@ Every intermediate product is at most `total_amount × 10_000`, so any `total_am
 - **Replacement fee fairness**: The Placement tranche paid to the recruiter is non-refundable. Only unreleased amounts are frozen. This is explicit in the contract and documented clearly so both parties understand the terms at engagement creation.
 - **Ledger drift**: The 5s/ledger assumption is approximate. Stellar's actual ledger time may vary slightly. The contract uses ledger sequence numbers — not timestamps — so the unlock is purely count-based. Production deployments should account for ~±5% drift in real-world retention windows.
 - **Upgrade time-lock**: Contract upgrades require a configurable time-lock (default 17,280 ledgers ≈ 1 day) between proposal and execution, giving stakeholders time to review before changes take effect.
+- **Emergency pause signers**: The emergency M-of-N pause mechanism allows rapid response to security incidents without admin availability, but signers should be carefully chosen as they can pause the contract without admin approval. The vote window should balance coordination time with manipulation resistance.
+- **Dispute cycle cap**: Prevents companies from repeatedly disputing milestones as a stalling tactic. When the cap is reached, escalation becomes instant, fast-tracking tie-breaking via the Super Arbiter.
+- **Per-engagement dispute window**: Requires mutual agreement (propose + accept) from both company and recruiter, ensuring neither party can unilaterally change the dispute window for an engagement. Once accepted, the override is immutable and not affected by global window changes.
 
 ---
 
@@ -3223,3 +3894,14 @@ MIT
 <!-- handsoff-issue-582 -->
 
 - #582: feat: get_protocol_stats query — global totals for dashboards
+
+## Absolute-amount milestones (issue #668)
+
+`create_engagement_payment_plan` accepts a plan of `MilestonePayment::Percent`
+or `MilestonePayment::Absolute` values. Absolute amounts must sum (with any
+percent-derived amounts) to `total_amount`; existing percent-only engagements
+are unaffected. Exact amounts are stored per engagement and drive gross payouts.
+For amendments and appended milestones, supply a complete plan whose absolute
+amounts sum to `total_amount`. `top_up_escrow` leaves absolute amounts
+unchanged, so a top-up needs a matching amendment before those funds can be
+paid out as milestone amounts.

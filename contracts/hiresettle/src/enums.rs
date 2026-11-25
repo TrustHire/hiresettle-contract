@@ -1,7 +1,7 @@
 //! Contract enums (`#[contracttype]`), including the `DataKey`/`DataKey2`
 //! storage key space.
 
-use soroban_sdk::{contracttype, Address, String};
+use soroban_sdk::{contracttype, Address, BytesN, String};
 
 /// Lifecycle state of a single milestone.
 #[contracttype]
@@ -78,6 +78,8 @@ pub enum ActionKind {
     /// Accept (or reject) a pending proposal: a recruiter transfer, a dispute
     /// window override, a split amendment, or a recruiter exit request.
     AcceptProposal,
+    /// Attach dispute evidence; the evidence window is still open (issue #657).
+    AwaitingEvidence,
 }
 /// Distinguishes the two business-logic types of milestones.
 #[contracttype]
@@ -90,6 +92,10 @@ pub enum MilestoneKind {
     /// Starts `Locked`; `unlock_milestone` moves it to `Pending` once
     /// `env.ledger().sequence() >= valid_after_ledger`.
     Retention,
+    /// Recurring retainer instalment (issue #674). Starts `Pending`, unlocks
+    /// automatically every `interval_ledgers`, and is claimed by the recruiter
+    /// without proof. Cannot be disputed after a claim.
+    Retainer(u32),
 }
 /// Top-level lifecycle state of an engagement.
 #[contracttype]
@@ -223,12 +229,26 @@ pub enum ConfigKey {
     /// Ledgers arbiters have to vote after a dispute is raised (issue #560).
     /// 0 (the default) disables `enforce_vote_deadline`.
     ArbiterVoteDeadline,
+    /// When true, panel votes must be committed and revealed (issue #656).
+    CommitRevealVoting,
+    /// Length of the commit phase in ledgers, measured from dispute raise
+    /// (issue #656). `0` disables commit-reveal entirely.
+    CommitPhaseLedgers,
+    /// Ledgers after a dispute is raised during which arbiters may not vote,
+    /// while both parties may attach evidence (issue #657). Default 0.
+    EvidenceWindowLedgers,
     /// TTL in ledgers for pending config change proposals
     /// (default `DEFAULT_CONFIG_CHANGE_TTL`).
     ConfigChangeTTL,
     /// Quarantine escape delay in ledgers (issue #590). `0` (the default)
     /// disables `emergency_exit`.
     PauseEscapeDelay,
+    /// Ownership window, in ledgers, for candidate commitments (issue #675).
+    /// `0` disables ownership tracking entirely.
+    CandidateOwnershipWindow,
+    /// Maximum remaining escrow (in stroops) refunded to the company when an
+    /// engagement completes (issue #673). `0` disables dust sweeps.
+    DustThreshold,
     /// Ledger at which an engagement was last (re-)paused via
     /// `pause_engagement` (issue #590). Cleared by `unpause_engagement`
     /// so unpausing resets the escape timer.
@@ -239,6 +259,18 @@ pub enum ConfigKey {
     /// Per-function pause flag for `fn_id` (issue #589). Present and `true`
     /// means the entry point is paused; absent means it runs normally.
     FunctionPaused(u32),
+    /// Admin-wide maximum engagement amount in stroops; `0` disables the cap
+    /// (issue #680).
+    MaxEngagementAmount,
+    /// Per-token maximum engagement amount overrides (issue #680); an absent
+    /// entry means the admin-wide `MaxEngagementAmount` applies.
+    TokenMaxAmounts,
+    /// Per-token TVL cap in stroops (issue #679); an absent entry means
+    /// unlimited.
+    TokenTvlCaps,
+    /// Per-token maximum allowed outflow in stroops (issue #690); an absent
+    /// entry means unlimited (no breaker).
+    TokenOutflowLimits,
 }
 
 /// Role of a company team member (issue #575): which company-gated actions
@@ -250,6 +282,17 @@ pub enum CompanyMemberRole {
     Confirmer,
     /// May call `raise_dispute` / `batch_raise_dispute`.
     Disputer,
+}
+/// What an attester may verify (issue #661).
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum AttesterScope {
+    /// May set or clear recruiter verification only.
+    Recruiter,
+    /// May set or clear company verification only.
+    Company,
+    /// May set or clear both recruiter and company verification.
+    Both,
 }
 /// Contract storage key space. Instance keys reset between transactions;
 /// persistent keys survive across ledgers.
@@ -373,6 +416,27 @@ pub enum DataKey {
     EmergencySigners,
     /// Active emergency signer rotation vote.
     EmergencySignerRotationVote,
+    /// On-chain storage layout version, stamped by `init` and advanced by
+    /// `migrate` (issue #693).
+    StorageSchemaVersion,
+    /// Emergency-signer veto tally for the pending WASM upgrade (issue #691).
+    UpgradeVetoTally,
+}
+
+/// Lifecycle status of an allowlisted token (issue #681): `Allowed` while the
+/// token is fully usable, `Deprecated(sunset_ledger)` while it winds down —
+/// new engagements are blocked immediately and top-ups are blocked after the
+/// sunset ledger — and `Removed` once it leaves the allowlist entirely.
+#[contracttype]
+#[derive(Clone, PartialEq, Debug)]
+pub enum TokenStatus {
+    /// Token is allowlisted and accepting new engagements.
+    Allowed,
+    /// Token is being wound down; new engagements are blocked immediately and
+    /// top-ups are blocked after `sunset_ledger`.
+    Deprecated(u32),
+    /// Token has been removed from the allowlist.
+    Removed,
 }
 
 /// Secondary storage-key space nested under [`DataKey::Ext`] so the primary
@@ -576,6 +640,17 @@ pub enum DataKey3 {
     /// FIFO-capped proof submission / withdrawal history for
     /// (engagement_id, milestone_index) (issue #666).
     ProofHistory(String, u32),
+    /// Job-category specialization tags for a pool arbiter (issue #683).
+    ArbiterSpecializations(Address),
+    /// Admin cap on an engagement's lifetime in ledgers (issue #697).
+    /// Absent or `0` means unlimited.
+    MaxEngagementDurationLedgers,
+    /// Optional reason recorded when an engagement is cancelled (issue #700).
+    CancellationReason(String),
+    /// Star value recorded for a rated engagement (issue #685).
+    EngagementStars(String),
+    /// The recruiter's public reply to a rating (issue #685).
+    RatingResponse(String),
 }
 
 /// What a [`crate::ProofHistoryEntry`] records (issue #666).

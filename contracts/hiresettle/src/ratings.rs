@@ -21,6 +21,42 @@ impl HireSettleContract {
     /// # Events
     /// Emits `("recruiter_rated", engagement_id)` with `(recruiter, stars)`.
     pub fn rate_recruiter(env: Env, company: Address, engagement_id: String, stars: u32) {
+        Self::rate_recruiter_internal(env, company, engagement_id, stars, None);
+    }
+
+    /// Rate the recruiter and anchor an off-chain written review by its hash
+    /// (issue #595). The hash follows the same size limit as a proof hash and
+    /// is queryable with [`Self::get_engagement_review`]. All rating rules are
+    /// identical to [`Self::rate_recruiter`].
+    pub fn rate_recruiter_with_review(
+        env: Env,
+        company: Address,
+        engagement_id: String,
+        stars: u32,
+        review_hash: String,
+    ) {
+        if review_hash.is_empty() {
+            panic!("InvalidReviewHash");
+        }
+        if review_hash.len() > Self::get_max_proof_hash_length_internal(&env) {
+            panic!("ReviewHashTooLong");
+        }
+        Self::rate_recruiter_internal(
+            env,
+            company,
+            engagement_id,
+            stars,
+            Some(review_hash),
+        );
+    }
+
+    fn rate_recruiter_internal(
+        env: Env,
+        company: Address,
+        engagement_id: String,
+        stars: u32,
+        review_hash: Option<String>,
+    ) {
         Self::assert_not_paused(&env);
         company.require_auth();
 
@@ -46,6 +82,14 @@ impl HireSettleContract {
         env.storage()
             .persistent()
             .extend_ttl(&rated_key, 100_000, 6_300_000);
+
+        // Issue #685: keep the star value per engagement so it can be read
+        // back alongside the recruiter's reply.
+        let stars_key = DataKey3::EngagementStars(engagement_id.clone());
+        env.storage().persistent().set(&stars_key, &stars);
+        env.storage()
+            .persistent()
+            .extend_ttl(&stars_key, 100_000, 6_300_000);
 
         let rating_key = DataKey2::RecruiterRating(engagement.recruiter.clone());
         let mut summary: RatingSummary =
@@ -85,10 +129,139 @@ impl HireSettleContract {
             .persistent()
             .extend_ttl(&weighted_key, 100_000, 6_300_000);
 
+        // Issue #595: the review is keyed by engagement, so a recruiter
+        // transfer before completion attributes it to the recruiter that
+        // actually finishes the engagement (the address rated here).
+        if let Some(hash) = review_hash {
+            let review_key = DataKey3::EngagementReview(engagement_id.clone());
+            env.storage()
+                .persistent()
+                .set(&review_key, &(stars, hash.clone()));
+            env.storage()
+                .persistent()
+                .extend_ttl(&review_key, 100_000, 6_300_000);
+            env.events().publish(
+                (
+                    Symbol::new(&env, "recruiter_review_recorded"),
+                    engagement_id.clone(),
+                ),
+                (engagement.recruiter.clone(), hash),
+            );
+        }
+
         env.events().publish(
             (Symbol::new(&env, "recruiter_rated"), engagement_id),
             (engagement.recruiter, stars),
         );
+    }
+
+    // ----------------------------------------------------------
+    // ISSUE #685 — PUBLIC RATING RESPONSE
+    // ----------------------------------------------------------
+
+    /// The recruiter rated on `engagement_id` posts a public reply, anchored
+    /// by `response_hash` (same size limit as a proof hash). Each rating has
+    /// one reply. The first call records it; later calls replace it only
+    /// while `RATING_RESPONSE_EDIT_WINDOW_LEDGERS` have not passed since the
+    /// first reply, and the window does not restart on edits.
+    ///
+    /// # Panics
+    /// - `"ContractPaused"` — the contract is paused.
+    /// - `"InvalidResponseHash"` — `response_hash` is empty.
+    /// - `"ResponseHashTooLong"` — `response_hash` exceeds the proof-hash limit.
+    /// - `"unauthorized"` — `responder` is not the engagement's recruiter.
+    /// - `"NotRated"` — the engagement has not been rated yet.
+    /// - `"RatingResponseLocked"` — the reply can no longer be edited.
+    ///
+    /// # Events
+    /// Emits `("rating_responded", engagement_id)` with `(recruiter, response_hash)`.
+    pub fn respond_to_rating(
+        env: Env,
+        responder: Address,
+        engagement_id: String,
+        response_hash: String,
+    ) {
+        Self::assert_not_paused(&env);
+        responder.require_auth();
+
+        if response_hash.is_empty() {
+            panic!("InvalidResponseHash");
+        }
+        if response_hash.len() > Self::get_max_proof_hash_length_internal(&env) {
+            panic!("ResponseHashTooLong");
+        }
+
+        let engagement = Self::get_engagement_internal(&env, &engagement_id);
+        if !Self::is_authorized_recruiter(&env, &responder, &engagement.recruiter) {
+            panic!("{}", ERR_UNAUTHORIZED);
+        }
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey2::EngagementRated(engagement_id.clone()))
+        {
+            panic!("NotRated");
+        }
+
+        let key = DataKey3::RatingResponse(engagement_id.clone());
+        let now = env.ledger().sequence();
+        let responded_at = match env.storage().persistent().get::<_, RatingResponse>(&key) {
+            Some(existing) => {
+                if now
+                    > existing
+                        .responded_at_ledger
+                        .saturating_add(RATING_RESPONSE_EDIT_WINDOW_LEDGERS)
+                {
+                    panic!("RatingResponseLocked");
+                }
+                existing.responded_at_ledger
+            }
+            None => now,
+        };
+
+        let record = RatingResponse {
+            response_hash: response_hash.clone(),
+            responded_at_ledger: responded_at,
+        };
+        env.storage().persistent().set(&key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, 100_000, 6_300_000);
+
+        env.events().publish(
+            (Symbol::new(&env, "rating_responded"), engagement_id),
+            (engagement.recruiter, response_hash),
+        );
+    }
+
+    /// Return the rating recorded for `engagement_id` together with the
+    /// recruiter's reply, or `None` when the engagement has not been rated.
+    pub fn get_rating_detail(env: Env, engagement_id: String) -> Option<RatingDetail> {
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey2::EngagementRated(engagement_id.clone()))
+        {
+            return None;
+        }
+        let stars: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::EngagementStars(engagement_id.clone()))
+            .unwrap_or(0);
+        let reply: Option<RatingResponse> = env
+            .storage()
+            .persistent()
+            .get(&DataKey3::RatingResponse(engagement_id));
+        let (response_hash, responded_at_ledger) = match reply {
+            Some(rec) => (Some(rec.response_hash), Some(rec.responded_at_ledger)),
+            None => (None, None),
+        };
+        Some(RatingDetail {
+            stars,
+            response_hash,
+            responded_at_ledger,
+        })
     }
 
     /// Return the recruiter's accumulated rating, or `None` if they have never

@@ -8,11 +8,18 @@ pub(crate) const MAX_ARBITER_FEE_BPS: u32 = 200;
 /// (issue #549): 100 bps = 1 %.
 pub(crate) const DEFAULT_MAX_SLIPPAGE_BPS: u32 = 100;
 pub(crate) const FULL_SPLIT_BPS: u32 = 10_000;
+/// Maximum number of entries in an N-way recruiter split (issue #574).
+pub(crate) const MAX_RECRUITER_SPLITS: u32 = 5;
 /// Upper bound for `set_min_quorum_ratio_bps` (issue #502): 10 000 bps
 /// (100 %) forces a unanimous panel.
 pub(crate) const MAX_MIN_QUORUM_RATIO_BPS: u32 = 10_000;
 
 pub(crate) const LEDGERS_PER_DAY: u32 = 17_280; // 86 400s ÷ 5s per ledger
+/// Default length of the commit-reveal commit phase (issue #656): ~5 minutes.
+pub(crate) const DEFAULT_COMMIT_PHASE_LEDGERS: u32 = 60;
+/// Default dispute evidence window in ledgers (issue #657). `0` preserves the
+/// current behaviour: voting opens immediately when a dispute is raised.
+pub(crate) const DEFAULT_EVIDENCE_WINDOW_LEDGERS: u32 = 0;
 pub(crate) const DEFAULT_PROOF_COOLDOWN: u32 = 2_880; // ~4 hours
 pub(crate) const DEFAULT_MAX_RETENTION_DAYS: u32 = 365;
 pub(crate) const DEFAULT_MAX_MILESTONES: u32 = 10;
@@ -26,6 +33,10 @@ pub(crate) const MAX_REPLACEMENT_REASON_LEN: u32 = 128;
 pub(crate) const MAX_PAUSE_REASON_LEN: u32 = 128;
 /// Maximum length (in characters) of a `hold_milestone` reason string (issue #492).
 pub(crate) const MAX_HOLD_REASON_LEN: u32 = 128;
+/// Maximum length (in characters) of a milestone invoice reference (issue #669).
+pub(crate) const MAX_INVOICE_REF_LEN: u32 = 64;
+/// Maximum length (in characters) of an engagement external reference (issue #572).
+pub(crate) const MAX_EXTERNAL_REF_LEN: u32 = 64;
 pub(crate) const DEFAULT_MIN_ENGAGEMENT_AMOUNT: i128 = 100_000; // 0.01 USDC
 pub(crate) const DEFAULT_CONFIRM_WINDOW_LEDGERS: u32 = 86_400; // ~5 days
 pub(crate) const DEFAULT_DISPUTE_WINDOW_LEDGERS: u32 = 51_840; // ~3 days
@@ -87,6 +98,12 @@ pub(crate) const FN_SET_REFERRAL_DISCOUNT_BPS: u32 = 3;
 pub(crate) const FN_SET_ARBITER_FEE: u32 = 4;
 pub(crate) const FN_SET_MIN_AMOUNT: u32 = 5;
 pub(crate) const FN_SET_FEE_REBATE_BPS: u32 = 6;
+/// `recover_stray_tokens` (issue #672). Mark it sensitive with
+/// `set_sensitive_functions` to require the config cosigner's acceptance.
+pub(crate) const FN_RECOVER_STRAY_TOKENS: u32 = 7;
+/// Maximum size of an open offer's `eligible_recruiters` allowlist
+/// (issue #677). Bounds the scan in `accept_engagement`.
+pub(crate) const MAX_ELIGIBLE_RECRUITERS: u32 = 20;
 /// Per-function pause ids for `set_function_paused` (issue #589). They share
 /// the same `u32` id scheme as the sensitive setters but live in a disjoint
 /// range so the two features never collide.
@@ -106,12 +123,22 @@ pub(crate) const DEFAULT_RISK_REPLACEMENT_WEIGHT: u32 = 20;
 /// Default risk-score points per granted milestone extension (issue #480).
 pub(crate) const DEFAULT_RISK_EXTENSION_WEIGHT: u32 = 10;
 
+/// Storage layout version this WASM expects (issue #693). `init` stamps this
+/// value on fresh deployments; contracts upgraded from an older WASM are left
+/// at their stored version and must call `migrate` before any state-changing
+/// entry point will accept calls.
+pub(crate) const EXPECTED_STORAGE_SCHEMA_VERSION: u32 = 1;
+/// Implicit version of storage written by deployments made before issue #693
+/// introduced explicit schema versioning.
+pub(crate) const LEGACY_STORAGE_SCHEMA_VERSION: u32 = 0;
+
 /// Schema version stamped onto every emitted event (issue #585).
 ///
 /// Bump this whenever any event's topics or data change so indexers can
 /// detect payload-shape changes instead of breaking silently. The value is
 /// appended as the last topic of every `env.events().publish` call and is
 /// exposed to off-chain consumers via `get_event_schema_version()`.
+#[allow(dead_code)]
 pub(crate) const EVENT_SCHEMA_VERSION: u32 = 1;
 
 /// Fixed-point scale for recency-weighted ratings (issue #596).
@@ -127,3 +154,11 @@ pub(crate) const MAX_RECRUITER_STAKE_TIERS: u32 = 10;
 pub(crate) const DEFAULT_STAKE_UNBONDING_DELAY_LEDGERS: u32 = 120_960;
 /// FIFO cap on per-milestone proof history entries (issue #666).
 pub(crate) const MAX_PROOF_HISTORY_ENTRIES: u32 = 20;
+/// Maximum number of job-category specialization tags a pool arbiter may
+/// carry (issue #683).
+pub(crate) const MAX_ARBITER_SPECIALIZATIONS: u32 = 8;
+/// Maximum length, in bytes, of a cancellation reason (issue #700).
+pub(crate) const MAX_CANCEL_REASON_LEN: u32 = 128;
+/// Ledgers after the first public rating reply during which the recruiter may
+/// edit it (issue #685). ~1 day.
+pub(crate) const RATING_RESPONSE_EDIT_WINDOW_LEDGERS: u32 = 17_280;

@@ -39,11 +39,14 @@
 //! | `ArbiterWeightOverflow` | — | `engagement::create_engagement_impl` | 1 |
 //! | `ArbiterWeightsLengthMismatch` | — | `engagement::create_engagement_impl` | 1 |
 //! | `at least one arbiter required` | — | `bonds::create_engagement_bundle`, `engagement::create_engagement_impl`, `transfers::admin_remove_arbiter` | 3 |
+//! | `AttesterNotAuthorized` | — | `integrations::assert_attester_scope` | 1 |
 //! | `BundleAlreadyExists` | — | `bonds::create_engagement_bundle` | 1 |
 //! | `BundleCompanyMismatch` | — | `bonds::load_bundle_for` | 1 |
 //! | `BundleNotFound` | — | `bonds::load_bundle_for` | 1 |
 //! | `can only dispute a submitted proof` | — | `disputes::assert_milestone_disputable` | 1 |
 //! | `cancellation_expired` | — | `engagement::accept_cancellation` | 1 |
+//! | `CancelReasonEmpty` | — | `engagement::cancel_engagement_with_reason` | 1 |
+//! | `CancelReasonTooLong` | — | `engagement::cancel_engagement_with_reason` | 1 |
 //! | `Cannot expire completed engagement` | — | `admin::expire_engagement` | 1 |
 //! | `CompanyActiveLimitReached` | — | `engagement::create_engagement_impl` | 1 |
 //! | `CompanyAlreadyActed` | — | `milestones::withdraw_proof` | 1 |
@@ -56,6 +59,9 @@
 //! | `ConflictReasonTooLong` | — | `arbiter_pool::declare_conflict_of_interest` | 1 |
 //! | `contract not initialised` | — | `admin::set_proof_cooldown` | 1 |
 //! | `ContractPaused` | — | `helpers::assert_not_paused` | 1 |
+//! | `CounterOfferMilestoneMismatch` | — | `offers::counter_offer` | 1 |
+//! | `CounterOfferPending` | — | `offers::counter_offer` | 1 |
+//! | `CounterOfferUnchanged` | — | `offers::counter_offer` | 1 |
 //! | `DelegateAlreadyAssigned` | — | `disputes::set_arbiter_vote_delegate` | 1 |
 //! | `discount too high` | — | `admin::set_referral_discount_bps` | 1 |
 //! | `dispute already resolvable without escalation` | — | `disputes::escalate_dispute` | 1 |
@@ -71,7 +77,9 @@
 //! | `DuplicateMilestoneIndex` | — | `disputes::batch_raise_dispute` | 1 |
 //! | `DuplicateMilestoneName` | — | `engagement::create_engagement_impl` | 1 |
 //! | `DuplicateProofHash` | — | `milestones::submit_proof_internal` | 1 |
+//! | `DuplicateSpecialization` | — | `arbiter_pool::set_arbiter_specializations` | 1 |
 //! | `DuplicateTreasury` | — | `admin::set_fee_treasuries` | 1 |
+//! | `DurationExceedsCap` | — | `engagement::create_engagement_impl` | 1 |
 //! | `emergency signers not configured` | — | `admin::expire_signer_rotation`, `admin::propose_signer_rotation`, `admin::vote_signer_rotation` | 3 |
 //! | `EmptyHoldReason` | — | `admin::hold_milestone` | 1 |
 //! | `EmptyIndices` | — | `disputes::batch_raise_dispute`, `milestones::batch_confirm_milestones` | 2 |
@@ -124,6 +132,7 @@
 //! | `InvalidRecruiterBps` | — | `disputes::propose_dispute_settlement` | 1 |
 //! | `InvalidReferrerFeeShareBps` | — | `admin::set_referrer_fee_share_bps` | 1 |
 //! | `InvalidReleaseBps` | — | `milestones::propose_partial_confirmation` | 1 |
+//! | `InvalidResponseHash` | — | `ratings::respond_to_rating` | 1 |
 //! | `InvalidSlippageBps` | — | `payout::set_recruiter_payout_slippage` | 1 |
 //! | `InvalidSplitBps` | — | `engagement::create_engagement_impl`, `engagement::propose_split_amendment` | 2 |
 //! | `InvalidSplitPercent` | — | `disputes::cast_arbiter_split_vote` | 1 |
@@ -146,6 +155,8 @@
 //! | `MilestoneNameEmpty` | — | `engagement::create_engagement_impl` | 1 |
 //! | `MilestoneNameTooLong` | — | `engagement::create_engagement_impl` | 1 |
 //! | `MilestoneOnHold` | `ERR_MILESTONE_ON_HOLD` | `helpers::assert_milestone_not_on_hold` | 1 |
+//! | `missing recipient` | — | `features::apply_pending_config_change` | 1 |
+//! | `missing token` | — | `features::apply_pending_config_change` | 1 |
 //! | `missing treasury` | — | `features::apply_pending_config_change` | 1 |
 //! | `MixedVoteModes` | — | `disputes::cast_arbiter_split_vote`, `disputes::cast_arbiter_vote` | 2 |
 //! | `new signer already in emergency signer set` | — | `admin::propose_signer_rotation` | 1 |
@@ -173,14 +184,19 @@
 //! | `NoScheduledFee` | — | `admin::apply_scheduled_fee`, `admin::cancel_scheduled_fee` | 2 |
 //! | `NoShowDeadlineNotReached` | — | `milestones::trigger_no_show` | 1 |
 //! | `NoShowDisabled` | — | `milestones::trigger_no_show` | 1 |
+//! | `NoStrayTokens` | — | `invariants::execute_stray_token_recovery` | 1 |
 //! | `NoStreamedPayout` | — | `milestones::claim_streamed_payout` | 1 |
 //! | `NoteHashTooLong` | — | `milestones::confirm_milestone_with_note` | 1 |
-//! | `NotInPool` | — | `arbiter_pool::remove_arbiter_pool_member`, `arbiter_pool::suspend_arbiter_pool_member`, `arbiter_pool::unsuspend_arbiter_pool_member` | 3 |
+//! | `NotInPool` | — | `arbiter_pool::remove_arbiter_pool_member`, `arbiter_pool::set_arbiter_specializations`, `arbiter_pool::suspend_arbiter_pool_member`, `arbiter_pool::unsuspend_arbiter_pool_member` | 4 |
+//! | `NotRated` | — | `ratings::respond_to_rating` | 1 |
 //! | `NotVoted` | — | `disputes::change_arbiter_vote` | 3 |
 //! | `NoUnbondingStake` | — | `staking::withdraw_unbonded_stake` | 2 |
 //! | `old signer not in emergency signer set` | — | `admin::propose_signer_rotation` | 1 |
 //! | `only placement milestones can be forfeited` | — | `milestones::trigger_no_show` | 1 |
 //! | `only retention milestones can be unlocked this way` | — | `milestones::unlock_milestone` | 1 |
+//! | `OracleNotPlacementMilestone` | — | `integrations::oracle_confirm_milestone` | 1 |
+//! | `OracleNotRegistered` | — | `integrations::oracle_confirm_milestone`, `integrations::validate_placement_oracle` | 2 |
+//! | `OracleRecruiterCollision` | — | `integrations::validate_placement_oracle` | 1 |
 //! | `PanelChangeDuringDispute` | — | `transfers::get_engagement_for_panel_change` | 1 |
 //! | `PartialConfirmationExpired` | — | `milestones::accept_partial_confirmation` | 1 |
 //! | `PauseReasonTooLong` | — | `admin::pause_engagement` | 1 |
@@ -191,13 +207,16 @@
 //! | `proposer not in emergency signer set` | — | `admin::propose_signer_rotation` | 1 |
 //! | `QuorumBelowMinRatio` | — | `engagement::create_engagement_impl` | 1 |
 //! | `QuorumUnreachable` | — | `transfers::admin_remove_arbiter` | 1 |
+//! | `RatingResponseLocked` | — | `ratings::respond_to_rating` | 1 |
 //! | `ReasonTooLong` | — | `disputes::batch_raise_dispute`, `disputes::raise_dispute` | 2 |
-//! | `RecruiterActiveLimitReached` | — | `engagement::create_engagement_impl` | 1 |
-//! | `RecruiterArbiterCollision` | — | `engagement::create_engagement_impl`, `transfers::admin_add_arbiter` | 2 |
+//! | `RecruiterActiveLimitReached` | — | `engagement::assert_recruiter_below_cap` | 1 |
+//! | `RecruiterArbiterCollision` | — | `engagement::create_engagement_impl`, `offers::bind_open_offer_recruiter`, `offers::create_open_engagement`, `transfers::admin_add_arbiter` | 4 |
+//! | `RecruiterNotEligible` | — | `offers::resolve_eligible_recruiter` | 1 |
 //! | `referrer already exists` | — | `admin::add_referrer` | 1 |
 //! | `referrer not found` | — | `admin::remove_referrer` | 1 |
 //! | `replacement reason too long` | — | `engagement::request_replacement` | 1 |
 //! | `ReplacementLimitReached` | — | `engagement::request_replacement` | 1 |
+//! | `ResponseHashTooLong` | — | `ratings::respond_to_rating` | 1 |
 //! | `ResubmitTooSoon` | — | `milestones::submit_proof_internal` | 1 |
 //! | `retention window has not elapsed yet` | — | `milestones::unlock_milestone` | 1 |
 //! | `retention window has not elapsed — cannot confirm yet` | — | `milestones::accept_partial_confirmation`, `milestones::batch_confirm_milestones`, `milestones::confirm_milestone_internal` | 3 |
@@ -218,12 +237,14 @@
 //! | `TokenNotAllowed` | — | `engagement::create_engagement_impl` | 1 |
 //! | `too many fee tiers` | — | `admin::set_fee_tiers` | 1 |
 //! | `too many IDs` | — | `queries::batch_get_engagement_summary` | 1 |
+//! | `TooManyEligibleRecruiters` | — | `offers::create_open_engagement` | 1 |
 //! | `TooManyMilestones` | — | `engagement::create_engagement_impl` | 1 |
+//! | `TooManySpecializations` | — | `arbiter_pool::set_arbiter_specializations` | 1 |
 //! | `TooManyStakeTiers` | — | `staking::set_recruiter_stake_tiers` | 1 |
 //! | `TooManyTags` | — | `engagement::create_engagement_impl` | 1 |
 //! | `TooManyTreasuries` | — | `admin::set_fee_treasuries` | 1 |
 //! | `TreasuryWeightsMustSumTo10000` | — | `admin::set_fee_treasuries` | 1 |
-//! | `unauthorized` | `ERR_UNAUTHORIZED` | 46 functions in `admin`, `arbiter_pool`, `disputes`, `engagement`, `features`, `helpers`, `milestones`, `ratings`, `transfers` | 48 |
+//! | `unauthorized` | `ERR_UNAUTHORIZED` | 47 functions in `admin`, `arbiter_pool`, `disputes`, `engagement`, `features`, `helpers`, `milestones`, `ratings`, `transfers` | 49 |
 //! | `UnbondingNotElapsed` | — | `staking::withdraw_unbonded_stake` | 1 |
 //! | `unknown config change fn_id` | — | `features::apply_pending_config_change` | 1 |
 //! | `UnstakeBelowActiveCount` | — | `staking::unstake_recruiter` | 1 |
@@ -256,3 +277,16 @@ pub(crate) const ERR_ENGAGEMENT_PAUSED: &str = "EngagementPaused";
 /// callers can tell a one-milestone compliance hold from an engagement-wide
 /// quarantine.
 pub(crate) const ERR_MILESTONE_ON_HOLD: &str = "MilestoneOnHold";
+/// Raised when a token outflow would exceed the admin-configured per-token
+/// circuit-breaker limit (issue #690); the contract auto-pauses with reason
+/// `CircuitBreaker`.
+pub(crate) const ERR_CIRCUIT_BREAKER: &str = "CircuitBreaker";
+/// Raised when a funding operation would push a token's TVL above the
+/// admin-configured cap (issue #679).
+pub(crate) const ERR_TOKEN_TVL_CAP_EXCEEDED: &str = "TokenTvlCapExceeded";
+/// Raised when an engagement amount or top-up exceeds the configured maximum
+/// (issue #680).
+pub(crate) const ERR_AMOUNT_ABOVE_MAXIMUM: &str = "AmountAboveMaximum";
+/// Raised when an operation targets a delisted (deprecated) token
+/// (issue #681).
+pub(crate) const ERR_TOKEN_DEPRECATED: &str = "TokenDeprecated";

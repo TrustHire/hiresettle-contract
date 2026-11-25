@@ -1,10 +1,34 @@
 //! Contract data structs (`#[contracttype]`).
 
-use soroban_sdk::{contracttype, Address, BytesN, String, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, String, Symbol, Vec};
 use crate::{
     ActionKind, ActorRole, EngagementStatus, MilestoneKind, MilestoneStatus, ProofAction,
     TimelineKind,
 };
+
+/// Issue #668: how a milestone's gross payment is specified.
+/// `Percent` preserves the original `payment_percent` behaviour; `Absolute`
+/// fixes the amount in the engagement's token.
+#[contracttype]
+#[derive(Clone)]
+pub enum MilestonePayment {
+    Percent(u32),
+    Absolute(i128),
+}
+
+/// Issue #668: bundled arguments for `create_engagement_payment_plan`, keeping
+/// the contract function within Soroban's 10-parameter limit.
+#[contracttype]
+#[derive(Clone)]
+pub struct PaymentPlanParams {
+    pub token: Address,
+    pub total_amount: i128,
+    pub job_title: String,
+    pub milestones: Vec<Milestone>,
+    pub payment_plan: Vec<MilestonePayment>,
+    pub retention_days: Vec<u32>,
+    pub config: EngagementConfig,
+}
 
 /// A payment and workflow checkpoint belonging to an [`Engagement`]'s `milestones`.
 #[contracttype]
@@ -89,8 +113,12 @@ pub struct Engagement {
     pub status: EngagementStatus,
     /// Optional co-recruiter address for split-fee engagements (issue #56).
     /// When `Some`, the milestone payout is split between `recruiter` and `co_recruiter`
-    /// according to `recruiter_split_bps`.
+    /// according to `recruiter_split_bps`. Mutually exclusive with `recruiter_splits`.
     pub co_recruiter: Option<Address>,
+    /// Optional N-way payout split (issue #574). Each `(Address, bps)` entry
+    /// pays that recruiter a share of the net payout; bps sum to 10 000 and at
+    /// most five entries are allowed. Rounding dust goes to `recruiter`.
+    pub recruiter_splits: Option<Vec<(Address, u32)>>,
     /// Primary recruiter's share of the net payout in basis points (issue #56).
     /// Default is 10 000 (100 % to recruiter). Must be ≤ 10 000.
     pub recruiter_split_bps: u32,
@@ -113,6 +141,9 @@ pub struct Engagement {
     /// Optional absolute deadline ledger copied from
     /// `EngagementConfig::end_ledger` (issue #571). `None` means no deadline.
     pub end_ledger: Option<u32>,
+    /// Optional candidate that must co-sign a Placement proof before the
+    /// company can confirm it (issue #654). `None` preserves existing flow.
+    pub candidate: Option<Address>,
 }
 /// A lightweight read-only view of an engagement, suitable for list/dashboard APIs.
 ///
@@ -126,6 +157,8 @@ pub struct EngagementSummary {
     pub job_title: String,
     /// The hiring company address.
     pub company: Address,
+    /// Issue #660: whether the company currently has a valid verification badge.
+    pub company_verified: bool,
     /// The recruiter address receiving milestone payments.
     pub recruiter: Address,
     /// Total fee locked in escrow at creation, in the token's smallest unit.
@@ -272,6 +305,10 @@ pub struct UpgradeProposal {
     pub new_wasm_hash: BytesN<32>,
     /// Ledger sequence at or after which execute_upgrade may be called.
     pub execute_after_ledger: u32,
+    /// Optional hash/CID of the audit report for the pending upgrade
+    /// (issue #692). Proposals made before this field existed are read as
+    /// `None` by `get_pending_upgrade`.
+    pub audit_report_hash: Option<String>,
 }
 /// Platform fee configuration deducted from each milestone payment.
 #[contracttype]
@@ -320,7 +357,12 @@ pub struct EngagementConfig {
     /// Optional IPFS CID linking to full job description / contract terms off-chain.
     pub metadata_hash: Option<String>,
     /// Optional co-recruiter address that shares the milestone payout.
+    /// Mutually exclusive with `recruiter_splits`.
     pub co_recruiter: Option<Address>,
+    /// Optional N-way payout split (issue #574): at most five `(address, bps)`
+    /// entries whose bps sum to 10 000. Rounding dust goes to the primary
+    /// recruiter. Mutually exclusive with `co_recruiter`.
+    pub recruiter_splits: Option<Vec<(Address, u32)>>,
     /// Primary recruiter's share in basis points (10 000 = 100 %).
     /// If `co_recruiter` is `None` this field is ignored and the full payout goes to `recruiter`.
     /// Must be ≤ 10 000.
@@ -349,6 +391,10 @@ pub struct EngagementConfig {
     /// company's pooled balance instead of a fresh token transfer
     /// (issue #472). Default `false` preserves existing behaviour.
     pub fund_from_pool: bool,
+    /// Issue #662: when `true`, each payout also collects the admin-configured
+    /// insurance premium into the per-token pool. Premiums are separate from,
+    /// and excluded from, platform-fee calculations.
+    pub insured: bool,
     /// When `true`, the platform-fee tier is resolved once at creation and
     /// reused for every later payout on this engagement, so admin changes to
     /// `set_fee_tiers` no longer affect it (issue #505). Referral discounts
@@ -374,6 +420,16 @@ pub struct EngagementConfig {
     /// retention milestone's earliest unlock when set. `None` keeps today's
     /// behaviour.
     pub end_ledger: Option<u32>,
+    /// Optional registered placement oracle (issue #667), e.g. an HRIS
+    /// integration, allowed to confirm this engagement's `Placement`
+    /// milestones via `oracle_confirm_milestone`. Must be in the admin
+    /// registry at creation. The company keeps its manual confirm and
+    /// dispute rights. `None` keeps manual-only confirmation.
+    pub placement_oracle: Option<Address>,
+    /// Optional ATS / job-board identifier (issue #572), at most 64
+    /// characters and unique per company. Looked up with
+    /// `get_engagement_by_external_ref`.
+    pub external_ref: Option<String>,
 }
 /// Vesting record for a streamed milestone payout (issue #466), stored under
 /// `DataKey::StreamedPayout(engagement_id, milestone_index)`.
@@ -402,6 +458,19 @@ pub struct RandomArbiterSetup {
     /// Must be ≥ 1 and ≤ `panel_size`.
     pub quorum: u32,
 }
+/// Panel setup for `create_category_panel` (issue #683): a random panel drawn
+/// from the pool with category-tagged members preferred. Carries the category
+/// in the struct to stay within Soroban's 10-parameter limit.
+#[contracttype]
+#[derive(Clone)]
+pub struct CategoryArbiterSetup {
+    /// Number of distinct arbiters to draw from the pool.
+    pub panel_size: u32,
+    /// Number of votes required to resolve a dispute (M-of-N).
+    pub quorum: u32,
+    /// Job category whose tagged pool members are drawn first.
+    pub job_category: Symbol,
+}
 /// Historical dispute-response record for one arbiter (issue #468), updated
 /// by `raise_dispute`, `cast_arbiter_vote` and `enforce_vote_deadline`.
 #[contracttype]
@@ -416,6 +485,28 @@ pub struct ArbiterStats {
     /// Disputes on which this address was recused by `enforce_vote_deadline`
     /// for not voting before the vote deadline (issue #560).
     pub missed_vote_deadlines: u32,
+}
+/// A recruiter's public reply to a rating (issue #685).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RatingResponse {
+    /// Hash anchoring the off-chain reply text.
+    pub response_hash: String,
+    /// Ledger the reply was first posted. The edit window runs from here.
+    pub responded_at_ledger: u32,
+}
+/// A rating together with the recruiter's reply, as returned by
+/// `get_rating_detail` (issue #685).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RatingDetail {
+    /// Star rating (1–5) recorded for the engagement; `0` for ratings made
+    /// before issue #685 started storing the value.
+    pub stars: u32,
+    /// Hash of the recruiter's reply, if one has been posted.
+    pub response_hash: Option<String>,
+    /// Ledger the reply was first posted, if one has been posted.
+    pub responded_at_ledger: Option<u32>,
 }
 /// Running total of star ratings a recruiter has received (issue #470).
 /// The average rating is `total_stars / rating_count`.
@@ -545,6 +636,9 @@ pub struct PendingConfigChange {
     pub bool_val: bool,
     pub address_val: Option<Address>,
     pub string_val: Option<String>,
+    /// Second address argument, for setters that take two (e.g. the
+    /// recipient of `recover_stray_tokens`, issue #672). `None` otherwise.
+    pub address_val2: Option<Address>,
     /// Admin who proposed the change; the only address that may cancel it.
     pub proposer: Address,
     /// Ledger when the proposal was made.
@@ -603,6 +697,9 @@ pub struct DisputeHistoryEntry {
     /// Ledger at which the company withdrew the dispute via
     /// `withdraw_dispute` (issue #565); `None` if it was not withdrawn.
     pub withdrawn_at: Option<u32>,
+    /// Category code supplied with the dispute (issue #658). Legacy entries
+    /// without this field are decoded as `DisputeCategory::Other`.
+    pub category: DisputeCategory,
 }
 /// One entry of `get_status_history` (issue #501).
 #[contracttype]
@@ -708,6 +805,98 @@ pub struct ConflictDeclaration {
     pub active: bool,
 }
 
+/// Evidence hashes attached by the two parties while a dispute's evidence
+/// window is open (issue #657). `None` means that side has not attached one.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DisputeEvidence {
+    pub company_hash: Option<String>,
+    pub recruiter_hash: Option<String>,
+}
+
+/// Rolling-window outflow accumulator backing the per-token circuit breaker
+/// (issue #690). `window_outflow` sums the token outflows since
+/// `window_start_ledger`; once the admin-configured per-token limit is exceeded
+/// the token flips to `tripped` and further transfers out panic with reason
+/// `CircuitBreaker`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CircuitBreakerState {
+    /// Ledger at which the current circuit-breaker window opened.
+    pub window_start_ledger: u32,
+    /// Outflow already counted against the limit in the current window.
+    pub window_outflow: i128,
+    /// Set once the per-token outflow limit has tripped.
+    pub tripped: bool,
+}
+
+/// Point-in-time view of every admin-configurable scalar (issue #657). The
+/// `evidence_window_ledgers` field is included so callers can tell when voting
+/// on a newly raised dispute is gated.
+#[contracttype]
+#[derive(Clone)]
+pub struct ConfigSnapshot {
+    pub version: String,
+    pub admin: Address,
+    pub admin_renounced: bool,
+    pub paused: bool,
+    pub platform_fee_bps: u32,
+    pub platform_fee_treasury: Address,
+    pub arbiter_fee_bps: u32,
+    pub super_arbiter: Option<Address>,
+    pub confirm_window_ledgers: u32,
+    pub dispute_window_ledgers: u32,
+    pub proof_cooldown_ledgers: u32,
+    pub amendment_ttl_ledgers: u32,
+    pub upgrade_lock_duration_ledgers: u32,
+    pub ledgers_per_day: u32,
+    pub max_replacements: u32,
+    pub max_active_per_company: u32,
+    pub max_proof_hash_length: u32,
+    pub min_engagement_amount: i128,
+    pub config_change_ttl_ledgers: u32,
+    pub evidence_window_ledgers: u32,
+    pub commit_reveal_voting: bool,
+    pub commit_phase_ledgers: u32,
+    /// Admin-wide maximum engagement amount in stroops; `0` disables the cap
+    /// (issue #680).
+    pub max_engagement_amount: i128,
+    /// Per-token maximum engagement amount overrides (issue #680); absent
+    /// entry means the admin-wide value applies.
+    pub token_max_amounts: Map<Address, i128>,
+    /// Per-token TVL caps in stroops (issue #679); absent entry means
+    /// unlimited.
+    pub token_tvl_caps: Map<Address, i128>,
+    /// Per-token maximum allowed outflow limits in stroops (issue #690); absent
+    /// entry means unlimited.
+    pub token_outflow_limits: Map<Address, i128>,
+}
+
+/// A hidden arbiter vote, `sha256(vote || salt)` (issue #656). The vote byte is
+/// `0x01` for approve and `0x00` for reject; `salt` is a 32-byte arbiter secret.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoteCommitment {
+    pub commitment: BytesN<32>,
+    pub committed_at_ledger: u32,
+    pub revealed: bool,
+    pub rationale_hash: String,
+}
+
+/// Company-reported early departure from a retention window (issue #655),
+/// stored under `DataKey3::EarlyDepartureProposal` until the recruiter accepts.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct EarlyDepartureProposal {
+    pub proposer: Address,
+    pub payment: i128,
+    pub retention_started_at: u32,
+    pub retention_window_ledgers: u32,
+    pub valid_after_ledger: u32,
+    pub departure_ledgers: u32,
+    pub expires_at_ledger: u32,
+}
+
 /// Pending company-proposed partial release of a `ProofSubmitted` milestone
 /// (issue #550), stored under `DataKey2::PartialConfirmationProposal`.
 #[contracttype]
@@ -725,6 +914,99 @@ pub struct PartialConfirmationProposal {
     pub proposed_at_ledger: u32,
     /// Last ledger at which the proposal can still be accepted.
     pub expires_at_ledger: u32,
+}
+
+/// Result of `check_escrow_invariants` (issue #671): one engagement's
+/// book-keeping, with a flag per invariant and `ok` set only if all hold.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvariantReport {
+    pub engagement_id: String,
+    pub status: EngagementStatus,
+    pub total_amount: i128,
+    pub released_amount: i128,
+    /// Escrow refunded to the company without touching `released_amount`.
+    pub refunded_amount: i128,
+    /// `total_amount - released_amount - refunded_amount`.
+    pub expected_escrow: i128,
+    /// Escrow tracked by the contract for this engagement. `None` for an
+    /// engagement created before escrow tracking existed.
+    pub escrow_balance: Option<i128>,
+    /// `escrow_balance == Some(expected_escrow)`.
+    pub balance_matches: bool,
+    /// `released_amount >= 0`, `refunded_amount >= 0` and
+    /// `released_amount + refunded_amount <= total_amount`.
+    pub amounts_in_range: bool,
+    /// Milestone `payment_percent`s sum to exactly 100.
+    pub percents_sum_to_100: bool,
+    /// Milestone statuses agree with the engagement status: `Completed`
+    /// ⇒ every milestone `Confirmed`/`Resolved`; `Offered` ⇒ nothing
+    /// released and every milestone still in its initial state.
+    pub milestone_states_consistent: bool,
+    /// `Cancelled`/`Expired` ⇒ no escrow left; `Completed` ⇒ at most one
+    /// unit of rounding dust per milestone left.
+    pub terminal_escrow_settled: bool,
+    pub ok: bool,
+}
+
+/// Result of `check_token_invariants` (issue #671): every balance the
+/// contract tracks for one token, cross-checked against per-engagement
+/// state and the token's actual balance held by the contract.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct TokenInvariantReport {
+    pub token: Address,
+    /// Engagements in this token's index (issue #577) that were summed.
+    pub engagement_count: u32,
+    /// Sum of per-engagement escrow balances.
+    pub summed_escrow: i128,
+    /// Running escrow total (`get_token_tvl`).
+    pub tracked_escrow: i128,
+    /// Sum of unsettled bonds over the token's engagements.
+    pub summed_bonds: i128,
+    /// Running bond total.
+    pub tracked_bonds: i128,
+    /// Sum of unclaimed streamed payouts over the token's engagements.
+    pub summed_streamed: i128,
+    /// Running streamed-payout total.
+    pub tracked_streamed: i128,
+    /// Pooled company balances (`get_token_pooled_balance`).
+    pub pooled: i128,
+    /// Pull-payout credits not yet claimed.
+    pub claimable: i128,
+    /// Redeemable company fee rebates.
+    pub rebates: i128,
+    /// Escrow + bonds + streams + pooled + claimable + rebates, using the
+    /// running totals: everything the contract owes someone in this token.
+    pub tracked_total: i128,
+    /// The token's actual balance held by the contract.
+    pub contract_balance: i128,
+    /// `contract_balance - tracked_total`: positive is untracked (stray)
+    /// tokens, negative is a shortfall.
+    pub surplus: i128,
+    /// Every summed value equals its running total.
+    pub totals_consistent: bool,
+    /// `contract_balance >= tracked_total`.
+    pub solvent: bool,
+    pub ok: bool,
+}
+
+/// A recruiter's counter-proposal on an `Offered` engagement (issue #676),
+/// returned by `get_counter_offer`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CounterOffer {
+    /// Address that signed the counter (the recruiter or its co-signer).
+    pub proposer: Address,
+    /// Recruiter bound to the engagement if the company accepts. Differs
+    /// from the engagement's recruiter only on an open offer (issue #677).
+    pub recruiter: Address,
+    /// Proposed new `total_amount`.
+    pub total_amount: i128,
+    /// Proposed `payment_percent` per milestone, by index; sums to 100.
+    pub milestone_percents: Vec<u32>,
+    /// Ledger at which the counter was made.
+    pub proposed_at_ledger: u32,
 }
 
 /// Pending mutual settlement of a disputed milestone (issue #564), stored
@@ -807,4 +1089,57 @@ pub struct ProofHistoryEntry {
     pub actor: Address,
     /// Ledger of the call.
     pub ledger: u32,
+}
+
+/// Running M-of-N emergency-signer veto tally for the pending WASM upgrade
+/// (issue #691). Cleared whenever a new proposal replaces the pending one and
+/// when the proposal is executed or cancelled.
+#[contracttype]
+#[derive(Clone)]
+pub struct UpgradeVetoTally {
+    pub voters: Vec<Address>,
+    pub started_at_ledger: u32,
+}
+
+/// Which configuration branch supplied the base platform-fee bps for a quote
+/// (issue #542). Mirrors the precedence in `payout_fee_bps`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub enum FeeBpsSource {
+    /// Contract-wide `PlatformFee.bps`.
+    Global,
+    /// Live fee tier resolved from `engagement.total_amount`.
+    Tier,
+    /// Per-token override configured with `set_token_platform_fee`.
+    Token,
+    /// Rate snapshotted at engagement creation (`snapshot_fee_tier`).
+    Snapshot,
+    /// Per-company override configured with `set_company_platform_fee`.
+    Company,
+    /// Admin waived the fee for this engagement, so the rate is zero.
+    Waived,
+}
+
+/// Read-only preview of every fee component applied to a hypothetical
+/// milestone payout (issue #542). Produced by `get_fee_quote` from the same
+/// helpers `confirm_milestone` uses, so the numbers cannot drift.
+#[contracttype]
+#[derive(Clone)]
+pub struct FeeQuote {
+    /// Full milestone share before any fee, including top-up growth.
+    pub gross_amount: i128,
+    /// Which branch of the fee configuration supplied the base rate.
+    pub base_bps_source: FeeBpsSource,
+    /// Rate after referral discount, in basis points (cap 10,000).
+    pub effective_bps: u32,
+    /// Basis points removed by a recognised referrer's discount.
+    pub referral_discount: u32,
+    /// Amount by which the admin fee floor raised the bps-derived fee.
+    pub floor_adjustment: i128,
+    /// New rebate credit created by this payout.
+    pub rebate_credit: i128,
+    /// Arbiter fee charged when the milestone is disputed; `None` otherwise.
+    pub arbiter_fee: Option<i128>,
+    /// Amount left for the recruiter side after platform and arbiter fees.
+    pub net_recruiter_amount: i128,
 }
