@@ -15865,3 +15865,806 @@ fn test_arbiter_selection_weight_multiple_failures() {
     assert!(weight < 10, "Expected weight < 10, got {}", weight);
     assert_eq!(weight, 1); // Should be floored at 1
 }
+
+
+// ============================================================
+// ISSUE #700 — MILESTONE DEPENDENCY GRAPH VALIDATION
+// ============================================================
+
+/// Verify that cyclic dependencies in milestone prerequisites are rejected
+/// at engagement creation time to prevent deadlock situations.
+#[test]
+#[should_panic(expected = "CyclicMilestoneDependency")]
+fn test_cyclic_milestone_dependencies_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let milestones_with_cycle = vec![
+        &env,
+        Milestone {
+            name: String::from_str(&env, "First"),
+            payment_percent: 50,
+            kind: MilestoneKind::Placement,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(&env, ""),
+            status: MilestoneStatus::Pending,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+            prerequisites: vec![&env, 1u32], // depends on Second
+        },
+        Milestone {
+            name: String::from_str(&env, "Second"),
+            payment_percent: 50,
+            kind: MilestoneKind::Retention,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(&env, ""),
+            status: MilestoneStatus::Locked,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+            prerequisites: vec![&env, 0u32], // depends on First, creating cycle
+        },
+    ];
+
+    client.create_engagement(
+        &String::from_str(&env, "CYCLE-001"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &milestones_with_cycle,
+        &vec![&env],
+        &default_config(),
+    );
+}
+
+#[test]
+fn test_valid_complex_dependency_graph_accepted() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    // Create a diamond dependency: 0 <- 1,2 <- 3
+    let complex_milestones = vec![
+        &env,
+        Milestone {
+            name: String::from_str(&env, "Foundation"),
+            payment_percent: 25,
+            kind: MilestoneKind::Placement,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(&env, ""),
+            status: MilestoneStatus::Pending,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
+        },
+        Milestone {
+            name: String::from_str(&env, "Branch A"),
+            payment_percent: 25,
+            kind: MilestoneKind::Retention,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(&env, ""),
+            status: MilestoneStatus::Locked,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+            prerequisites: vec![&env, 0u32],
+        },
+        Milestone {
+            name: String::from_str(&env, "Branch B"),
+            payment_percent: 25,
+            kind: MilestoneKind::Retention,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(&env, ""),
+            status: MilestoneStatus::Locked,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+            prerequisites: vec![&env, 0u32],
+        },
+        Milestone {
+            name: String::from_str(&env, "Convergence"),
+            payment_percent: 25,
+            kind: MilestoneKind::Retention,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(&env, ""),
+            status: MilestoneStatus::Locked,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+            prerequisites: vec![&env, 1u32, 2u32],
+        },
+    ];
+
+    client.create_engagement(
+        &String::from_str(&env, "DIAMOND-001"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &2_000_000_000,
+        &String::from_str(&env, "Senior Engineer"),
+        &complex_milestones,
+        &vec![&env],
+        &default_config(),
+    );
+
+    let engagement = client.get_engagement(&String::from_str(&env, "DIAMOND-001"));
+    assert_eq!(engagement.milestones.len(), 4);
+}
+
+#[test]
+#[should_panic(expected = "InvalidMilestonePrerequisite")]
+fn test_self_referencing_milestone_rejected() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let self_ref_milestones = vec![
+        &env,
+        Milestone {
+            name: String::from_str(&env, "Self Loop"),
+            payment_percent: 100,
+            kind: MilestoneKind::Placement,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(&env, ""),
+            status: MilestoneStatus::Pending,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+            prerequisites: vec![&env, 0u32], // references itself
+        },
+    ];
+
+    client.create_engagement(
+        &String::from_str(&env, "SELF-001"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &self_ref_milestones,
+        &vec![&env],
+        &default_config(),
+    );
+}
+
+// ============================================================
+// ISSUE #701 — BULK ENGAGEMENT OPERATIONS
+// ============================================================
+
+#[test]
+fn test_batch_cancel_engagements_success() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    // Create 3 engagements
+    for i in 1..=3 {
+        let id = format!("BATCH-CANCEL-{:03}", i);
+        create_standard_engagement(
+            &env,
+            &client,
+            &token_id,
+            &company,
+            &recruiter,
+            &arbiter,
+            &id,
+        );
+    }
+
+    let ids = vec![
+        &env,
+        String::from_str(&env, "BATCH-CANCEL-001"),
+        String::from_str(&env, "BATCH-CANCEL-002"),
+        String::from_str(&env, "BATCH-CANCEL-003"),
+    ];
+
+    client.batch_cancel_engagements(&company, &ids);
+
+    // Verify all are cancelled
+    for id in ids.iter() {
+        let eng = client.get_engagement(&id);
+        assert!(eng.cancelled);
+    }
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_batch_cancel_requires_company_auth() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "BC-001");
+    
+    let ids = vec![&env, String::from_str(&env, "BC-001")];
+    client.batch_cancel_engagements(&recruiter, &ids);
+}
+
+#[test]
+fn test_batch_get_milestone_status() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let eng_id = String::from_str(&env, "BATCH-STATUS");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "BATCH-STATUS");
+    
+    // Submit and confirm first milestone
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof0"));
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    let milestone_indices = vec![&env, 0u32, 1u32, 2u32];
+    let statuses = client.batch_get_milestone_status(&eng_id, &milestone_indices);
+    
+    assert_eq!(statuses.len(), 3);
+    assert_eq!(statuses.get(0).unwrap(), MilestoneStatus::Confirmed);
+    assert_eq!(statuses.get(1).unwrap(), MilestoneStatus::Locked);
+    assert_eq!(statuses.get(2).unwrap(), MilestoneStatus::Locked);
+}
+
+#[test]
+fn test_batch_operations_maintain_event_emission() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "EVT-001");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "EVT-002");
+
+    let ids = vec![
+        &env,
+        String::from_str(&env, "EVT-001"),
+        String::from_str(&env, "EVT-002"),
+    ];
+
+    client.batch_cancel_engagements(&company, &ids);
+
+    // Verify engagement_cancelled events were emitted
+    let events = env.events().all();
+    let cancel_events = events.iter().filter(|(_, topics, _)| {
+        topics.get(0)
+            .and_then(|v| v.try_into_val(&env).ok())
+            .map(|s: Symbol| s == Symbol::new(&env, "engagement_cancelled"))
+            .unwrap_or(false)
+    }).count();
+    
+    assert_eq!(cancel_events, 2);
+}
+
+// ============================================================
+// ISSUE #702 — ENGAGEMENT TEMPLATES
+// ============================================================
+
+#[test]
+fn test_create_engagement_from_template() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    // Create a template
+    let template_id = String::from_str(&env, "TEMPLATE-001");
+    client.create_template(
+        &company,
+        &template_id,
+        &String::from_str(&env, "Standard Engineer Template"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+
+    // Use template to create engagement
+    let eng_id = String::from_str(&env, "FROM-TEMPLATE-001");
+    client.create_engagement_from_template(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_500_000_000,
+        &String::from_str(&env, "Senior Engineer"),
+        &template_id,
+    );
+
+    let engagement = client.get_engagement(&eng_id);
+    assert_eq!(engagement.milestones.len(), 3);
+    assert_eq!(engagement.total_amount, 1_500_000_000);
+}
+
+#[test]
+fn test_list_company_templates() {
+    let (env, contract_id, _token_id, company, _recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    // Create multiple templates
+    for i in 1..=3 {
+        let template_id = format!("TMPL-{:03}", i);
+        client.create_template(
+            &company,
+            &String::from_str(&env, &template_id),
+            &String::from_str(&env, &format!("Template {}", i)),
+            &build_milestones(&env),
+            &vec![&env],
+            &default_config(),
+        );
+    }
+
+    let templates = client.get_company_templates(&company, &0, &10);
+    assert_eq!(templates.len(), 3);
+}
+
+#[test]
+#[should_panic(expected = "template not found")]
+fn test_create_from_nonexistent_template_fails() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    client.create_engagement_from_template(
+        &String::from_str(&env, "ENG-001"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &String::from_str(&env, "NONEXISTENT"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "unauthorized")]
+fn test_cannot_use_another_company_template() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let other_company = Address::generate(&env);
+    
+    // Company creates a template
+    let template_id = String::from_str(&env, "PRIVATE-TMPL");
+    client.create_template(
+        &company,
+        &template_id,
+        &String::from_str(&env, "Private Template"),
+        &build_milestones(&env),
+        &vec![&env],
+        &default_config(),
+    );
+
+    // Other company tries to use it
+    client.create_engagement_from_template(
+        &String::from_str(&env, "ENG-001"),
+        &other_company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &template_id,
+    );
+}
+
+// ============================================================
+// ISSUE #703 — MILESTONE AUTO-CONFIRMATION
+// ============================================================
+
+#[test]
+fn test_milestone_auto_confirms_after_timeout() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    // Enable auto-confirmation with 7-day timeout
+    let mut config = default_config();
+    config.auto_confirm_timeout_days = Some(7);
+    
+    let eng_id = String::from_str(&env, "AUTO-CONFIRM-001");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env],
+        &config,
+    );
+
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    
+    // Advance past auto-confirm window
+    advance_ledger(&env, 7 * LEDGERS_PER_DAY + 1);
+    
+    // Trigger auto-confirmation check
+    client.check_auto_confirmations(&eng_id);
+    
+    let milestone = client.get_engagement(&eng_id).milestones.get(0).unwrap();
+    assert_eq!(milestone.status, MilestoneStatus::Confirmed);
+}
+
+#[test]
+fn test_manual_confirm_before_auto_timeout_prevents_auto_confirm() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let mut config = default_config();
+    config.auto_confirm_timeout_days = Some(7);
+    
+    let eng_id = String::from_str(&env, "MANUAL-FIRST");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env],
+        &config,
+    );
+
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    
+    // Company confirms manually before timeout
+    advance_ledger(&env, 3 * LEDGERS_PER_DAY);
+    client.confirm_milestone(&company, &eng_id, &0);
+    
+    // Advance past auto-confirm window
+    advance_ledger(&env, 5 * LEDGERS_PER_DAY);
+    
+    // Check should be no-op
+    client.check_auto_confirmations(&eng_id);
+    
+    let milestone = client.get_engagement(&eng_id).milestones.get(0).unwrap();
+    assert_eq!(milestone.status, MilestoneStatus::Confirmed);
+    // Verify it was manually confirmed, not auto-confirmed
+    assert!(has_event(&env, "milestone_confirmed"));
+}
+
+#[test]
+fn test_auto_confirm_disabled_by_default() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let eng_id = String::from_str(&env, "NO-AUTO");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "NO-AUTO");
+    
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    
+    // Advance way past any reasonable timeout
+    advance_ledger(&env, 30 * LEDGERS_PER_DAY);
+    
+    client.check_auto_confirmations(&eng_id);
+    
+    let milestone = client.get_engagement(&eng_id).milestones.get(0).unwrap();
+    assert_eq!(milestone.status, MilestoneStatus::AwaitingConfirmation);
+}
+
+#[test]
+fn test_auto_confirm_emits_distinct_event() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let mut config = default_config();
+    config.auto_confirm_timeout_days = Some(7);
+    
+    let eng_id = String::from_str(&env, "AUTO-EVT");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env],
+        &config,
+    );
+
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    advance_ledger(&env, 7 * LEDGERS_PER_DAY + 1);
+    client.check_auto_confirmations(&eng_id);
+    
+    assert!(has_event(&env, "milestone_auto_confirmed"));
+}
+
+// ============================================================
+// ISSUE #704 — MULTI-TOKEN ENGAGEMENT SUPPORT
+// ============================================================
+
+#[test]
+fn test_create_engagement_with_multiple_tokens() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    // Create a second token
+    let token_admin2 = Address::generate(&env);
+    let token_id2 = env
+        .register_stellar_asset_contract_v2(token_admin2.clone())
+        .address();
+    let token_client2 = token::StellarAssetClient::new(&env, &token_id2);
+    token_client2.mint(&company, &500_000_000_000);
+    
+    // Add second token to allowlist
+    client.add_token(&company, &token_id2, &1_000_000);
+    
+    let token_allocations = vec![
+        &env,
+        TokenAllocation {
+            token: token_id.clone(),
+            amount: 600_000_000,
+        },
+        TokenAllocation {
+            token: token_id2.clone(),
+            amount: 400_000_000,
+        },
+    ];
+    
+    let eng_id = String::from_str(&env, "MULTI-TOKEN-001");
+    client.create_multi_token_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_allocations,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env],
+        &default_config(),
+    );
+
+    let engagement = client.get_engagement(&eng_id);
+    assert_eq!(engagement.token_allocations.len(), 2);
+}
+
+#[test]
+fn test_multi_token_payout_distributes_proportionally() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let token_admin2 = Address::generate(&env);
+    let token_id2 = env
+        .register_stellar_asset_contract_v2(token_admin2.clone())
+        .address();
+    let token_client2 = token::StellarAssetClient::new(&env, &token_id2);
+    token_client2.mint(&company, &500_000_000_000);
+    client.add_token(&company, &token_id2, &1_000_000);
+    
+    let token_allocations = vec![
+        &env,
+        TokenAllocation {
+            token: token_id.clone(),
+            amount: 1_000_000_000,
+        },
+        TokenAllocation {
+            token: token_id2.clone(),
+            amount: 1_000_000_000,
+        },
+    ];
+    
+    let eng_id = String::from_str(&env, "MULTI-PAYOUT");
+    client.create_multi_token_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_allocations,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env],
+        &default_config(),
+    );
+
+    let token_client = token::StellarAssetClient::new(&env, &token_id);
+    let recruiter_balance_before = token_client.balance(&recruiter);
+    let recruiter_balance2_before = token_client2.balance(&recruiter);
+
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    let recruiter_balance_after = token_client.balance(&recruiter);
+    let recruiter_balance2_after = token_client2.balance(&recruiter);
+    
+    // First milestone is 30%, so each token should pay 300M
+    assert!(recruiter_balance_after > recruiter_balance_before);
+    assert!(recruiter_balance2_after > recruiter_balance2_before);
+}
+
+#[test]
+#[should_panic(expected = "empty token allocations")]
+fn test_multi_token_engagement_requires_at_least_one_token() {
+    let (env, contract_id, _token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let empty_allocations: Vec<TokenAllocation> = Vec::new(&env);
+    
+    client.create_multi_token_engagement(
+        &String::from_str(&env, "EMPTY-TOKENS"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &empty_allocations,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env],
+        &default_config(),
+    );
+}
+
+#[test]
+#[should_panic(expected = "token not in allowlist")]
+fn test_multi_token_validates_all_tokens_in_allowlist() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let unauthorized_token = Address::generate(&env);
+    
+    let token_allocations = vec![
+        &env,
+        TokenAllocation {
+            token: token_id.clone(),
+            amount: 500_000_000,
+        },
+        TokenAllocation {
+            token: unauthorized_token,
+            amount: 500_000_000,
+        },
+    ];
+    
+    client.create_multi_token_engagement(
+        &String::from_str(&env, "INVALID-TOKEN"),
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_allocations,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env],
+        &default_config(),
+    );
+}
+
+// ============================================================
+// ISSUE #705 — ENGAGEMENT CLONING AND VERSIONING
+// ============================================================
+
+#[test]
+fn test_clone_engagement_creates_new_id_with_same_terms() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let original_id = String::from_str(&env, "ORIGINAL-001");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ORIGINAL-001");
+    
+    let cloned_id = String::from_str(&env, "CLONED-001");
+    client.clone_engagement(&company, &original_id, &cloned_id);
+    
+    let original = client.get_engagement(&original_id);
+    let cloned = client.get_engagement(&cloned_id);
+    
+    assert_eq!(original.total_amount, cloned.total_amount);
+    assert_eq!(original.milestones.len(), cloned.milestones.len());
+    assert_eq!(original.job_title, cloned.job_title);
+    assert_ne!(original.created_at, cloned.created_at);
+}
+
+#[test]
+fn test_cloned_engagement_starts_fresh() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let original_id = String::from_str(&env, "ORIG-PROGRESS");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ORIG-PROGRESS");
+    
+    // Progress original engagement
+    client.submit_proof(&recruiter, &original_id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.confirm_milestone(&company, &original_id, &0);
+    
+    let cloned_id = String::from_str(&env, "CLONED-FRESH");
+    client.clone_engagement(&company, &original_id, &cloned_id);
+    
+    let cloned = client.get_engagement(&cloned_id);
+    let milestone0 = cloned.milestones.get(0).unwrap();
+    
+    // Cloned engagement should be in fresh state
+    assert_eq!(milestone0.status, MilestoneStatus::Pending);
+    assert_eq!(milestone0.proof_hash, String::from_str(&env, ""));
+}
+
+#[test]
+fn test_engagement_version_tracking() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let eng_id = String::from_str(&env, "VERSIONED-001");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "VERSIONED-001");
+    
+    let v1 = client.get_engagement(&eng_id);
+    assert_eq!(v1.version, 1);
+    
+    // Make an amendment (requires implementation of amend functionality)
+    client.amend_engagement_metadata(&company, &eng_id, &String::from_str(&env, "ipfs://v2"));
+    
+    let v2 = client.get_engagement(&eng_id);
+    assert_eq!(v2.version, 2);
+}
+
+#[test]
+fn test_get_engagement_history_shows_all_versions() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let eng_id = String::from_str(&env, "HISTORY-001");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "HISTORY-001");
+    
+    // Make changes
+    client.amend_engagement_metadata(&company, &eng_id, &String::from_str(&env, "ipfs://v2"));
+    client.amend_engagement_metadata(&company, &eng_id, &String::from_str(&env, "ipfs://v3"));
+    
+    let history = client.get_engagement_history(&eng_id);
+    assert_eq!(history.len(), 3);
+    assert_eq!(history.get(0).unwrap().version, 1);
+    assert_eq!(history.get(2).unwrap().version, 3);
+}
+
+#[test]
+#[should_panic(expected = "engagement ID already exists")]
+fn test_clone_to_existing_id_fails() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-001");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-002");
+    
+    client.clone_engagement(
+        &company,
+        &String::from_str(&env, "ENG-001"),
+        &String::from_str(&env, "ENG-002"), // Already exists
+    );
+}
