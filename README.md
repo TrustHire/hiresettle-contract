@@ -1711,6 +1711,8 @@ engagement is quarantined.
 | Hand the company role on an engagement to another address     | `transfer_company`                                     |
 | Rate the recruiter on a completed engagement                  | `rate_recruiter`                                       |
 | Redeem accrued fee rebates                                    | `redeem_company_rebate`                                |
+| Release only part of a submitted milestone | `propose_partial_confirmation`, then the recruiter calls `accept_partial_confirmation` or `reject_partial_confirmation` |
+| Add or remove a team member who can confirm or dispute | `add_company_member` / `remove_company_member` |
 | Let a second key act for the company                          | `set_company_cosigner`                                 |
 
 #### Recruiter
@@ -1732,6 +1734,8 @@ engagement is quarantined.
 | I want to…                                                            | Call                                                                                                                               |
 | --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | Cancel the engagement and refund unreleased escrow                    | `cancel_engagement` (both must sign)                                                                                               |
+| Cancel with a negotiated split of the unreleased escrow | `propose_cancellation`, then the other side calls `accept_cancellation` |
+| Settle an open dispute without arbiters | `propose_dispute_settlement`, then the other side calls `accept_dispute_settlement` |
 | Change the co-recruiter fee split                                     | `propose_split_amendment`, then the other party calls `accept_split_amendment` or `reject_split_amendment`                         |
 | Change this engagement's dispute window                               | `propose_dispute_window_override`, then the other party calls `accept_dispute_window_override` or `reject_dispute_window_override` |
 | Force-confirm a milestone the company ignored past the confirm window | `force_confirm_milestone`                                                                                                          |
@@ -2537,6 +2541,298 @@ On rejection, the engagement returns to `Active` and the recruiter must continue
 | Accepted (no milestones done) | Nothing                          | Full `total_amount` refund                |
 | Rejected                      | N/A -- engagement continues      | N/A -- engagement continues               |
 
+### Negotiated Cancellation
+
+`cancel_engagement` always refunds all unreleased escrow to the company. A
+**negotiated cancellation** lets both sides agree that part of the unreleased
+escrow goes to the recruiter side as compensation for partial work, with the
+rest refunded. It is a two-step flow:
+
+1. One side calls `propose_cancellation(proposer, engagement_id, recruiter_bps_of_unreleased)`.
+2. The other side calls `accept_cancellation(acceptor, engagement_id)`.
+
+`recruiter_bps_of_unreleased` is in basis points. `0` refunds everything, the
+same outcome as `cancel_engagement`. `10_000` pays the whole unreleased amount
+to the recruiter side. Any value above `10_000` panics with `InvalidCancellationBps`.
+
+**Who can propose and accept**
+
+- The proposer may be the company or its cosigner, or the recruiter or its
+  cosigner. Company team members cannot propose.
+- The acceptor must be on the other side. A proposal from the company side can
+  only be accepted by the recruiter side, and the reverse.
+- The engagement must be `Active` or `ReplacementRequested`, and no milestone
+  may be `Disputed`.
+
+**How the split is computed**
+
+Let `unreleased = total_amount - released_amount`. Let `withheld` be any share
+held back by an earlier split-vote dispute resolution (issue #462), capped at
+`unreleased`. Then:
+
+```
+recruiter_amount = floor((unreleased - withheld) * recruiter_bps_of_unreleased / 10_000)
+refund           = unreleased - recruiter_amount
+```
+
+Rounding always favours the company: the recruiter amount is rounded down, so
+any remainder stays in the refund. The `withheld` share is never negotiated. It
+is part of the refund. For example, with 1,000 units unreleased, nothing
+withheld and `recruiter_bps_of_unreleased = 2_500`, the recruiter side receives
+250 and the company is refunded 750.
+
+On acceptance, `recruiter_amount` is added to `released_amount` and runs
+through the regular payout pipeline. The platform fee is collected first and
+recorded under milestone index `u32::MAX`. The co-recruiter split and the
+recruiter's payout preferences (including `pull_payouts`) then apply to the net
+amount. The refund goes back to the company. For pool-funded engagements it
+returns to the pool by default. The engagement then becomes `Cancelled`.
+
+**Expiry and replacement**
+
+- A new proposal replaces any pending one for the engagement.
+- A proposal expires `get_amendment_ttl()` ledgers after it was made. The
+  default is 17,280 ledgers, about one day at 5-second ledgers. After that,
+  `accept_cancellation` panics with `cancellation_expired`.
+- That panicking call does not delete the expired entry, because a failed call
+  rolls back its writes. `get_pending_cancellation` returns `None` for an
+  expired entry, and the next proposal overwrites it.
+
+**Interaction with other actions**
+
+- `cancel_engagement` does not clear a pending proposal. Once the engagement
+  leaves `Active` or `ReplacementRequested`, `accept_cancellation` panics with
+  `engagement is not active`. `get_pending_cancellation` does not check the
+  engagement's status, so it keeps returning the proposal until it expires.
+  Check the engagement status alongside it.
+- Raising a dispute does not clear a pending proposal either. While a milestone
+  is `Disputed`, both `propose_cancellation` and `accept_cancellation` panic
+  with `MilestoneDisputed`. The proposal can be accepted again once the dispute
+  is over, if it has not expired.
+- Pausing the contract or the engagement blocks both calls with `ContractPaused`
+  or `EngagementPaused`. The stored proposal is left unchanged.
+
+**Panics**
+
+| Call | Panics |
+| ---- | ------ |
+| `propose_cancellation` | `ContractPaused`, `EngagementPaused`, `InvalidCancellationBps`, `engagement is not active`, `unauthorized`, `MilestoneDisputed` |
+| `accept_cancellation` | `ContractPaused`, `EngagementPaused`, `no pending cancellation proposal`, `cancellation_expired`, `engagement is not active`, `unauthorized`, `MilestoneDisputed` |
+
+Event payloads for this flow are listed in the [Events](#events) section.
+
+### Mutual Dispute Settlement
+
+While a milestone is `Disputed`, the company side or the recruiter side can
+settle the dispute between themselves, without waiting for arbiter votes. The
+other side then accepts.
+
+1. `propose_dispute_settlement(proposer, engagement_id, milestone_index, recruiter_bps)`
+2. `accept_dispute_settlement(acceptor, engagement_id, milestone_index)`
+
+`recruiter_bps` is the recruiter side's share of the milestone, in basis points.
+Values above `10_000` panic with `InvalidRecruiterBps`.
+
+**When a settlement can be proposed**
+
+- The engagement is `Active`.
+- The milestone is `Disputed`, and the dispute has not been escalated to the
+  super arbiter. An escalated dispute panics with `DisputeEscalated`.
+- The proposer is on the company side or the recruiter side, including
+  cosigners. Company team members cannot propose.
+
+Arbiter votes do not block a proposal. Votes cast so far are cleared when the
+settlement is accepted.
+
+**Payout on acceptance**
+
+Let `share = total_amount * payment_percent / 100`, the milestone's full share.
+Then:
+
+```
+released = floor(share * recruiter_bps / 10_000)   -> paid to the recruiter side
+refunded = share - released                         -> sent to the company address
+```
+
+- `released` runs through the platform fee and the recruiter payout path, the
+  same as an arbiter decision. No arbiter fee is charged, because no arbiter
+  decided the outcome.
+- `refunded` is sent straight to the company's address. For pool-funded
+  engagements it does not return to the pool. This differs from
+  `accept_cancellation`, which refunds to the pool by default.
+- The milestone becomes `Resolved`, and the vote tallies and the settlement
+  proposal are cleared.
+
+**Lifecycle of a proposal**
+
+- A new proposal on the same dispute replaces the pending one.
+- A proposal has no time expiry. It is tied to the dispute cycle
+  (`get_dispute_cycles`) it was made in. The proposal stops applying when the
+  dispute is decided by a vote, when the dispute is rejected, or when a later
+  dispute is raised on that milestone. Accepting it then panics with
+  `no pending dispute settlement`, and `get_pending_dispute_settlement` returns `None`.
+- Escalating the dispute to the super arbiter does not clear the proposal. While
+  it is escalated, both calls panic with `DisputeEscalated`, but
+  `get_pending_dispute_settlement` still returns the proposal until the dispute
+  ends.
+
+**Panics**
+
+| Call | Panics |
+| ---- | ------ |
+| `propose_dispute_settlement` | `ContractPaused`, `EngagementPaused`, `InvalidRecruiterBps`, `engagement is not active`, `unauthorized`, `milestone is not in disputed status`, `DisputeEscalated` |
+| `accept_dispute_settlement` | `ContractPaused`, `EngagementPaused`, `engagement is not active`, `no pending dispute settlement`, `unauthorized`, `milestone is not in disputed status`, `DisputeEscalated` |
+
+Event payloads for this flow are listed in the [Events](#events) section.
+
+### Partial Milestone Confirmation
+
+Sometimes a recruiter has delivered only part of a milestone. The company can
+then release a fraction of the milestone's payment without raising a dispute.
+The recruiter decides whether to accept.
+
+```mermaid
+sequenceDiagram
+    participant R as Recruiter
+    participant C as Company
+    participant S as Contract
+
+    R->>S: submit_proof (milestone becomes ProofSubmitted)
+    C->>S: propose_partial_confirmation(company, id, index, release_bps)
+    S-->>S: store proposal, expires after amendment TTL
+    alt Recruiter accepts
+        R->>S: accept_partial_confirmation(recruiter, id, index)
+        S-->>R: release_bps paid, remainder refunded, milestone Confirmed
+    else Recruiter rejects
+        R->>S: reject_partial_confirmation(recruiter, id, index)
+        S-->>C: proposal discarded, milestone stays ProofSubmitted
+    end
+```
+
+**Proposing**
+
+- Only the company or its cosigner can propose.
+- The engagement must be `Active`, and the milestone must be `ProofSubmitted`.
+  Otherwise the call panics with `milestone proof not yet submitted`.
+- `release_bps` is in basis points. Values above `10_000` panic with `InvalidReleaseBps`.
+- A new proposal on the same milestone replaces the pending one.
+- The proposal is bound to the submission it was made against
+  (`proof_submitted_at`). It expires `get_amendment_ttl()` ledgers after it was
+  made, and `get_pending_partial_confirmation` returns `None` once it has expired.
+
+**Accepting**
+
+Only the recruiter or its cosigner can accept. The payment is computed as:
+
+```
+full_share = total_amount * payment_percent / 100
+payment    = full_share - replacement_paid_out
+released   = floor(payment * release_bps / 10_000)
+refunded   = payment - released
+```
+
+- `released` runs through the platform fee first, recorded under the milestone
+  index. It then goes through streaming if the engagement sets
+  `stream_duration_ledgers`. Otherwise it goes through the recruiter payout path,
+  which applies the co-recruiter split and pull payouts.
+- `refunded` is sent to the company's address. `released + refunded` always
+  equals `payment`.
+- The milestone becomes `Confirmed` whatever `release_bps` is. A value of `0`
+  closes the milestone with a full refund, and a value of `10_000` releases the
+  full payment. The milestone cannot be disputed or confirmed again afterwards.
+- Retention milestones still need their `valid_after_ledger` to have passed, and
+  the same prerequisites as `confirm_milestone` apply.
+- If the proposal has expired, the call panics with `PartialConfirmationExpired`.
+  If the milestone has left `ProofSubmitted`, or its proof has changed, the call
+  panics with `milestone proof not yet submitted`.
+
+**Rejecting**
+
+The recruiter or its cosigner can reject. The proposal is discarded and nothing
+is paid. The milestone stays `ProofSubmitted`, so the company can still confirm
+it in full, raise a dispute, or propose again.
+
+**Withdrawing a proof**
+
+`withdraw_proof` is blocked while an unexpired partial confirmation is pending on
+the same proof (`CompanyAlreadyActed`). Once the proposal expires, the recruiter
+can withdraw the proof again.
+
+**Panics**
+
+| Call | Panics |
+| ---- | ------ |
+| `propose_partial_confirmation` | `ContractPaused`, `EngagementPaused`, `InvalidReleaseBps`, `engagement is not active`, `unauthorized`, `invalid milestone index`, `milestone proof not yet submitted` |
+| `accept_partial_confirmation` | `ContractPaused`, `EngagementPaused`, `engagement is not active`, `unauthorized`, `no pending partial confirmation`, `PartialConfirmationExpired`, `milestone proof not yet submitted`, `PreviousMilestoneNotComplete`, `retention window has not elapsed — cannot confirm yet` |
+| `reject_partial_confirmation` | `ContractPaused`, `EngagementPaused`, `unauthorized`, `no pending partial confirmation` |
+
+Event payloads for this flow are listed in the [Events](#events) section.
+
+### Company Team Members
+
+A company can register **team members**: addresses that may confirm milestones
+or raise disputes on the company's engagements, without holding the company's
+key or being its cosigner.
+
+Each member has one of two roles:
+
+```rust
+pub enum CompanyMemberRole {
+    Confirmer, // confirm_milestone, confirm_milestone_with_note, batch_confirm_milestones
+    Disputer,  // raise_dispute, batch_raise_dispute
+}
+```
+
+Only these four entry points accept a team member. Every other company-side
+entry point checks only the company address or its cosigner. A member therefore
+cannot propose or accept a cancellation, change amendments, or top up escrow.
+
+**Managing members**
+
+The company's own key must sign each of these. A cosigner cannot manage members.
+
+- `add_company_member(company, member, role)` registers the member, or overwrites
+  the member's existing role. It emits `company_member_added`.
+- `remove_company_member(company, member)` takes effect immediately, so the
+  member's next call fails. Removing an address that is not a member is allowed.
+  It still emits `company_member_removed`.
+- `get_company_member_role(company, member)` returns `Option<CompanyMemberRole>`,
+  or `None` if the address is not a member.
+
+**Team members and cosigners**
+
+| | Cosigner (`set_company_cosigner`) | Team member (`add_company_member`) |
+| --- | --- | --- |
+| Registered by | The company's own key | The company's own key |
+| Rights | All company-side actions | Only the actions of the member's role |
+| Can cancel, amend, top up, or transfer | Yes | No |
+| Can manage other members | No | No |
+
+**Acting identity for indexers**
+
+Team members are not identified in the standard `milestone_confirmed` and
+`dispute_raised` events. Instead, a registered member acting for the company
+also emits an extra event that names the member:
+
+- `milestone_confirmed_by_member` is emitted once per milestone confirmed by a
+  member, through `confirm_milestone`, `confirm_milestone_with_note` or
+  `batch_confirm_milestones`.
+- `dispute_raised_by_member` is emitted by `raise_dispute`. `batch_raise_dispute`
+  does not emit it, so indexers must treat batch disputes as company-attributed.
+
+Neither event is emitted when the company address or a cosigner acts. Indexers
+should match these events in the same transaction as the standard event.
+
+**Panics**
+
+| Call | Panics |
+| ---- | ------ |
+| `add_company_member`, `remove_company_member` | Auth failure if the company's own key did not sign |
+| `confirm_milestone` / `batch_confirm_milestones` by a member with the wrong role | `unauthorized` |
+| `raise_dispute` / `batch_raise_dispute` by a member with the wrong role | `unauthorized` |
+
+Event payloads for this flow are listed in the [Events](#events) section.
+
 ### Read-Only Queries
 
 - **`get_config_snapshot()`**: Fetches all active contract configuration tunables and parameters in a single read-only call, eliminating the need for indexers to make multiple round-trips.
@@ -2577,6 +2873,10 @@ argument and return-type details.
 | Is the contract (or one engagement) paused?                            | `is_paused` / `is_engagement_paused`                                          |
 | Load current config in one call (indexers)                             | `get_config_snapshot`                                                         |
 | Fetch a single config value                                            | `get_version`, `get_min_amount`, `get_platform_fee`, `get_allowed_tokens`, …  |
+| Show a pending negotiated cancellation | `get_pending_cancellation` |
+| Show a pending partial confirmation for a milestone | `get_pending_partial_confirmation` |
+| Show a pending dispute settlement for a milestone | `get_pending_dispute_settlement` |
+| Show a company team member's role | `get_company_member_role` |
 | Show open dispute count on an engagement                               | `get_active_dispute_count`                                                    |
 
 #### Engagement Queries
@@ -3089,6 +3389,37 @@ super arbiter for a tie-breaking resolution (issue #246):
 | `early_exit_requested` | `engagement_id` | `recruiter` | `request_early_exit` |
 | `early_exit_accepted`  | `engagement_id` | `refund`    | `accept_early_exit`  |
 | `early_exit_rejected`  | `engagement_id` | `company`   | `reject_early_exit`  |
+
+### Negotiated Cancellation
+
+| Event                   | Topics          | Payload                                                  | Trigger                  |
+| ----------------------- | --------------- | -------------------------------------------------------- | ------------------------ |
+| `cancellation_proposed` | `engagement_id` | `(proposer, recruiter_bps_of_unreleased, expires_at_ledger)` | `propose_cancellation`   |
+| `cancellation_accepted` | `engagement_id` | `(acceptor, recruiter_bps, recruiter_amount, refund)`    | `accept_cancellation`    |
+
+### Dispute Settlement
+
+| Event                          | Topics          | Payload                                    | Trigger                       |
+| ------------------------------ | --------------- | ------------------------------------------ | ----------------------------- |
+| `dispute_settlement_proposed`  | `engagement_id` | `(milestone_index, proposer, recruiter_bps)` | `propose_dispute_settlement` |
+| `dispute_settled`              | `engagement_id` | `(milestone_index, recruiter_bps, released, refunded)` | `accept_dispute_settlement` |
+
+### Partial Confirmation
+
+| Event                           | Topics          | Payload                                          | Trigger                            |
+| ------------------------------- | --------------- | ------------------------------------------------ | ---------------------------------- |
+| `partial_confirmation_proposed` | `engagement_id` | `(milestone_index, release_bps, expires_at_ledger)` | `propose_partial_confirmation`  |
+| `partial_confirmation_accepted` | `engagement_id` | `(milestone_index, release_bps, released, refunded)` | `accept_partial_confirmation` |
+| `partial_confirmation_rejected` | `engagement_id` | `(milestone_index, release_bps)`                 | `reject_partial_confirmation`      |
+
+### Company Members
+
+| Event                           | Topics       | Payload                       | Trigger                                                              |
+| ------------------------------- | ------------ | ----------------------------- | -------------------------------------------------------------------- |
+| `company_member_added`          | `company`    | `(member, role)`              | `add_company_member`                                                 |
+| `company_member_removed`        | `company`    | `member`                      | `remove_company_member` (emitted even if the address was not a member) |
+| `milestone_confirmed_by_member` | `engagement_id` | `(milestone_index, member)` | `confirm_milestone`, `confirm_milestone_with_note`, `batch_confirm_milestones` (member callers only) |
+| `dispute_raised_by_member`      | `engagement_id` | `(milestone_index, member)` | `raise_dispute` (member callers only; not `batch_raise_dispute`)     |
 
 ### Replacement
 
