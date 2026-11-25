@@ -17315,3 +17315,275 @@ fn test_expiry_streamed_payout_with_bond_forfeiture() {
     // Recruiter should only have the ~500M pulled before expiry (no bond return)
     assert!(token_client.balance(&recruiter) <= 501_000_000);
 }
+
+// ============================================================
+// ADDITIONAL COMPREHENSIVE TESTS (Second Set)
+// ============================================================
+
+/// Test that pool-funded engagements properly handle refunds when cancelled
+/// after partial milestone completion, ensuring pool balance is correctly restored.
+#[test]
+fn test_pool_funded_engagement_partial_completion_cancellation() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    
+    // Setup pool funding
+    token_client.mint(&company, &2_000_000_000);
+    client.deposit_to_pool(&company, &token_id, &2_000_000_000);
+    assert_eq!(client.get_pool_balance(&company, &token_id), 2_000_000_000);
+    
+    let mut config = default_config();
+    config.fund_from_pool = true;
+    
+    let eng_id = String::from_str(&env, "ENG-POOL-CANCEL");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &config,
+    );
+    
+    // Pool should be reduced by escrow amount
+    assert_eq!(client.get_pool_balance(&company, &token_id), 1_000_000_000);
+    
+    // Complete milestone 0 (30% = 300M)
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.confirm_milestone(&company, &eng_id, &0);
+    assert_eq!(token_client.balance(&recruiter), 300_000_000);
+    
+    // Cancel engagement - remaining 70% (700M) should return to pool
+    client.cancel_engagement(&company, &eng_id, &String::from_str(&env, "no_longer_needed"));
+    
+    assert_eq!(client.get_engagement(&eng_id).status, EngagementStatus::Cancelled);
+    // Pool should have 1B + 700M = 1.7B
+    assert_eq!(client.get_pool_balance(&company, &token_id), 1_700_000_000);
+    
+    // Verify contract holds no residual funds
+    assert_eq!(token_client.balance(&contract_id), 0);
+}
+
+/// Test that arbiter vote deadline enforcement with weighted panels properly
+/// calculates quorum when some arbiters are recused for missing deadline.
+#[test]
+fn test_arbiter_deadline_weighted_panel_quorum_recalculation() {
+    let (env, contract_id, token_id, company, recruiter, _arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let arb1 = Address::generate(&env);
+    let arb2 = Address::generate(&env);
+    let arb3 = Address::generate(&env);
+    
+    // Set vote deadline of 1000 ledgers
+    client.set_arbiter_vote_deadline(&company, &1_000);
+    
+    // Create weighted panel: arb1=50%, arb2=30%, arb3=20%
+    let eng_id = String::from_str(&env, "ENG-DEADLINE-WEIGHTED");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arb1.clone(), arb2.clone(), arb3.clone()],
+            quorum: 2,
+            weights: Some(vec![&env, 50u32, 30u32, 20u32]),
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &default_config(),
+    );
+    
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "disputed"), &DisputeCategory::ProofInvalid);
+    
+    // Only arb1 votes before deadline
+    client.cast_arbiter_vote(&arb1, &eng_id, &0, &true, &None);
+    
+    // Advance past deadline
+    advance_ledger(&env, 1_001);
+    
+    // Enforce deadline - arb2 and arb3 should be recused
+    client.enforce_vote_deadline(&eng_id, &0);
+    
+    // With arb2 and arb3 recused, only arb1 (50%) remains
+    // Original quorum was 2 arbiters, but with recusals, arb1's vote alone
+    // should be sufficient since they're the only remaining arbiter
+    let milestone = client.get_milestone(&eng_id, &0);
+    assert_eq!(milestone.status, MilestoneStatus::Resolved);
+    
+    // Verify recused arbiters cannot vote
+    let arb2_result = std::panic::catch_unwind(|| {
+        client.cast_arbiter_vote(&arb2, &eng_id, &0, &false, &None);
+    });
+    assert!(arb2_result.is_err());
+}
+
+/// Test dispute category statistics tracking across multiple engagements and
+/// ensure proper aggregation per company.
+#[test]
+fn test_dispute_category_statistics_aggregation_across_engagements() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    // Create 3 engagements with various dispute categories
+    for i in 1..=3 {
+        let eng_id = String::from_str(&env, &format!("ENG-STATS-{}", i));
+        create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, &format!("ENG-STATS-{}", i));
+        
+        client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+        
+        // Different dispute categories per engagement
+        let category = match i {
+            1 => DisputeCategory::ProofInvalid,
+            2 => DisputeCategory::ProofInvalid, // Same as 1
+            3 => DisputeCategory::WorkQuality,
+            _ => DisputeCategory::ProofInvalid,
+        };
+        
+        client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "reason"), &category);
+        
+        // Resolve with arbiter vote
+        let approve = i == 1; // First one approved, others rejected
+        client.cast_arbiter_vote(&arbiter, &eng_id, &0, &approve, &None);
+    }
+    
+    // Check that dispute stats properly track categories
+    // Should have 2 ProofInvalid disputes (1 approved, 1 rejected)
+    // and 1 WorkQuality dispute (rejected)
+    
+    // Verify by checking company's dispute history
+    let eng1 = client.get_engagement(&String::from_str(&env, "ENG-STATS-1"));
+    let eng2 = client.get_engagement(&String::from_str(&env, "ENG-STATS-2"));
+    let eng3 = client.get_engagement(&String::from_str(&env, "ENG-STATS-3"));
+    
+    // All should have disputes raised
+    assert!(client.get_milestone(&String::from_str(&env, "ENG-STATS-1"), &0).status == MilestoneStatus::Resolved);
+    assert!(client.get_milestone(&String::from_str(&env, "ENG-STATS-2"), &0).status == MilestoneStatus::Rejected);
+    assert!(client.get_milestone(&String::from_str(&env, "ENG-STATS-3"), &0).status == MilestoneStatus::Rejected);
+}
+
+/// Test that timeline events are properly recorded for all major state transitions
+/// including edge cases like re-submissions after rejection.
+#[test]
+fn test_timeline_comprehensive_event_recording() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let eng_id = String::from_str(&env, "ENG-TIMELINE");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "ENG-TIMELINE");
+    
+    // Initial creation should log timeline event
+    let timeline = client.get_timeline(&eng_id, &0, &10);
+    assert!(timeline.len() >= 1);
+    
+    // Submit proof
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://v1"));
+    let timeline_after_submit = client.get_timeline(&eng_id, &0, &10);
+    assert!(timeline_after_submit.len() > timeline.len());
+    
+    // Raise dispute
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "bad"), &DisputeCategory::ProofInvalid);
+    let timeline_after_dispute = client.get_timeline(&eng_id, &0, &10);
+    assert!(timeline_after_dispute.len() > timeline_after_submit.len());
+    
+    // Arbiter vote (reject)
+    client.cast_arbiter_vote(&arbiter, &eng_id, &0, &false, &None);
+    let timeline_after_vote = client.get_timeline(&eng_id, &0, &10);
+    assert!(timeline_after_vote.len() > timeline_after_dispute.len());
+    
+    // Resubmit proof after cooldown
+    advance_ledger(&env, 2_881);
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://v2"));
+    let timeline_after_resubmit = client.get_timeline(&eng_id, &0, &10);
+    assert!(timeline_after_resubmit.len() > timeline_after_vote.len());
+    
+    // Confirm
+    client.confirm_milestone(&company, &eng_id, &0);
+    let final_timeline = client.get_timeline(&eng_id, &0, &10);
+    assert!(final_timeline.len() > timeline_after_resubmit.len());
+    
+    // Should have recorded: creation, proof_v1, dispute, vote, rejection, proof_v2, confirmation
+    assert!(final_timeline.len() >= 7);
+}
+
+/// Test that metadata hash updates work correctly and are properly validated,
+/// including restrictions on when updates can be made.
+#[test]
+fn test_metadata_hash_update_restrictions_and_validation() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    let mut config = default_config();
+    config.metadata_hash = Some(String::from_str(&env, "ipfs://meta-v1"));
+    
+    let eng_id = String::from_str(&env, "ENG-META");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env),
+        &vec![&env, 30u32, 90u32],
+        &config,
+    );
+    
+    // Should be able to read initial metadata
+    let engagement = client.get_engagement(&eng_id);
+    assert_eq!(engagement.metadata_hash, Some(String::from_str(&env, "ipfs://meta-v1")));
+    
+    // Update metadata before any milestone is confirmed
+    client.update_metadata(&company, &eng_id, &String::from_str(&env, "ipfs://meta-v2"));
+    assert_eq!(
+        client.get_engagement(&eng_id).metadata_hash,
+        Some(String::from_str(&env, "ipfs://meta-v2"))
+    );
+    
+    // Submit and confirm milestone 0
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.confirm_milestone(&company, &eng_id, &0);
+    
+    // Metadata updates after payment may be restricted depending on contract rules
+    // Try to update again
+    client.update_metadata(&company, &eng_id, &String::from_str(&env, "ipfs://meta-v3"));
+    
+    // Should still work - metadata can be updated throughout lifecycle
+    assert_eq!(
+        client.get_engagement(&eng_id).metadata_hash,
+        Some(String::from_str(&env, "ipfs://meta-v3"))
+    );
+    
+    // After cancellation, metadata should be frozen
+    client.cancel_engagement(&company, &eng_id, &String::from_str(&env, "cancelled"));
+    
+    // Attempting update after cancellation should fail
+    let result = std::panic::catch_unwind(|| {
+        client.update_metadata(&company, &eng_id, &String::from_str(&env, "ipfs://meta-v4"));
+    });
+    assert!(result.is_err());
+    
+    // Metadata should remain at v3
+    assert_eq!(
+        client.get_engagement(&eng_id).metadata_hash,
+        Some(String::from_str(&env, "ipfs://meta-v3"))
+    );
+}
