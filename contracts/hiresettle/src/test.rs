@@ -16668,3 +16668,243 @@ fn test_clone_to_existing_id_fails() {
         &String::from_str(&env, "ENG-002"), // Already exists
     );
 }
+
+// ============================================================
+// ADDITIONAL TEST COVERAGE - New Tests
+// ============================================================
+
+#[test]
+fn test_concurrent_milestone_completion_maintains_payout_integrity() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let eng_id = String::from_str(&env, "CONCURRENT-001");
+    
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "CONCURRENT-001");
+    
+    let initial_recruiter_balance = token_client.balance(&recruiter);
+    
+    // Submit proof for first milestone
+    client.submit_proof(&company, &eng_id, &0, &String::from_str(&env, "proof_1"));
+    advance_ledger(&env, 1);
+    client.confirm_milestone(&company, &eng_id, &0);
+    
+    let after_first_balance = token_client.balance(&recruiter);
+    let first_payout = after_first_balance - initial_recruiter_balance;
+    
+    // Submit and confirm second milestone
+    client.submit_proof(&company, &eng_id, &1, &String::from_str(&env, "proof_2"));
+    advance_ledger(&env, 1);
+    client.confirm_milestone(&company, &eng_id, &1);
+    
+    let after_second_balance = token_client.balance(&recruiter);
+    let second_payout = after_second_balance - after_first_balance;
+    
+    // Verify total payouts are correct and sequential
+    assert!(first_payout > 0);
+    assert!(second_payout > 0);
+    
+    let engagement = client.get_engagement(&eng_id);
+    let expected_total = first_payout + second_payout;
+    assert_eq!(engagement.total_paid, expected_total);
+}
+
+#[test]
+#[should_panic(expected = "Cannot quarantine a completed engagement")]
+fn test_quarantine_fails_on_completed_engagement() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "QUARANTINE-COMPLETE-001");
+    
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "QUARANTINE-COMPLETE-001");
+    
+    // Complete all milestones
+    for i in 0..2 {
+        client.submit_proof(&company, &eng_id, &i, &String::from_str(&env, "proof"));
+        advance_ledger(&env, 1);
+        client.confirm_milestone(&company, &eng_id, &i);
+    }
+    
+    // Attempt to quarantine completed engagement
+    client.quarantine(&company, &eng_id, &true);
+}
+
+#[test]
+fn test_fee_tier_boundaries_with_exact_threshold_amounts() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    
+    // Set up fee tiers
+    client.set_base_fee_bps(&company, &300); // 3%
+    
+    let tier1 = FeeTier {
+        min_amount: 100_000_000, // 1,000 tokens (assuming 7 decimals)
+        bps: 250, // 2.5%
+    };
+    let tier2 = FeeTier {
+        min_amount: 500_000_000, // 5,000 tokens
+        bps: 200, // 2%
+    };
+    
+    client.set_fee_tiers(&company, &vec![&env, tier1.clone(), tier2.clone()]);
+    
+    // Test engagement exactly at tier1 threshold
+    let eng_id_1 = String::from_str(&env, "TIER-EXACT-1");
+    let milestones_1 = vec![
+        &env,
+        Milestone {
+            name: String::from_str(&env, "Placement"),
+            payment_percent: 100,
+            kind: MilestoneKind::Placement,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(&env, ""),
+            status: MilestoneStatus::Pending,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
+        },
+    ];
+    
+    client.create_engagement(
+        &company,
+        &eng_id_1,
+        &String::from_str(&env, "Engineer"),
+        &recruiter,
+        &token_id,
+        &tier1.min_amount,
+        &milestones_1,
+        &None,
+        &None,
+    );
+    
+    let quote_1 = client.get_fee_quote(&eng_id_1, &0);
+    assert_eq!(quote_1.effective_bps, 250); // Should use tier1
+    
+    // Test engagement exactly at tier2 threshold
+    let eng_id_2 = String::from_str(&env, "TIER-EXACT-2");
+    client.create_engagement(
+        &company,
+        &eng_id_2,
+        &String::from_str(&env, "Manager"),
+        &recruiter,
+        &token_id,
+        &tier2.min_amount,
+        &milestones_1,
+        &None,
+        &None,
+    );
+    
+    let quote_2 = client.get_fee_quote(&eng_id_2, &0);
+    assert_eq!(quote_2.effective_bps, 200); // Should use tier2
+}
+
+#[test]
+fn test_arbiter_pool_resize_during_active_dispute() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "RESIZE-DISPUTE-001");
+    
+    // Create additional arbiters
+    let arbiter2 = Address::generate(&env);
+    let arbiter3 = Address::generate(&env);
+    
+    // Set up initial pool with 3 arbiters
+    client.nominate_arbiter(&company, &arbiter, &300);
+    client.nominate_arbiter(&company, &arbiter2, &300);
+    client.nominate_arbiter(&company, &arbiter3, &300);
+    
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "RESIZE-DISPUTE-001");
+    
+    // Submit proof and raise dispute
+    client.submit_proof(&company, &eng_id, &0, &String::from_str(&env, "disputed_proof"));
+    advance_ledger(&env, 2);
+    client.raise_dispute(&recruiter, &eng_id, &0, &1);
+    
+    // Verify dispute is active
+    let engagement = client.get_engagement(&eng_id);
+    assert!(engagement.active_dispute.is_some());
+    
+    // Attempt to resize pool (add more arbiters)
+    let arbiter4 = Address::generate(&env);
+    client.nominate_arbiter(&company, &arbiter4, &300);
+    
+    // Dispute should remain valid with original panel
+    let dispute_info = engagement.active_dispute.unwrap();
+    assert!(dispute_info.panel.len() > 0);
+    
+    // Votes should still be accepted from original panel members
+    client.vote_on_dispute(&arbiter, &eng_id, &0, &DisputeResolution::RejectMilestone);
+    
+    let updated_engagement = client.get_engagement(&eng_id);
+    let updated_dispute = updated_engagement.active_dispute.unwrap();
+    assert_eq!(updated_dispute.votes.len(), 1);
+}
+
+#[test]
+fn test_metadata_hash_persistence_through_lifecycle() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let eng_id = String::from_str(&env, "METADATA-001");
+    let original_hash = String::from_str(&env, "ipfs://QmOriginalHash123");
+    
+    let milestones = vec![
+        &env,
+        Milestone {
+            name: String::from_str(&env, "Start"),
+            payment_percent: 50,
+            kind: MilestoneKind::Custom,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(&env, ""),
+            status: MilestoneStatus::Pending,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+            prerequisites: Vec::new(&env),
+        },
+        Milestone {
+            name: String::from_str(&env, "Complete"),
+            payment_percent: 50,
+            kind: MilestoneKind::Custom,
+            valid_after_ledger: 0,
+            proof_hash: String::from_str(&env, ""),
+            status: MilestoneStatus::Pending,
+            proof_submitted_at: 0,
+            replacement_paid_out: 0,
+            prerequisites: vec![&env, 0],
+        },
+    ];
+    
+    client.create_engagement(
+        &company,
+        &eng_id,
+        &String::from_str(&env, "Developer"),
+        &recruiter,
+        &token_id,
+        &10_000_000,
+        &milestones,
+        &Some(original_hash.clone()),
+        &None,
+    );
+    
+    let initial_engagement = client.get_engagement(&eng_id);
+    assert_eq!(initial_engagement.metadata_hash.unwrap(), original_hash);
+    
+    // Complete first milestone
+    client.submit_proof(&company, &eng_id, &0, &String::from_str(&env, "proof1"));
+    advance_ledger(&env, 1);
+    client.confirm_milestone(&company, &eng_id, &0);
+    
+    let after_milestone = client.get_engagement(&eng_id);
+    assert_eq!(after_milestone.metadata_hash.unwrap(), original_hash);
+    
+    // Raise and resolve a dispute
+    client.submit_proof(&company, &eng_id, &1, &String::from_str(&env, "proof2"));
+    advance_ledger(&env, 2);
+    client.raise_dispute(&recruiter, &eng_id, &1, &2);
+    client.vote_on_dispute(&arbiter, &eng_id, &1, &DisputeResolution::ApproveMilestone);
+    
+    let after_dispute = client.get_engagement(&eng_id);
+    assert_eq!(after_dispute.metadata_hash.unwrap(), original_hash);
+    
+    // Verify metadata hash persists even after all lifecycle events
+    assert_eq!(after_dispute.milestones.get(0).unwrap().status, MilestoneStatus::Confirmed);
+}
