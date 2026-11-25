@@ -1279,6 +1279,26 @@ co_forfeit = co_bond × bond_forfeit_bps × (10_000 − recruiter_split_bps) ÷ 
 
 ---
 
+## Pooled Company Escrow Balances (#472)
+
+By default, `create_engagement` moves tokens with a fresh transfer from the company every time: fund the escrow, create the engagement, repeat for the next one. A company that runs many engagements in the same token can instead pre-fund a per-token balance once and draw new engagements from it without a transfer on each creation.
+
+| Function                                           | Caller  | Description                                                                                                                 |
+| --------------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `deposit_company_balance(company, token, amount)`  | Company | Transfer `amount` of `token` from the company into its pooled balance. `amount` must be positive.                          |
+| `withdraw_company_balance(company, token, amount)` | Company | Transfer `amount` back out of the pooled balance to the company. Panics `InsufficientCompanyBalance` if the pool is short. |
+| `get_company_balance(company, token)` → `i128`     | Anyone  | The company's current pooled balance for `token`.                                                                          |
+
+Setting `EngagementConfig::fund_from_pool = true` makes `create_engagement` (and `create_engagement_random_panel`) debit `total_amount` from the company's pooled balance instead of transferring fresh tokens, and marks the engagement as pool-funded. From then on, every movement of unreleased escrow back to the company for that engagement — a counter-offer's amount decrease, an amendment, a cancellation, an expiry, or a withdrawn offer — credits the pool instead of transferring tokens out, and a counter-offer's amount increase debits the pool instead of pulling a fresh transfer in. A non-pool-funded engagement always uses direct transfers on both sides, exactly as before this feature existed.
+
+Because pool funds sit in the contract's balance before they back any engagement, they are tracked separately from escrow: `get_token_pooled_balance(token)` (issue #578) reports the running total pooled across all companies for `token`, one of the six buckets covered in [Book-keeping Invariants](#book-keeping-invariants-and-stray-tokens-671-672). Pool balances are not part of any engagement's escrow and are excluded from `get_token_tvl`.
+
+Panics: `amount must be greater than zero` (deposit/withdraw of a non-positive amount); `InsufficientCompanyBalance` (withdrawal, or any pool debit — including `create_engagement` with `fund_from_pool = true`, or a counter-offer increase — that exceeds the current pooled balance; the pool and escrow are left unchanged).
+
+Events: `("company_balance_deposited", company)` with `(token, amount)`; `("company_balance_withdrawn", company)` with `(token, amount)`.
+
+---
+
 ## Pull Payouts (#547)
 
 By default every payout is pushed to the recruiter and co-recruiter inside the confirming transaction. If a recipient cannot receive the token, for example because it has no trustline or its balance is frozen, the whole confirmation reverts and the company cannot confirm.
@@ -2121,6 +2141,27 @@ get_arbiter_votes()
 
 This read-only function returns the current approval and rejection vote counts without exposing the voter list, allowing dashboards to display dispute progress while preserving voter privacy.
 
+#### Split (Partial-Approval) Voting (#462)
+
+A binary approve/reject vote forces arbiters to pick a side even when the fair outcome is "pay most of it." Split voting lets each arbiter instead vote a percentage (0–100) of the milestone's share that should go to the recruiter, settling the dispute at a weighted median instead of an all-or-nothing quorum.
+
+| Function                                                                          | Caller                                                           | Description                                                                                               |
+| ----------------------------------------------------------------------------------- | ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `set_split_voting_enabled(admin, engagement_id, enabled)`                         | Admin                                                            | Turn split voting on or off for one engagement. Disabled by default.                                      |
+| `is_split_voting_enabled(engagement_id)` → `bool`                                 | Anyone                                                           | Whether split voting is enabled for the engagement.                                                       |
+| `cast_arbiter_split_vote(arbiter, engagement_id, milestone_index, split_percent)` | Arbiter, or their [vote delegate](#arbiter-vote-delegation-463) | Vote that `split_percent`% of the milestone's share should go to the recruiter.                           |
+| `get_dispute_split_votes(engagement_id, milestone_index)` → `Vec<u32>`            | Anyone                                                           | The individual split percentages submitted so far, in submission order. Empty once the dispute resolves. |
+
+Once the cumulative weight of split voters reaches the engagement's `quorum`, the dispute resolves at the **lower weighted median** of the submitted percentages: sort the votes ascending and take the first percentage whose cumulative voter weight (at or below it) reaches at least half the total weight cast. Unweighted, that's the middle vote for an odd count and the lower of the two middle votes for an even count — e.g. votes of 30 and 70 settle at 30.
+
+On resolution, with `share = total_amount * payment_percent / 100`, `share * settled / 100` is released exactly like an approved binary dispute — platform fee deducted, arbiter fee to the arbiter whose vote reached quorum, net to the recruiter(s). The remainder stays in escrow: it is not released, counts toward the engagement's escrow balance, and is refunded to the company (or credited to its pool, if [pool-funded](#pooled-company-escrow-balances-472)) on a later cancel, expiry, or completion. The milestone moves to `Resolved`. A settled percentage of 50 or more counts as a recruiter win for `record_dispute_outcome`, same as an approved binary vote.
+
+A dispute is decided by binary votes or split votes, never both: casting one after the other fails with `MixedVoteModes`. Split voting is also not supported together with [commit-reveal voting](#arbiter-voting) (`CommitRevealSplitUnsupported`); use binary weighted votes under commit-reveal instead. A recused arbiter (self-recused or recused by the vote deadline) cannot cast a split vote (`ArbiterRecused`), and each arbiter slot may cast at most one split vote per dispute (`duplicate vote`).
+
+Panics: `SplitVotingDisabled`, `InvalidSplitPercent` (`split_percent > 100`), `CommitRevealSplitUnsupported`, `MixedVoteModes`, `ArbiterRecused`, `duplicate vote`, plus the usual `engagement is not active` / `milestone is not in disputed status` / `unauthorized`.
+
+Events: `("arbiter_split_voted", engagement_id)` with `(milestone_index, split_percent)`; if cast through a delegate, also `("arbiter_vote_delegated", engagement_id)` with `(milestone_index, arbiter, delegate)`. On resolution: `("dispute_split_resolved", engagement_id)` with `(milestone_index, settled_percent, released, withheld)`, followed by the usual `dispute_resolved` and status-change events.
+
 #### Arbiter Succession
 
 To support long-running engagements, HireSettle allows arbiters to transfer their responsibilities to a successor without modifying the engagement itself.
@@ -2140,6 +2181,67 @@ claim_arbiter()
 ```
 
 Only the nominated address can complete the claim. Once claimed, the successor assumes the arbiter's position for future dispute voting while preserving the integrity of the arbitration panel.
+
+#### Arbiter Vote Delegation (#463)
+
+Succession permanently hands a panel slot to a new address. Delegation is lighter: the arbiter stays on the panel and keeps full ownership of the seat, but authorizes one other address to cast votes on its behalf — useful for an arbiter who uses a hot key for day-to-day voting while keeping the seat's identity on a cold key, or a firm that arbitrates as an organization but votes through a specific employee.
+
+| Function                                                                     | Caller  | Description                                                                                            |
+| ------------------------------------------------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------- |
+| `set_arbiter_vote_delegate(arbiter, engagement_id, delegate)`                | Arbiter | Set (`Some(delegate)`) or clear (`None`) the address that may vote for this arbiter's slot.           |
+| `get_arbiter_vote_delegate(engagement_id, arbiter)` → `Option<Address>`      | Anyone  | The delegate currently set for this arbiter's slot on this engagement, if any.                        |
+
+A delegate can call `cast_arbiter_vote`, `change_arbiter_vote`, and `cast_arbiter_split_vote` in place of the arbiter; the vote is recorded against the arbiter's slot and weight, not the delegate's. The delegate has no other arbiter power — it cannot recuse the seat, nominate a successor, or anything else gated on `arbiters.contains(caller)`.
+
+A delegate must be a disinterested third party: it is rejected (`InvalidDelegate`) if it is the engagement's company, its recruiter, or any address already on the arbiter panel. Each address may be the active delegate for at most one arbiter slot per engagement at a time (`DelegateAlreadyAssigned`), so a company can't quietly consolidate votes behind one address. Delegation is set per engagement and is cleared automatically if the arbiter's slot is removed by `admin_remove_arbiter`.
+
+Panics: `InvalidDelegate`, `DelegateAlreadyAssigned`, `unauthorized` (caller is not on the arbiter panel), `engagement is in a terminal state`.
+
+Events: `("arbiter_delegate_set", engagement_id)` with `(arbiter, delegate)`. A vote cast through a delegate also emits `("arbiter_vote_delegated", engagement_id)` with `(milestone_index, arbiter, delegate)` alongside the usual vote event.
+
+#### Arbiter Self-Recusal (#477)
+
+An arbiter with a conflict of interest on a specific dispute can step aside instead of voting (or not voting and stalling it).
+
+| Function                                                            | Caller  | Description                                                                                                  |
+| ---------------------------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------- |
+| `recuse_arbiter(arbiter, engagement_id, milestone_index)`           | Arbiter | Step aside from this dispute. The arbiter can no longer cast a binary or split vote on it.                  |
+| `get_recused_arbiters(engagement_id, milestone_index)` → `Vec<Address>` | Anyone  | Addresses that have recused from this specific dispute.                                                      |
+
+Recusal only affects the **rejection** threshold's math, by shrinking the active arbiter weight it's computed against (`Self::active_arbiter_weight`); the **approval** quorum (`engagement.quorum`) is unchanged, since it's an absolute weight regardless of how many seats remain live. A recused arbiter is simply removed from the dispute — it is not replaced, and the panel itself (`engagement.arbiters`) is untouched. Recusal is per dispute: it is cleared when the dispute resolves and again whenever a new dispute is later raised on the same milestone.
+
+An arbiter cannot recuse after already voting on the dispute (`already voted`), and cannot recuse twice (`already recused`). This is the same recusal list that [`enforce_vote_deadline`](#arbiter-vote-deadline-560) writes to when it force-recuses arbiters who missed the vote deadline — `get_recused_arbiters` returns both voluntary and forced recusals, and `is_arbiter_recused` is checked the same way before any vote.
+
+Panics: `unauthorized` (caller is not on the arbiter panel), `engagement is not active`, `milestone is not in disputed status`, `already voted`, `already recused`.
+
+Events: `("arbiter_recused", engagement_id)` with `(milestone_index, arbiter)`.
+
+#### Arbiter Pool & Randomized Panels (#467, #468, #562)
+
+`create_engagement` takes an explicit, company-supplied arbiter panel. For companies that would rather not hand-pick their own arbitrators (or be accused of stacking a panel), the admin can maintain a shared pool of vetted arbiters and let the contract draw a random panel from it at creation time.
+
+| Function                                                                  | Caller | Description                                                                                                                 |
+| ----------------------------------------------------------------------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `add_arbiter_pool_member(admin, address)`                                | Admin  | Add an address to the pool. Panics `AlreadyInPool` if it's already a member.                                              |
+| `remove_arbiter_pool_member(admin, address)`                              | Admin  | Remove an address from the pool. Panels already drawn onto existing engagements are unaffected. Panics `NotInPool`.       |
+| `get_arbiter_pool()` → `Vec<Address>`                                     | Anyone | The current pool membership.                                                                                                |
+| `suspend_arbiter_pool_member(admin, arbiter, until_ledger)`               | Admin  | Exclude a member from new draws until `until_ledger`. Keeps its stats and any already-drawn panel seats. Panics `NotInPool`, `InvalidUntilLedger`. |
+| `unsuspend_arbiter_pool_member(admin, arbiter)`                           | Admin  | Lift a suspension early. No-op if not suspended. Panics `NotInPool`.                                                       |
+| `get_arbiter_suspension(arbiter)` → `Option<u32>`                        | Anyone | The ledger a member is suspended until, or `None` if not currently suspended (including an expired suspension).           |
+| `create_engagement_random_panel(engagement_id, company, recruiter, random_setup, token, total_amount, job_title, milestones, retention_days, config)` → `String` | Company | Same as `create_engagement`, except the arbiter panel is drawn from the pool instead of supplied directly. `random_setup: RandomArbiterSetup { panel_size, quorum }`. |
+
+**The draw.** `panel_size` distinct members are drawn without replacement from the pool, excluding the engagement's own `company` and `recruiter` (who would otherwise be rejected as colliding parties anyway) and any currently-suspended member. Each eligible member's chance of being drawn is proportional to its *selection weight* (`get_arbiter_selection_weight(address)` → `1`–`100`), computed from `get_arbiter_stats(address)`:
+
+- An address with no dispute history yet gets the neutral weight `50`, so new pool members are eligible rather than excluded.
+- Otherwise `weight = max(1, completion * speed / 100)`, where `completion = 100 * votes_cast / (disputes_assigned + missed_vote_deadlines)` and `speed = 100 * R / (R + avg_response_ledgers)` (`R` = 17 280 ledgers, ~1 day). A [missed vote deadline](#arbiter-vote-deadline-560) counts as a second unanswered assignment. `speed` is 100 for instant votes, 50 at a one-day average response, and 0 if the arbiter never voted. The floor of 1 keeps even a consistently absent member drawable, just rarely — the admin, not the formula, decides pool membership.
+
+The drawn panel is passed straight into the normal engagement-creation path with unweighted arbiters (`weights: None`) and the given `quorum`, so everything else — voting, delegation, recusal, succession, panel resize — works identically to a manually-assigned panel.
+
+**Randomness caveat.** The draw uses `env.prng()`, Soroban's per-invocation PRNG — a ChaCha20 stream seeded from ledger data that is public as soon as a ledger is nominated and is under the influence of validators. It raises the cost of a company hand-picking its own panel; it is **not** a cryptographic guarantee of fairness against a motivated validator. Pair it with a large, vetted pool for high-value disputes, or supply an explicit panel via `create_engagement` instead.
+
+Panics: `ArbiterPoolTooSmall` (the pool, after excluding the company, recruiter, and suspended members, has fewer than `panel_size` eligible candidates), `AlreadyInPool`, `NotInPool`, `InvalidUntilLedger`, plus everything `create_engagement` panics on (including `invalid quorum` when `quorum` is 0 or exceeds `panel_size`).
+
+Events: `("arbiter_pool_added",)` with `address`; `("arbiter_pool_removed",)` with `address`; `("arbiter_suspended",)` with `(arbiter, until_ledger)`; `("arbiter_unsuspended",)` with `arbiter`; `("arbiters_drawn", engagement_id)` with the drawn panel, emitted before `engagement_created`.
 
 #### Admin Panel Resize (#507)
 
