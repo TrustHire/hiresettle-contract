@@ -883,6 +883,84 @@ So the shares always add up to the full fee. While a list is set, `PlatformFee.t
 
 Events: one `("platform_fee_collected", engagement_id)` per treasury, in list order, with `(milestone_index, share, treasury)`. `share` is what that treasury received. With no list set, the single event still reports `(milestone_index, fee_amount, treasury)` as before. `set_fee_treasuries` emits `("fee_treasuries_set",)` with the list; `clear_fee_treasuries` emits `("fee_treasuries_cleared",)`.
 
+### Platform fee floor (#478)
+
+The admin can enforce a minimum absolute fee per payout, ensuring that even small or low-percentage fees meet a configured threshold. The floor raises the basis-point-derived fee amount without ever exceeding the payout itself.
+
+| Function                                | Caller | Description                                                             | Panics                                                         |
+| --------------------------------------- | ------ | ----------------------------------------------------------------------- | -------------------------------------------------------------- |
+| `set_platform_fee_floor(admin, amount)` | Admin  | Set the minimum platform fee in raw token units (stroops). Must be ≥ 0. | `ContractPaused`, `NoAdmin`, `unauthorized`, `InvalidFeeFloor` |
+| `get_platform_fee_floor()` → `i128`     | Anyone | Return the current floor; `0` when unset.                               | —                                                              |
+
+Behaviour:
+
+- **Applies after basis-point calculation.** The contract computes `fee = payment × bps ÷ 10_000`, then raises it to the floor: `actual_fee = max(fee, floor)`.
+- **Never exceeds the payout.** The final fee is capped at `payment`, so `actual_fee = min(max(fee, floor), payment)`.
+- **Waived engagements still pay zero.** The floor does not override a [fee waiver](#fee-waiver); waived engagements remain at `0` regardless of the floor setting.
+- **Works with all fee variations.** The floor applies on top of company overrides, per-token overrides, fee tiers, tier snapshots, and referral discounts. It affects the absolute fee amount after the basis-point rate is resolved.
+- **Single global floor.** The same floor applies to every engagement and every token. Per-token or per-engagement floors are not supported.
+
+Typical use cases:
+
+- Ensuring a minimum revenue per transaction to cover operational costs.
+- Preventing dust fees on engagements with small `total_amount` or low-percentage milestones.
+
+Storage: `DataKey2::PlatformFeeFloor` → `i128`, persistent.
+
+Event: `("platform_fee_floor_set",)` with data `floor_amount`.
+
+```rust
+// Admin sets a floor of 5 million stroops (0.5 XLM for a 7-decimal token)
+client.set_platform_fee_floor(&admin, &5_000_000);
+assert_eq!(client.get_platform_fee_floor(), 5_000_000);
+
+// A 1% fee on a 300 XLM payout would be 3 XLM, but the floor raises it to 5 XLM
+// if 3 XLM < floor. The floor never lowers a fee that is already higher.
+```
+
+### Per-token platform fee override (#479)
+
+The admin can configure a base platform-fee rate that applies to a specific token, replacing the global `PlatformFee.bps` for engagements using that token. This allows differentiated pricing across currencies without requiring per-company overrides.
+
+| Function                                        | Caller | Description                                                                           | Panics                                                    |
+| ----------------------------------------------- | ------ | ------------------------------------------------------------------------------------- | --------------------------------------------------------- |
+| `set_token_platform_fee(admin, token, bps)`     | Admin  | Set the base fee for `token` in basis points. Same 500 bps cap as `set_platform_fee`. | `ContractPaused`, `NoAdmin`, `unauthorized`, `FeeTooHigh` |
+| `remove_token_platform_fee(admin, token)`       | Admin  | Remove the override; the token falls back to the global rate and fee tiers.           | `ContractPaused`, `NoAdmin`, `unauthorized`               |
+| `get_token_platform_fee(token)` → `Option<u32>` | Anyone | Return the override for `token`, if any.                                              | —                                                         |
+
+Base-rate precedence (highest to lowest):
+
+1. Engagement [fee waiver](#fee-waiver) — the fee is `0`.
+2. [Per-company fee override](#per-company-fee-override-539) — bypasses everything below, including per-token overrides and fee tiers.
+3. **Per-token override** — replaces the global `bps` and is then run through the [fee tiers](#fee-tiers-250) (live or [snapshotted](#snapshot-mode-505)) if configured. A matching tier adjusts the token's base `bps`.
+4. Global `PlatformFee.bps` — run through the fee tiers (if set) or used directly.
+
+After the base rate is resolved, the [referral discount](#referral-discount-251), [fee floor](#platform-fee-floor-478), and [fee rebate](#fee-rebate-475) still apply in that order.
+
+Typical use cases:
+
+- Charging a higher fee for volatile or less-liquid tokens to cover swap costs.
+- Offering a promotional rate for a new token to encourage adoption.
+- Differentiating fees between fiat-pegged stablecoins and native blockchain assets.
+
+Storage: `DataKey2::TokenPlatformFee(token)` → `u32`, persistent.
+
+Events: `("token_platform_fee_set",)` with `(token, bps)`; `("token_platform_fee_removed",)` with `token`.
+
+```rust
+// Admin sets a 2% fee for USDC, while the global rate remains 1%
+let usdc = Address::from_string(&env, "USDC_CONTRACT_ADDRESS");
+client.set_token_platform_fee(&admin, &usdc, &200);  // 200 bps = 2%
+assert_eq!(client.get_token_platform_fee(&usdc), Some(200));
+
+// Engagements using USDC now pay 2% unless overridden by a company-specific rate
+// or a matching fee tier. Engagements using other tokens still pay the global 1%.
+
+// Admin removes the override; USDC falls back to the global rate
+client.remove_token_platform_fee(&admin, &usdc);
+assert_eq!(client.get_token_platform_fee(&usdc), None);
+```
+
 ### `DataKey`
 
 Contract storage is keyed by three `#[contracttype]` enums, all defined in
