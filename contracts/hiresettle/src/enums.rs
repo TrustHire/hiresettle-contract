@@ -640,11 +640,17 @@ pub enum DataKey3 {
     /// FIFO-capped proof submission / withdrawal history for
     /// (engagement_id, milestone_index) (issue #666).
     ProofHistory(String, u32),
-    /// Lifecycle status of an allowlisted token (issue #681).
-    TokenStatus(Address),
-    /// Rolling-window outflow accumulator for the per-token circuit breaker
-    /// (issue #690).
-    TokenCircuitBreaker(Address),
+    /// Job-category specialization tags for a pool arbiter (issue #683).
+    ArbiterSpecializations(Address),
+    /// Admin cap on an engagement's lifetime in ledgers (issue #697).
+    /// Absent or `0` means unlimited.
+    MaxEngagementDurationLedgers,
+    /// Optional reason recorded when an engagement is cancelled (issue #700).
+    CancellationReason(String),
+    /// Star value recorded for a rated engagement (issue #685).
+    EngagementStars(String),
+    /// The recruiter's public reply to a rating (issue #685).
+    RatingResponse(String),
 }
 
 /// What a [`crate::ProofHistoryEntry`] records (issue #666).

@@ -1,6 +1,6 @@
 //! Contract data structs (`#[contracttype]`).
 
-use soroban_sdk::{contracttype, Address, BytesN, Map, String, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, String, Symbol, Vec};
 use crate::{
     ActionKind, ActorRole, EngagementStatus, MilestoneKind, MilestoneStatus, ProofAction,
     TimelineKind,
@@ -458,6 +458,19 @@ pub struct RandomArbiterSetup {
     /// Must be ≥ 1 and ≤ `panel_size`.
     pub quorum: u32,
 }
+/// Panel setup for `create_category_panel` (issue #683): a random panel drawn
+/// from the pool with category-tagged members preferred. Carries the category
+/// in the struct to stay within Soroban's 10-parameter limit.
+#[contracttype]
+#[derive(Clone)]
+pub struct CategoryArbiterSetup {
+    /// Number of distinct arbiters to draw from the pool.
+    pub panel_size: u32,
+    /// Number of votes required to resolve a dispute (M-of-N).
+    pub quorum: u32,
+    /// Job category whose tagged pool members are drawn first.
+    pub job_category: Symbol,
+}
 /// Historical dispute-response record for one arbiter (issue #468), updated
 /// by `raise_dispute`, `cast_arbiter_vote` and `enforce_vote_deadline`.
 #[contracttype]
@@ -472,6 +485,28 @@ pub struct ArbiterStats {
     /// Disputes on which this address was recused by `enforce_vote_deadline`
     /// for not voting before the vote deadline (issue #560).
     pub missed_vote_deadlines: u32,
+}
+/// A recruiter's public reply to a rating (issue #685).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RatingResponse {
+    /// Hash anchoring the off-chain reply text.
+    pub response_hash: String,
+    /// Ledger the reply was first posted. The edit window runs from here.
+    pub responded_at_ledger: u32,
+}
+/// A rating together with the recruiter's reply, as returned by
+/// `get_rating_detail` (issue #685).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RatingDetail {
+    /// Star rating (1–5) recorded for the engagement; `0` for ratings made
+    /// before issue #685 started storing the value.
+    pub stars: u32,
+    /// Hash of the recruiter's reply, if one has been posted.
+    pub response_hash: Option<String>,
+    /// Ledger the reply was first posted, if one has been posted.
+    pub responded_at_ledger: Option<u32>,
 }
 /// Running total of star ratings a recruiter has received (issue #470).
 /// The average rating is `total_stars / rating_count`.

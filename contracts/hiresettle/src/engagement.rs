@@ -692,6 +692,20 @@ impl HireSettleContract {
             }
         }
 
+        // Issue #697: cap how far the engagement's lifetime may reach. The
+        // lifetime ends at the later of the absolute end date and the last
+        // retention unlock.
+        let max_duration = Self::get_max_duration_ledgers(env.clone());
+        if max_duration > 0 {
+            let mut horizon = config.end_ledger.unwrap_or(0);
+            for i in 0..resolved_milestones.len() {
+                horizon = horizon.max(resolved_milestones.get(i).unwrap().valid_after_ledger);
+            }
+            if horizon.saturating_sub(current_ledger) > max_duration {
+                panic!("DurationExceedsCap");
+            }
+        }
+
         // Issue #472: draw from the company pool when requested; otherwise
         // perform a fresh token transfer as before.
         if config.fund_from_pool {
@@ -1276,6 +1290,38 @@ impl HireSettleContract {
     // ISSUE #31 — REPLACEMENT COUNT LIMIT
     // ----------------------------------------------------------
 
+    // ----------------------------------------------------------
+    // ISSUE #697 — MAXIMUM ENGAGEMENT DURATION
+    // ----------------------------------------------------------
+
+    /// Admin caps an engagement's lifetime, in ledgers from creation. The
+    /// lifetime is the later of `EngagementConfig::end_ledger` and the last
+    /// milestone's `valid_after_ledger`, so retention windows count too.
+    /// `0` removes the cap, which is the default.
+    ///
+    /// The cap is enforced by `create_engagement` (and its variants). The
+    /// contract has no post-creation amendment that moves `end_ledger` or a
+    /// retention window, so nothing else needs checking.
+    ///
+    /// # Events
+    /// Emits `("max_engagement_duration_set",)` with `ledgers`.
+    pub fn set_max_duration_ledgers(env: Env, admin: Address, ledgers: u32) {
+        Self::assert_admin(&env, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey3::MaxEngagementDurationLedgers, &ledgers);
+        env.events()
+            .publish((Symbol::new(&env, "max_engagement_duration_set"),), ledgers);
+    }
+
+    /// Return the engagement lifetime cap in ledgers, or `0` when unlimited.
+    pub fn get_max_duration_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey3::MaxEngagementDurationLedgers)
+            .unwrap_or(0)
+    }
+
     /// Admin sets the maximum number of replacements allowed per engagement.
     /// Defaults to 3 when not explicitly configured.
     pub fn set_max_replacements(env: Env, admin: Address, count: u32) {
@@ -1348,6 +1394,50 @@ impl HireSettleContract {
         recruiter: Address,
         engagement_id: String,
     ) {
+        Self::cancel_engagement_internal(env, company, recruiter, engagement_id, None);
+    }
+
+    /// Same as [`Self::cancel_engagement`], but records a reason for the
+    /// cancellation (issue #700). The reason is stored against the engagement
+    /// and emitted in a `cancellation_reason_recorded` event; read it back with
+    /// [`Self::get_cancellation_reason`]. Existing callers of
+    /// `cancel_engagement` are unaffected and record no reason.
+    ///
+    /// # Panics
+    /// - `"CancelReasonEmpty"` — `reason` is empty.
+    /// - `"CancelReasonTooLong"` — `reason` exceeds `MAX_CANCEL_REASON_LEN` bytes.
+    /// - Everything [`Self::cancel_engagement`] panics on.
+    pub fn cancel_engagement_with_reason(
+        env: Env,
+        company: Address,
+        recruiter: Address,
+        engagement_id: String,
+        reason: String,
+    ) {
+        if reason.is_empty() {
+            panic!("CancelReasonEmpty");
+        }
+        if reason.len() > MAX_CANCEL_REASON_LEN {
+            panic!("CancelReasonTooLong");
+        }
+        Self::cancel_engagement_internal(env, company, recruiter, engagement_id, Some(reason));
+    }
+
+    /// Return the reason recorded by [`Self::cancel_engagement_with_reason`],
+    /// or `None` when the engagement was cancelled without one.
+    pub fn get_cancellation_reason(env: Env, engagement_id: String) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey3::CancellationReason(engagement_id))
+    }
+
+    pub(crate) fn cancel_engagement_internal(
+        env: Env,
+        company: Address,
+        recruiter: Address,
+        engagement_id: String,
+        reason: Option<String>,
+    ) {
         Self::assert_not_paused(&env);
         Self::assert_function_not_paused(&env, FN_CANCEL_ENGAGEMENT);
         Self::assert_engagement_not_paused(&env, &engagement_id);
@@ -1401,6 +1491,21 @@ impl HireSettleContract {
             ),
             refund,
         );
+
+        if let Some(reason) = reason {
+            let key = DataKey3::CancellationReason(engagement_id.clone());
+            env.storage().persistent().set(&key, &reason);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, 100_000, 6_300_000);
+            env.events().publish(
+                (
+                    Symbol::new(&env, "cancellation_reason_recorded"),
+                    engagement_id,
+                ),
+                reason,
+            );
+        }
     }
 
     // ----------------------------------------------------------
