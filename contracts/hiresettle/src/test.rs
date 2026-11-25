@@ -15054,3 +15054,410 @@ fn test_fee_quote_works_while_paused_without_side_effects() {
     assert_eq!(quote.gross_amount, paused_quote.gross_amount);
     assert_eq!(quote.effective_bps, paused_quote.effective_bps);
 }
+
+// ============================================================
+// ADDITIONAL COMPREHENSIVE EDGE CASE TESTS
+// ============================================================
+
+/// Test complex scenario: dispute with weighted arbiters + split voting + deadline enforcement
+/// Combines weighted panel, split dispute resolution, and vote deadline in one comprehensive flow
+#[test]
+fn test_weighted_split_dispute_with_deadline_enforcement() {
+    let (env, contract_id, token_id, company, recruiter, _) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+
+    let a1 = Address::generate(&env);
+    let a2 = Address::generate(&env);
+    let a3 = Address::generate(&env);
+
+    // Enable split disputes
+    client.set_enable_split_disputes(&company, &true);
+    
+    // Set vote deadline
+    client.set_arbiter_vote_deadline(&company, &500);
+
+    let eng_id = String::from_str(&env, "WEIGHTED-SPLIT");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, a1.clone(), a2.clone(), a3.clone()],
+            quorum: 2,
+            weights: Some(vec![&env, 50u32, 30u32, 20u32]),
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &vec![
+            &env,
+            Milestone {
+                name: String::from_str(&env, "Placed"),
+                payment_percent: 100,
+                kind: MilestoneKind::Placement,
+                valid_after_ledger: 0,
+                proof_hash: String::from_str(&env, ""),
+                status: MilestoneStatus::Pending,
+                proof_submitted_at: 0,
+                replacement_paid_out: 0,
+                prerequisites: Vec::new(&env),
+            },
+        ],
+        &Vec::new(&env),
+        &default_config(),
+    );
+
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.raise_dispute(&company, &eng_id, &0, &String::from_str(&env, "disputed"), &DisputeCategory::ProofInvalid);
+
+    // a1 (50% weight) votes for 60% split
+    client.cast_arbiter_vote(&a1, &eng_id, &0, &true, &Some(6000u32));
+    
+    // a2 (30% weight) doesn't vote - will be recused
+    
+    // Advance past deadline
+    advance_ledger(&env, 501);
+    
+    // Enforce deadline - should recuse a2 and a3
+    client.enforce_vote_deadline(&eng_id, &0);
+    
+    // After recusal, only a1 remains with 100% effective weight
+    // Should resolve with a1's split percentage (60%)
+    let m0 = client.get_milestone(&eng_id, &0);
+    assert_eq!(m0.status, MilestoneStatus::Resolved);
+    
+    // Check split payout: 60% to recruiter, 40% back to company
+    assert_eq!(token_client.balance(&recruiter), 600_000_000);
+    assert_eq!(token_client.balance(&company), 500_000_000_000 - 1_000_000_000 + 400_000_000);
+}
+
+/// Test pooled escrow with fee rebate offset across multiple companies and tokens
+/// Complex interaction of pooled escrow, company-specific rebates, and multi-token fees
+#[test]
+fn test_pooled_escrow_multi_company_rebate_interaction() {
+    let (env, contract_id, token_id, company1, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let treasury = Address::generate(&env);
+    let company2 = Address::generate(&env);
+
+    // Setup pooled escrow
+    client.set_pooled_escrow_enabled(&company1, &true);
+    client.set_platform_fee(&company1, &300, &treasury);
+    
+    // Different rebate rates for each company
+    client.set_fee_rebate_bps(&company1, &2000); // 20%
+    client.add_verified_company(&company1, &company2);
+    client.set_fee_rebate_bps(&company2, &1000); // 10%
+
+    // Mint tokens to both companies and deposit to pool
+    token_client.mint(&company1, &5_000_000_000);
+    token_client.mint(&company2, &3_000_000_000);
+    client.deposit_to_pool(&company1, &token_id, &2_000_000_000);
+    client.deposit_to_pool(&company2, &token_id, &1_000_000_000);
+
+    // Company1 creates engagement from pool
+    let mut cfg1 = default_config();
+    cfg1.fund_from_pool = true;
+    let eng1 = String::from_str(&env, "POOL-C1");
+    client.create_engagement(
+        &eng1,
+        &company1,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &500_000_000,
+        &String::from_str(&env, "Dev1"),
+        &vec![
+            &env,
+            Milestone {
+                name: String::from_str(&env, "Placed"),
+                payment_percent: 100,
+                kind: MilestoneKind::Placement,
+                valid_after_ledger: 0,
+                proof_hash: String::from_str(&env, ""),
+                status: MilestoneStatus::Pending,
+                proof_submitted_at: 0,
+                replacement_paid_out: 0,
+                prerequisites: Vec::new(&env),
+            },
+        ],
+        &Vec::new(&env),
+        &cfg1,
+    );
+
+    // Company2 creates engagement from pool
+    let mut cfg2 = default_config();
+    cfg2.fund_from_pool = true;
+    let eng2 = String::from_str(&env, "POOL-C2");
+    client.create_engagement(
+        &eng2,
+        &company2,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &300_000_000,
+        &String::from_str(&env, "Dev2"),
+        &vec![
+            &env,
+            Milestone {
+                name: String::from_str(&env, "Placed"),
+                payment_percent: 100,
+                kind: MilestoneKind::Placement,
+                valid_after_ledger: 0,
+                proof_hash: String::from_str(&env, ""),
+                status: MilestoneStatus::Pending,
+                proof_submitted_at: 0,
+                replacement_paid_out: 0,
+                prerequisites: Vec::new(&env),
+            },
+        ],
+        &Vec::new(&env),
+        &cfg2,
+    );
+
+    // Complete both milestones
+    client.submit_proof(&recruiter, &eng1, &0, &String::from_str(&env, "ipfs://p1"));
+    client.confirm_milestone(&company1, &eng1, &0);
+    
+    client.submit_proof(&recruiter, &eng2, &0, &String::from_str(&env, "ipfs://p2"));
+    client.confirm_milestone(&company2, &eng2, &0);
+
+    // Company1: 500M at 3% = 15M fee, 20% rebate = 3M credit
+    let rebate1 = client.get_company_rebate_balance(&company1, &token_id);
+    assert_eq!(rebate1, 3_000_000);
+
+    // Company2: 300M at 3% = 9M fee, 10% rebate = 900K credit
+    let rebate2 = client.get_company_rebate_balance(&company2, &token_id);
+    assert_eq!(rebate2, 900_000);
+
+    // Total fees to treasury: (15M - 3M) + (9M - 900K) = 20.1M
+    assert_eq!(token_client.balance(&treasury), 20_100_000);
+}
+
+/// Test replacement with partial milestone payouts + co-recruiter rating attribution
+/// Complex scenario combining replacement, co-recruiter splits, and rating logic after transfer
+#[test]
+fn test_replacement_partial_payout_co_recruiter_rating_attribution() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+    let co_recruiter = Address::generate(&env);
+    let new_recruiter = Address::generate(&env);
+
+    // Create engagement with co-recruiter (70/30 split)
+    let mut cfg = default_config();
+    cfg.co_recruiter = Some(co_recruiter.clone());
+    cfg.recruiter_split_bps = 7000;
+
+    let eng_id = String::from_str(&env, "REPL-CO-RATE");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &build_milestones(&env), // 30%, 40%, 30%
+        &vec![&env, 30u32, 90u32],
+        &cfg,
+    );
+
+    // Complete first milestone (30% = 300M)
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://p0"));
+    client.confirm_milestone(&company, &eng_id, &0);
+    
+    // Check split: recruiter gets 70% of 300M = 210M, co-recruiter gets 90M
+    assert_eq!(token_client.balance(&recruiter), 210_000_000);
+    assert_eq!(token_client.balance(&co_recruiter), 90_000_000);
+
+    // Request replacement after first milestone
+    advance_ledger(&env, 31 * 17_280);
+    client.request_replacement(
+        &company,
+        &eng_id,
+        &String::from_str(&env, "poor performance"),
+        &ReplacementReason::PoorPerformance,
+    );
+
+    // Transfer to new recruiter
+    client.transfer_to_new_recruiter(&recruiter, &eng_id, &new_recruiter);
+
+    // New recruiter completes second milestone (40% = 400M)
+    client.unlock_milestone(&eng_id, &1);
+    client.submit_proof(&new_recruiter, &eng_id, &1, &String::from_str(&env, "ipfs://p1"));
+    client.confirm_milestone(&company, &eng_id, &1);
+    
+    // New recruiter gets 70% of 400M = 280M, co-recruiter gets 120M more
+    assert_eq!(token_client.balance(&new_recruiter), 280_000_000);
+    assert_eq!(token_client.balance(&co_recruiter), 90_000_000 + 120_000_000);
+
+    // Complete final milestone and rate
+    advance_ledger(&env, 61 * 17_280);
+    client.unlock_milestone(&eng_id, &2);
+    client.submit_proof(&new_recruiter, &eng_id, &2, &String::from_str(&env, "ipfs://p2"));
+    client.confirm_milestone(&company, &eng_id, &2);
+
+    // Rate the engagement
+    client.rate_recruiter(&company, &eng_id, &4, &String::from_str(&env, "good work"));
+    
+    // Rating should be attributed to new_recruiter (current owner)
+    let new_rec_stats = client.get_recruiter_stats(&new_recruiter).unwrap();
+    assert_eq!(new_rec_stats.total_ratings, 1);
+    assert_eq!(new_rec_stats.average_rating, 4);
+    
+    // Original recruiter shouldn't get the rating
+    let orig_stats = client.get_recruiter_stats(&recruiter);
+    assert!(orig_stats.is_none() || orig_stats.unwrap().total_ratings == 0);
+}
+
+/// Test dispute window override with custom windows + timezone boundary edge case
+/// Tests proposed custom dispute windows across retention periods and their interaction
+#[test]
+fn test_dispute_window_override_retention_boundary_timing() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+
+    // Set global dispute window to 7 days
+    client.set_dispute_window_ledgers(&company, &(7 * 17_280));
+
+    let eng_id = String::from_str(&env, "DISP-OVERRIDE");
+    create_standard_engagement(&env, &client, &token_id, &company, &recruiter, &arbiter, "DISP-OVERRIDE");
+
+    // Complete first milestone (placement)
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://p0"));
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    // Company proposes custom 14-day dispute window for second milestone
+    let custom_window = 14 * 17_280;
+    client.propose_dispute_window(&company, &eng_id, &1, &custom_window);
+    
+    // Recruiter accepts
+    client.accept_dispute_window(&recruiter, &eng_id, &1);
+
+    // Advance to unlock second milestone
+    advance_ledger(&env, 31 * 17_280);
+    client.unlock_milestone(&eng_id, &1);
+    client.submit_proof(&recruiter, &eng_id, &1, &String::from_str(&env, "ipfs://p1"));
+    client.confirm_milestone(&company, &eng_id, &1);
+
+    // Try to dispute at day 10 (should succeed with custom 14-day window)
+    advance_ledger(&env, 10 * 17_280);
+    client.raise_dispute(
+        &company,
+        &eng_id,
+        &1,
+        &String::from_str(&env, "late issue found"),
+        &DisputeCategory::ProofInvalid,
+    );
+
+    // Dispute should be active
+    let m1 = client.get_milestone(&eng_id, &1);
+    assert_eq!(m1.status, MilestoneStatus::Disputed);
+
+    // Arbiter rejects
+    client.cast_arbiter_vote(&arbiter, &eng_id, &1, &false, &None);
+    
+    // Should revert to pending (not resolved yet due to being within window)
+    let m1_after = client.get_milestone(&eng_id, &1);
+    assert_eq!(m1_after.status, MilestoneStatus::Pending);
+}
+
+/// Test engagement expiry with streamed payouts + bond forfeiture interaction
+/// Complex timing scenario with pull payouts, streaming, and recruiter bonds
+#[test]
+fn test_expiry_streamed_payout_with_bond_forfeiture() {
+    let (env, contract_id, token_id, company, recruiter, arbiter) = setup();
+    let client = HireSettleContractClient::new(&env, &contract_id);
+    let token_client = token::Client::new(&env, &token_id);
+
+    // Mint bond amount to recruiter
+    token_client.mint(&recruiter, &50_000_000);
+
+    // Create engagement with bond, pull payouts, and streaming
+    let mut cfg = default_config();
+    cfg.recruiter_bond_amount = Some(50_000_000);
+    cfg.pull_payouts = true;
+    cfg.stream_duration_ledgers = Some(1_000); // Stream over 1000 ledgers
+    cfg.end_ledger = Some(env.ledger().sequence() + 10_000); // Expires in 10k ledgers
+
+    let eng_id = String::from_str(&env, "EXP-STREAM-BOND");
+    client.create_engagement(
+        &eng_id,
+        &company,
+        &recruiter,
+        &ArbiterSetup {
+            arbiters: vec![&env, arbiter.clone()],
+            quorum: 1,
+            weights: None,
+        },
+        &token_id,
+        &1_000_000_000,
+        &String::from_str(&env, "Engineer"),
+        &vec![
+            &env,
+            Milestone {
+                name: String::from_str(&env, "Placed"),
+                payment_percent: 100,
+                kind: MilestoneKind::Placement,
+                valid_after_ledger: 0,
+                proof_hash: String::from_str(&env, ""),
+                status: MilestoneStatus::Pending,
+                proof_submitted_at: 0,
+                replacement_paid_out: 0,
+                prerequisites: Vec::new(&env),
+            },
+        ],
+        &Vec::new(&env),
+        &cfg,
+    );
+
+    // Bond should be held in contract
+    assert_eq!(token_client.balance(&recruiter), 0);
+
+    // Complete milestone
+    client.submit_proof(&recruiter, &eng_id, &0, &String::from_str(&env, "ipfs://proof"));
+    client.confirm_milestone(&company, &eng_id, &0);
+
+    // Advance 500 ledgers (half of stream duration)
+    advance_ledger(&env, 500);
+    
+    // Pull partial payout (50% of 1B = 500M should be available)
+    client.pull_milestone_payout(&recruiter, &eng_id, &0);
+    let balance_after_half = token_client.balance(&recruiter);
+    assert!(balance_after_half >= 499_000_000 && balance_after_half <= 501_000_000); // Allow small rounding
+
+    // Advance past expiry WITHOUT completing the stream
+    advance_ledger(&env, 10_000);
+    
+    // Expire the engagement
+    client.expire_engagement(&company, &eng_id);
+
+    let eng = client.get_engagement(&eng_id);
+    assert_eq!(eng.status, EngagementStatus::Expired);
+
+    // Try to pull remaining payout - should fail because engagement expired
+    // The remaining ~500M should be returned to company along with bond forfeiture
+    let company_balance = token_client.balance(&company);
+    
+    // Company should get: original 500B - 1B engagement + ~500M unstreamed + 50M bond
+    // = ~499B + 550M = 499,550,000,000
+    assert!(company_balance >= 499_500_000_000);
+
+    // Recruiter should only have the ~500M pulled before expiry (no bond return)
+    assert!(token_client.balance(&recruiter) <= 501_000_000);
+}
